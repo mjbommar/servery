@@ -259,6 +259,34 @@ class ServerTestCase(unittest.TestCase):
         finally:
             outside.unlink(missing_ok=True)
 
+    def test_archive_targz(self):
+        conn = self._conn()
+        conn.request("GET", "/?archive=tar.gz")
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        self.assertIn("attachment", resp.getheader("Content-Disposition", ""))
+        self.assertEqual(resp.getheader("Transfer-Encoding"), "chunked")
+        import tarfile
+
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as tar:
+            names = tar.getnames()
+        self.assertTrue(any(name.endswith("hello.txt") for name in names))
+        self.assertTrue(any(name.endswith("sub/nested.txt") for name in names))
+
+    def test_archive_zip(self):
+        import zipfile
+
+        conn = self._conn()
+        conn.request("GET", "/?archive=zip")
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        with zipfile.ZipFile(io.BytesIO(body)) as zf:
+            self.assertTrue(any(name.endswith("hello.txt") for name in zf.namelist()))
+
     def test_request_logging_when_not_quiet(self):
         config = Config.create(self.dir, host="127.0.0.1", port=0, quiet=False)
         httpd = make_server(config)

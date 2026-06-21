@@ -230,7 +230,8 @@ footer {{ margin-top: 1rem; font-size: 0.8rem; opacity: 0.6; }}
 {rows}
 </tbody>
 </table>
-<footer>{count} item(s) · served by servery</footer>
+<footer>{count} item(s) · download <a href="?archive=tar.gz">tar.gz</a> · \
+<a href="?archive=zip">zip</a> · served by servery</footer>
 </body>
 </html>
 """

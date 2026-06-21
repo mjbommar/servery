@@ -99,6 +99,8 @@ known-first-party = ["servery"]
 # The upload module manipulates paths at the os level for filename sanitization
 # (basename) and atomic os.replace; pathlib does not improve safety here.
 "src/servery/upload.py" = ["PTH"]
+# The archive module walks the tree with os.walk + os.path for arcname building.
+"src/servery/archive.py" = ["PTH"]
 
 [tool.ty.environment]
 python-version = "3.13"

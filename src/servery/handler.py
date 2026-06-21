@@ -26,7 +26,7 @@ import urllib.parse
 from http import HTTPStatus
 from typing import TYPE_CHECKING, BinaryIO, cast
 
-from servery import __version__, listing, ranges, security, upload
+from servery import __version__, archive, listing, ranges, security, upload
 
 if TYPE_CHECKING:
     from _typeshed import SupportsRead, SupportsWrite
@@ -46,6 +46,42 @@ def _copy_n(source: SupportsRead[bytes], dest: SupportsWrite[bytes], count: int)
             break
         dest.write(chunk)
         remaining -= len(chunk)
+
+
+def _content_disposition(filename: str) -> str:
+    """Build a Content-Disposition with an ASCII fallback + UTF-8 (RFC 6266/8187)."""
+    ascii_name = filename.encode("ascii", "replace").decode("ascii").replace('"', "")
+    extended = urllib.parse.quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{extended}"
+
+
+class _ChunkedWriter:
+    """Wrap ``wfile`` to emit HTTP/1.1 chunked transfer-encoding."""
+
+    def __init__(self, wfile: SupportsWrite[bytes], buffer_size: int = 32 * 1024) -> None:
+        self._wfile = wfile
+        self._buffer = bytearray()
+        self._buffer_size = buffer_size
+
+    def write(self, data: bytes) -> int:
+        self._buffer += data
+        if len(self._buffer) >= self._buffer_size:
+            self._flush()
+        return len(data)
+
+    def flush(self) -> None:
+        # zipfile.close() calls fp.flush(); chunks are coalesced until close().
+        pass
+
+    def _flush(self) -> None:
+        if self._buffer:
+            chunk = bytes(self._buffer)
+            self._wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+            self._buffer.clear()
+
+    def close(self) -> None:
+        self._flush()
+        self._wfile.write(b"0\r\n\r\n")
 
 
 class ServeryHandler(http.server.SimpleHTTPRequestHandler):
@@ -92,6 +128,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return None
+        archive_format = urllib.parse.parse_qs(parts.query).get("archive", [""])[0]
+        if archive_format in {"tar.gz", "zip"}:
+            return self._serve_archive(path, archive_format)
         # Index lookup goes through the SAME containment check as everything else:
         # an index.html symlinked outside the root must not be served.
         for name in self.index_pages:
@@ -101,6 +140,28 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             ):
                 return self._serve_file(candidate)
         return self.list_directory(path)
+
+    def _serve_archive(self, path: str, archive_format: str) -> None:
+        base_name = os.path.basename(path.rstrip("/" + os.sep)) or "archive"
+        filename = f"{base_name}.{archive_format}"
+        content_type = "application/gzip" if archive_format == "tar.gz" else "application/zip"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", _content_disposition(filename))
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        writer = _ChunkedWriter(self.wfile)
+        try:
+            if archive_format == "tar.gz":
+                archive.stream_targz(path, base_name, writer)
+            else:
+                archive.stream_zip(path, base_name, writer)
+            writer.close()
+        except (BrokenPipeError, ConnectionResetError):  # pragma: no cover - client hung up
+            pass
+        return
 
     def do_GET(self) -> None:
         f = self.send_head()
