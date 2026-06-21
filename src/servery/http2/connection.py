@@ -47,10 +47,16 @@ class H2Connection:
         self.encoder = hpack.Encoder()
         self.reader = frames.FrameReader(max_frame_size=_OUR_MAX_FRAME)
         self.blocks: dict[int, bytearray] = {}
-        self.peer_window = frames.SETTINGS_DEFAULTS[frames.SettingsParameter.INITIAL_WINDOW_SIZE]
-        self.conn_window = self.peer_window or 65535
+        self.peer_window = (
+            frames.SETTINGS_DEFAULTS[frames.SettingsParameter.INITIAL_WINDOW_SIZE] or 0
+        )
+        self.conn_window = 65535  # connection-level window default (RFC 9113 §6.9.2)
+        self.stream_windows: dict[int, int] = {}
         self.rst_count = 0
         self.running = True
+
+    def _stream_window(self, stream_id: int) -> int:
+        return self.stream_windows.get(stream_id, self.peer_window)
 
     # -- main loop --------------------------------------------------------
 
@@ -102,12 +108,17 @@ class H2Connection:
         elif isinstance(frame, frames.WindowUpdateFrame):
             if frame.stream_id == 0:
                 self.conn_window += frame.window_size_increment
+            else:
+                self.stream_windows[frame.stream_id] = (
+                    self._stream_window(frame.stream_id) + frame.window_size_increment
+                )
         elif isinstance(frame, frames.PingFrame):
             if not frame.ack:
                 self.sock.sendall(frames.serialize(frames.ping_ack(frame.opaque_data)))
         elif isinstance(frame, frames.RstStreamFrame):
             self.rst_count += 1
             self.blocks.pop(frame.stream_id, None)
+            self.stream_windows.pop(frame.stream_id, None)
             if self.rst_count > _MAX_RST_STREAMS:
                 self._goaway(ErrorCode.ENHANCE_YOUR_CALM)
         elif isinstance(frame, frames.GoAwayFrame):
@@ -130,6 +141,10 @@ class H2Connection:
         stream_id = frame.stream_id
         block = self.blocks.get(stream_id)
         if block is None:
+            if isinstance(frame, frames.ContinuationFrame):
+                # CONTINUATION must immediately follow HEADERS (RFC 9113 §6.10).
+                self._goaway(ErrorCode.PROTOCOL_ERROR)
+                return
             if len(self.blocks) >= _MAX_CONCURRENT_STREAMS:
                 self._reset(stream_id, ErrorCode.REFUSED_STREAM)
                 return
@@ -149,8 +164,11 @@ class H2Connection:
     def _dispatch(self, stream_id: int, headers: _HeaderList) -> None:
         pseudo = {name: value for name, value in headers if name.startswith(b":")}
         regular = {name: value for name, value in headers if not name.startswith(b":")}
-        method = pseudo.get(b":method", b"").decode("latin-1")
-        path = pseudo.get(b":path", b"/").decode("latin-1")
+        if b":method" not in pseudo or b":path" not in pseudo:
+            self._reset(stream_id, ErrorCode.PROTOCOL_ERROR)  # malformed (RFC 9113 §8.3.1)
+            return
+        method = pseudo[b":method"].decode("latin-1")
+        path = pseudo[b":path"].decode("latin-1")
 
         if self.config.auth is not None and not self._authorized(regular):
             self._respond(stream_id, 401, [(b"www-authenticate", b'Basic realm="servery"')], b"")
@@ -204,7 +222,11 @@ class H2Connection:
     @staticmethod
     def _error(status: int) -> tuple[int, _HeaderList, bytes]:
         body = str(status).encode("ascii")
-        return status, [(b"content-type", b"text/plain"), (b"content-length", b"3")], body
+        headers: _HeaderList = [
+            (b"content-type", b"text/plain"),
+            (b"content-length", str(len(body)).encode("ascii")),
+        ]
+        return status, headers, body
 
     # -- response writing -------------------------------------------------
 
@@ -219,19 +241,22 @@ class H2Connection:
         )
         if body:
             self._write_data(stream_id, body)
+        self.stream_windows.pop(stream_id, None)
 
     def _write_data(self, stream_id: int, body: bytes) -> None:
         offset = 0
         total = len(body)
-        stream_window = self.peer_window or 0
+        self.stream_windows.setdefault(stream_id, self.peer_window)
         while offset < total:
             budget = min(
-                _OUR_MAX_FRAME, total - offset, max(stream_window, 0), max(self.conn_window, 0)
+                _OUR_MAX_FRAME,
+                total - offset,
+                max(self._stream_window(stream_id), 0),
+                max(self.conn_window, 0),
             )
             if budget <= 0:
-                if not self._pump_for_window():
-                    return
-                stream_window = self.peer_window or 0
+                if not self._pump_for_window(stream_id):
+                    return  # peer never opened the window (socket timeout/stall budget hit)
                 continue
             chunk = body[offset : offset + budget]
             last = offset + budget >= total
@@ -240,21 +265,28 @@ class H2Connection:
                 frames.build_header9(len(chunk), FrameType.DATA, flags, stream_id) + chunk
             )
             offset += budget
-            stream_window -= budget
+            self.stream_windows[stream_id] -= budget
             self.conn_window -= budget
 
-    def _pump_for_window(self) -> bool:
-        """Blocked on flow control: read frames until the connection window opens."""
-        data = self.rfile.read1(65536)
-        if not data:
-            return False
-        self.reader.feed(data)
-        for frame in self.reader:
-            if isinstance(frame, frames.WindowUpdateFrame) and frame.stream_id == 0:
-                self.conn_window += frame.window_size_increment
-            else:
+    def _pump_for_window(self, stream_id: int) -> bool:
+        """Blocked on flow control: read frames until this stream's window opens.
+
+        Honors both stream- and connection-level WINDOW_UPDATE. Bounded so a peer
+        that dribbles non-opening frames cannot pin the worker forever (the socket
+        timeout also applies to each read).
+        """
+        for _ in range(1000):
+            data = self.rfile.read1(65536)
+            if not data:
+                return False
+            self.reader.feed(data)
+            for frame in self.reader:
                 self._handle_frame(frame)
-        return self.conn_window > 0
+                if not self.running:
+                    return False
+            if self._stream_window(stream_id) > 0 and self.conn_window > 0:
+                return True
+        return False
 
     def _reset(self, stream_id: int, error: int) -> None:
         self.sock.sendall(frames.serialize(frames.RstStreamFrame(stream_id, Flag(0), error)))

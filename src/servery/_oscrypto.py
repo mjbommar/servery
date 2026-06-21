@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import threading
 from ctypes import c_char_p, c_int, c_void_p
 
 _GCM_SET_IVLEN = 0x9
@@ -36,29 +37,38 @@ class AuthenticationError(ValueError):
 
 
 _lib: ctypes.CDLL | None = None
+_lock = threading.Lock()
 
 
 def _libcrypto() -> ctypes.CDLL:
     global _lib
     if _lib is not None:
         return _lib
-    name = ctypes.util.find_library("crypto") or "libcrypto.so"
-    try:
-        lib = ctypes.CDLL(name)
-    except OSError as exc:  # pragma: no cover - platform without OpenSSL
-        raise CryptoUnavailableError(f"could not load libcrypto ({name})") from exc
-    lib.EVP_CIPHER_CTX_new.restype = c_void_p
-    lib.EVP_CIPHER_CTX_free.argtypes = [c_void_p]
-    lib.EVP_aes_256_gcm.restype = c_void_p
-    for name_ in ("EVP_EncryptInit_ex", "EVP_DecryptInit_ex"):
-        getattr(lib, name_).argtypes = [c_void_p, c_void_p, c_void_p, c_char_p, c_char_p]
-    for name_ in ("EVP_EncryptUpdate", "EVP_DecryptUpdate"):
-        getattr(lib, name_).argtypes = [c_void_p, c_char_p, c_void_p, c_char_p, c_int]
-    for name_ in ("EVP_EncryptFinal_ex", "EVP_DecryptFinal_ex"):
-        getattr(lib, name_).argtypes = [c_void_p, c_char_p, c_void_p]
-    lib.EVP_CIPHER_CTX_ctrl.argtypes = [c_void_p, c_int, c_int, c_void_p]
-    _lib = lib
-    return lib
+    with _lock:  # configure once even under free-threading
+        if _lib is not None:  # pragma: no cover - lost the init race
+            return _lib
+        name = ctypes.util.find_library("crypto") or "libcrypto.so"
+        try:
+            lib = ctypes.CDLL(name)
+        except OSError as exc:  # pragma: no cover - platform without OpenSSL
+            raise CryptoUnavailableError(f"could not load libcrypto ({name})") from exc
+        lib.EVP_CIPHER_CTX_new.restype = c_void_p
+        lib.EVP_CIPHER_CTX_free.argtypes = [c_void_p]
+        lib.EVP_aes_256_gcm.restype = c_void_p
+        for name_ in ("EVP_EncryptInit_ex", "EVP_DecryptInit_ex"):
+            getattr(lib, name_).argtypes = [c_void_p, c_void_p, c_void_p, c_char_p, c_char_p]
+        for name_ in ("EVP_EncryptUpdate", "EVP_DecryptUpdate"):
+            getattr(lib, name_).argtypes = [c_void_p, c_char_p, c_void_p, c_char_p, c_int]
+        for name_ in ("EVP_EncryptFinal_ex", "EVP_DecryptFinal_ex"):
+            getattr(lib, name_).argtypes = [c_void_p, c_char_p, c_void_p]
+        lib.EVP_CIPHER_CTX_ctrl.argtypes = [c_void_p, c_int, c_int, c_void_p]
+        _lib = lib
+        return lib
+
+
+def _check(result: int, what: str) -> None:
+    if result != 1:
+        raise CryptoUnavailableError(f"OpenSSL {what} failed")
 
 
 def available() -> bool:
@@ -78,24 +88,27 @@ def aes_256_gcm_encrypt(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes =
     if not ctx:
         raise CryptoUnavailableError("EVP_CIPHER_CTX_new failed")
     try:
-        if not lib.EVP_EncryptInit_ex(ctx, lib.EVP_aes_256_gcm(), None, None, None):
-            raise CryptoUnavailableError("EncryptInit failed")
-        lib.EVP_CIPHER_CTX_ctrl(ctx, _GCM_SET_IVLEN, len(nonce), None)
-        if not lib.EVP_EncryptInit_ex(ctx, None, None, key, nonce):
-            raise CryptoUnavailableError("EncryptInit (key/iv) failed")
+        _check(lib.EVP_EncryptInit_ex(ctx, lib.EVP_aes_256_gcm(), None, None, None), "EncryptInit")
+        _check(lib.EVP_CIPHER_CTX_ctrl(ctx, _GCM_SET_IVLEN, len(nonce), None), "set GCM IV len")
+        _check(lib.EVP_EncryptInit_ex(ctx, None, None, key, nonce), "EncryptInit key/iv")
         outlen = c_int()
         if aad:
-            lib.EVP_EncryptUpdate(ctx, None, ctypes.byref(outlen), aad, len(aad))
+            _check(
+                lib.EVP_EncryptUpdate(ctx, None, ctypes.byref(outlen), aad, len(aad)),
+                "EncryptUpdate aad",
+            )
         buffer = ctypes.create_string_buffer(len(plaintext) + 16)
-        if not lib.EVP_EncryptUpdate(ctx, buffer, ctypes.byref(outlen), plaintext, len(plaintext)):
-            raise CryptoUnavailableError("EncryptUpdate failed")
+        _check(
+            lib.EVP_EncryptUpdate(ctx, buffer, ctypes.byref(outlen), plaintext, len(plaintext)),
+            "EncryptUpdate",
+        )
         ciphertext = buffer.raw[: outlen.value]
         final = ctypes.create_string_buffer(16)
         finlen = c_int()
-        lib.EVP_EncryptFinal_ex(ctx, final, ctypes.byref(finlen))
+        _check(lib.EVP_EncryptFinal_ex(ctx, final, ctypes.byref(finlen)), "EncryptFinal")
         ciphertext += final.raw[: finlen.value]
         tag = ctypes.create_string_buffer(_TAG_LEN)
-        lib.EVP_CIPHER_CTX_ctrl(ctx, _GCM_GET_TAG, _TAG_LEN, tag)
+        _check(lib.EVP_CIPHER_CTX_ctrl(ctx, _GCM_GET_TAG, _TAG_LEN, tag), "get GCM tag")
         return ciphertext + tag.raw[:_TAG_LEN]
     finally:
         lib.EVP_CIPHER_CTX_free(ctx)
@@ -115,16 +128,23 @@ def aes_256_gcm_decrypt(
     if not ctx:
         raise CryptoUnavailableError("EVP_CIPHER_CTX_new failed")
     try:
-        lib.EVP_DecryptInit_ex(ctx, lib.EVP_aes_256_gcm(), None, None, None)
-        lib.EVP_CIPHER_CTX_ctrl(ctx, _GCM_SET_IVLEN, len(nonce), None)
-        lib.EVP_DecryptInit_ex(ctx, None, None, key, nonce)
+        _check(lib.EVP_DecryptInit_ex(ctx, lib.EVP_aes_256_gcm(), None, None, None), "DecryptInit")
+        _check(lib.EVP_CIPHER_CTX_ctrl(ctx, _GCM_SET_IVLEN, len(nonce), None), "set GCM IV len")
+        _check(lib.EVP_DecryptInit_ex(ctx, None, None, key, nonce), "DecryptInit key/iv")
         outlen = c_int()
         if aad:
-            lib.EVP_DecryptUpdate(ctx, None, ctypes.byref(outlen), aad, len(aad))
+            _check(
+                lib.EVP_DecryptUpdate(ctx, None, ctypes.byref(outlen), aad, len(aad)),
+                "DecryptUpdate aad",
+            )
         buffer = ctypes.create_string_buffer(len(ciphertext) + 16)
-        lib.EVP_DecryptUpdate(ctx, buffer, ctypes.byref(outlen), ciphertext, len(ciphertext))
+        _check(
+            lib.EVP_DecryptUpdate(ctx, buffer, ctypes.byref(outlen), ciphertext, len(ciphertext)),
+            "DecryptUpdate",
+        )
         plaintext = buffer.raw[: outlen.value]
-        lib.EVP_CIPHER_CTX_ctrl(ctx, _GCM_SET_TAG, _TAG_LEN, c_char_p(tag))
+        # SET_TAG must succeed before Final, or Final could pass without real verification.
+        _check(lib.EVP_CIPHER_CTX_ctrl(ctx, _GCM_SET_TAG, _TAG_LEN, c_char_p(tag)), "set GCM tag")
         final = ctypes.create_string_buffer(16)
         finlen = c_int()
         if lib.EVP_DecryptFinal_ex(ctx, final, ctypes.byref(finlen)) != 1:

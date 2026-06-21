@@ -149,6 +149,57 @@ class Http2ServerTest(_H2ServerCase):
         finally:
             sock.close()
 
+    def test_stream_flow_control(self):
+        # Advertise a tiny per-stream initial window; the body only flows if the
+        # server honors stream-level WINDOW_UPDATE replenishment.
+        sock = socket.create_connection((self.host, self.port), timeout=5)
+        try:
+            block = hpack.Encoder().encode(
+                [
+                    (b":method", b"GET"),
+                    (b":path", b"/big.bin"),
+                    (b":scheme", b"http"),
+                    (b":authority", b"x"),
+                ]
+            )
+            out = bytearray(frames.CONNECTION_PREFACE)
+            out += frames.serialize(
+                frames.SettingsFrame(
+                    0, Flag(0), ((frames.SettingsParameter.INITIAL_WINDOW_SIZE, 100),)
+                )
+            )
+            out += frames.build_header9(
+                len(block), FrameType.HEADERS, Flag.END_HEADERS | Flag.END_STREAM, 1
+            )
+            out += block
+            sock.sendall(bytes(out))
+
+            reader = frames.FrameReader()
+            decoder = hpack.Decoder()
+            body = bytearray()
+            status = None
+            done = False
+            while not done:
+                sock.sendall(frames.serialize(frames.WindowUpdateFrame(0, Flag(0), 65535)))
+                sock.sendall(frames.serialize(frames.WindowUpdateFrame(1, Flag(0), 65535)))
+                data = sock.recv(65536)
+                if not data:
+                    break
+                reader.feed(data)
+                for frame in reader:
+                    if isinstance(frame, frames.HeadersFrame) and frame.stream_id == 1:
+                        for name, value in decoder.decode(frame.header_block):
+                            if name == b":status":
+                                status = int(value)
+                        done = frame.end_stream
+                    elif isinstance(frame, frames.DataFrame) and frame.stream_id == 1:
+                        body += frame.data
+                        done = done or frame.end_stream
+            self.assertEqual(status, 200)
+            self.assertEqual(len(body), 20000)
+        finally:
+            sock.close()
+
     def test_window_update_and_rst_are_tolerated(self):
         sock = socket.create_connection((self.host, self.port), timeout=5)
         try:
