@@ -12,10 +12,11 @@ import os
 import socket
 import ssl
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
 from typing import Any
 
-from servery import auth
+from servery import _log, auth
 from servery.config import Config
 from servery.handler import ServeryHandler
 
@@ -30,9 +31,33 @@ class ServeryHTTPServer(ThreadingHTTPServer):
         self.config = config
         self.root_real = os.path.realpath(config.directory)
         self.credential = auth.parse(config.auth)
+        self._executor = (
+            ThreadPoolExecutor(max_workers=config.max_workers) if config.max_workers else None
+        )
         if ":" in config.host:
             self.address_family = socket.AF_INET6
         super().__init__((config.host, config.port), ServeryHandler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        # Default: a thread per connection (ThreadingMixIn). With --max-workers,
+        # bound concurrency through a shared pool instead.
+        if self._executor is not None:
+            self._executor.submit(self._process_request_pooled, request, client_address)
+        else:
+            super().process_request(request, client_address)
+
+    def _process_request_pooled(self, request: Any, client_address: Any) -> None:
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+
+    def server_close(self) -> None:
+        super().server_close()
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
 
     def server_bind(self) -> None:
         # Accept both IPv4 and IPv6 when bound to an IPv6 wildcard.
@@ -76,6 +101,8 @@ def server_url(server: ServeryHTTPServer) -> str:
 
 def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (CLI entry)
     """Run the server until interrupted. Blocks the calling thread."""
+    if not config.quiet:
+        _log.configure_stderr()
     with make_server(config) as httpd:
         if not config.quiet:
             print(f"servery: serving {config.directory} at {server_url(httpd)}", file=sys.stderr)

@@ -66,6 +66,25 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(config.cache_control, "max-age=60")
         self.assertEqual(servery.Config.create(".").cache_control, "no-cache")
 
+    def test_log_configure_stderr_idempotent(self):
+        from servery import _log
+
+        before = list(_log.logger.handlers)
+        _log.configure_stderr()
+        count = len(_log.logger.handlers)
+        _log.configure_stderr()  # idempotent: no second handler
+        self.assertEqual(len(_log.logger.handlers), count)
+        for handler in list(_log.logger.handlers):
+            if handler not in before:
+                _log.logger.removeHandler(handler)
+        _log._stderr_handler = None
+
+    def test_hardening_flags(self):
+        args = cli.build_parser().parse_args(["--timeout", "10", "--max-workers", "4"])
+        config = cli.config_from_args(args)
+        self.assertEqual(config.timeout, 10.0)
+        self.assertEqual(config.max_workers, 4)
+
     def test_startup_warnings(self):
         unsafe = servery.Config.create(".", host="0.0.0.0", auth="u:p")
         warnings = unsafe.startup_warnings()

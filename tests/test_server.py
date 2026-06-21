@@ -320,25 +320,32 @@ class ServerTestCase(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(body)) as zf:
             self.assertTrue(any(name.endswith("hello.txt") for name in zf.namelist()))
 
-    def test_request_logging_when_not_quiet(self):
-        config = Config.create(self.dir, host="127.0.0.1", port=0, quiet=False)
-        httpd = make_server(config)
-        host = str(httpd.server_address[0])
-        port = int(httpd.server_address[1])
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        thread.start()
-        buf = io.StringIO()
+    def test_request_logging_via_logging_module(self):
+        import logging
+
+        from servery import _log
+
+        class _Capture(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.messages: list[str] = []
+
+            def emit(self, record):
+                self.messages.append(record.getMessage())
+
+        handler = _Capture()
+        _log.logger.addHandler(handler)
+        previous = _log.logger.level
+        _log.logger.setLevel(logging.INFO)
         try:
-            with contextlib.redirect_stderr(buf):
-                conn = http.client.HTTPConnection(host, port, timeout=5)
-                conn.request("GET", "/hello.txt")
-                conn.getresponse().read()
-                conn.close()
+            conn = self._conn()
+            conn.request("GET", "/hello.txt")
+            conn.getresponse().read()
+            conn.close()
         finally:
-            httpd.shutdown()
-            httpd.server_close()
-            thread.join(timeout=5)
-        self.assertIn("GET", buf.getvalue())
+            _log.logger.removeHandler(handler)
+            _log.logger.setLevel(previous)
+        self.assertTrue(any("GET" in message for message in handler.messages))
 
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
     def test_symlink_escape_blocked(self):
@@ -506,6 +513,13 @@ class FeatureFlagTest(unittest.TestCase):
             resp, _ = self._get(host, port, "/")
             self.assertIsNone(resp.getheader("X-Content-Type-Options"))
             self.assertIsNone(resp.getheader("Content-Security-Policy"))
+
+    def test_bounded_concurrency_serves(self):
+        with _running(self._config(max_workers=2)) as (host, port):
+            for _ in range(3):
+                resp, body = self._get(host, port, "/f.txt")
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(body, b"data")
 
 
 class TlsServerTest(unittest.TestCase):

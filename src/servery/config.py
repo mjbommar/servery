@@ -36,6 +36,8 @@ class Config:
     spa: bool = False
     cache_max_age: int | None = None
     security_headers: bool = True
+    timeout: float = 30.0
+    max_workers: int | None = None
 
     @property
     def cache_control(self) -> str:
@@ -83,6 +85,8 @@ class Config:
         spa: bool = False,
         cache_max_age: int | None = None,
         security_headers: bool = True,
+        timeout: float = 30.0,
+        max_workers: int | None = None,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
         return cls(
@@ -102,4 +106,6 @@ class Config:
             spa=spa,
             cache_max_age=cache_max_age,
             security_headers=security_headers,
+            timeout=timeout,
+            max_workers=max_workers,
         )

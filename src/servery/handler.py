@@ -26,7 +26,7 @@ import urllib.parse
 from http import HTTPStatus
 from typing import TYPE_CHECKING, BinaryIO, cast
 
-from servery import __version__, archive, listing, ranges, security, upload
+from servery import __version__, _log, archive, listing, ranges, security, upload
 
 if TYPE_CHECKING:
     from _typeshed import SupportsRead, SupportsWrite
@@ -99,6 +99,11 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     @property
     def _server(self) -> ServeryHTTPServer:
         return cast("ServeryHTTPServer", self.server)
+
+    def setup(self) -> None:
+        super().setup()
+        # A default socket timeout bounds slow/idle clients (Slowloris).
+        self.connection.settimeout(self._server.config.timeout)
 
     # --- path safety -----------------------------------------------------
 
@@ -415,9 +420,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (matches base signature)
-        if not self._server.config.quiet:
-            super().log_message(format, *args)
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (base signature)
+        # Route through the logging module instead of writing to stderr directly.
+        _log.logger.info("%s %s", self.address_string(), format % args)
 
 
 def _make_etag(stat: os.stat_result) -> str:

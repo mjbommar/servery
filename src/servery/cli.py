@@ -104,6 +104,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable servery's default security response headers",
     )
     parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="per-connection socket timeout (default: 30)",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="bound concurrency to N worker threads (default: unbounded, thread-per-connection)",
+    )
+    parser.add_argument(
         "--tls-cert",
         metavar="PATH",
         help="TLS certificate chain (PEM); enables HTTPS",
@@ -145,6 +159,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         spa=args.spa,
         cache_max_age=args.cache_max_age,
         security_headers=args.security_headers,
+        timeout=args.timeout,
+        max_workers=args.max_workers,
     )
 
 
