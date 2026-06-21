@@ -206,6 +206,43 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertIn("hello.txt", body)
 
+    def test_index_html_is_served(self):
+        site = self.dir / "site"
+        site.mkdir()
+        (site / "index.html").write_text("<h1>home</h1>")
+        conn = self._conn()
+        conn.request("GET", "/site/")
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"home", body)
+        # Served via the file path now, so it gets an ETag.
+        self.assertTrue(resp.getheader("ETag"))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_index_symlink_escape_blocked(self):
+        outside = Path(self._tmp.name).parent / "servery_outside_index.html"
+        outside.write_text("TOPSECRET")
+        site = self.dir / "docs"
+        site.mkdir()
+        link = site / "index.html"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+            self.skipTest("symlink creation not permitted")
+        try:
+            conn = self._conn()
+            conn.request("GET", "/docs/")
+            resp = conn.getresponse()
+            body = resp.read()
+            conn.close()
+            self.assertEqual(resp.status, 200)
+            self.assertNotIn(b"TOPSECRET", body)
+            self.assertIn(b"Index of", body)  # fell back to a listing, did not leak
+        finally:
+            outside.unlink(missing_ok=True)
+
     def test_request_logging_when_not_quiet(self):
         config = Config.create(self.dir, host="127.0.0.1", port=0, quiet=False)
         httpd = make_server(config)

@@ -13,6 +13,11 @@ import dataclasses
 _PREFIX = "bytes="
 
 
+def _digits(text: str) -> bool:
+    """True for a non-empty run of ASCII digits (int() would accept more)."""
+    return bool(text) and all(char in "0123456789" for char in text)
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class ByteRange:
     """A satisfiable byte range: ``length`` bytes starting at ``start``."""
@@ -53,28 +58,30 @@ def parse(header: str | None, size: int) -> ByteRange | _Unsatisfiable | None:
         return None
 
     start_text, _, end_text = spec.partition("-")
-    try:
-        if start_text == "":
-            # Suffix range: "-N" → final N bytes.
-            suffix = int(end_text)
-            if suffix <= 0:
-                return None
-            if suffix >= size:
-                return ByteRange(0, size)
-            return ByteRange(size - suffix, suffix)
 
-        start = int(start_text)
-        if start < 0:
+    if start_text == "":
+        # Suffix range: "-N" → final N bytes.
+        if not _digits(end_text):
             return None
-        if start >= size:
-            return UNSATISFIABLE
-        if end_text == "":
-            end = size - 1
-        else:
-            end = int(end_text)
-            if end < start:
-                return None
-            end = min(end, size - 1)
-        return ByteRange(start, end - start + 1)
-    except ValueError:
+        suffix = int(end_text)
+        if suffix <= 0:
+            return None
+        if suffix >= size:
+            return ByteRange(0, size)
+        return ByteRange(size - suffix, suffix)
+
+    if not _digits(start_text):
         return None
+    start = int(start_text)
+    if start >= size:
+        return UNSATISFIABLE
+    if end_text == "":
+        end = size - 1
+    else:
+        if not _digits(end_text):
+            return None
+        end = int(end_text)
+        if end < start:
+            return None
+        end = min(end, size - 1)
+    return ByteRange(start, end - start + 1)

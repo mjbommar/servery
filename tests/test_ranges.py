@@ -51,6 +51,11 @@ class ParseTest(unittest.TestCase):
         self.assertIsNone(ranges.parse("bytes=-0", 100))
         self.assertIsNone(ranges.parse("bytes=", 100))
 
+    def test_rejects_whitespace_and_non_ascii_digits(self):
+        self.assertIsNone(ranges.parse("bytes=0- 1", 100))
+        self.assertIsNone(ranges.parse("bytes= 0 - 1 ", 100))
+        self.assertIsNone(ranges.parse("bytes=0-١", 100))  # noqa: RUF001 (Arabic-Indic digit one)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -53,6 +53,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
     server_version = f"servery/{__version__}"
+    index_pages = ("index.html", "index.htm")
     _body_remaining: int | None = None
 
     @property
@@ -77,9 +78,29 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             return None
         path = self.translate_path(self.path)
         if os.path.isdir(path):
-            # Directory redirect / index lookup / listing stays in the base.
-            return super().send_head()
+            return self._serve_directory(path)
         return self._serve_file(path)
+
+    def _serve_directory(self, path: str) -> BinaryIO | None:
+        # Redirect to add the trailing slash so relative links resolve.
+        parts = urllib.parse.urlsplit(self.path)
+        if not parts.path.endswith(("/", "%2f", "%2F")):
+            self.send_response(HTTPStatus.MOVED_PERMANENTLY)
+            self.send_header(
+                "Location", urllib.parse.urlunsplit(parts._replace(path=parts.path + "/"))
+            )
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+        # Index lookup goes through the SAME containment check as everything else:
+        # an index.html symlinked outside the root must not be served.
+        for name in self.index_pages:
+            candidate = os.path.join(path, name)
+            if os.path.isfile(candidate) and security.is_contained(
+                self._server.root_real, candidate
+            ):
+                return self._serve_file(candidate)
+        return self.list_directory(path)
 
     def do_GET(self) -> None:
         f = self.send_head()
@@ -154,13 +175,20 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     def _send_body(self, source: BinaryIO) -> None:
         count = self._body_remaining
         sock = self.connection
-        # Zero-copy where we can: a plain (non-TLS) socket and a real file.
+        # Zero-copy fast path for plain sockets. (socket.sendfile transparently
+        # handles non-regular sources like BytesIO via its own send loop; TLS
+        # sockets cannot sendfile, so they take the userspace path below.)
         if not isinstance(sock, ssl.SSLSocket):
+            before = source.tell()
             try:
-                sock.sendfile(source, source.tell(), count)
+                sock.sendfile(source, before, count)
                 return
             except (OSError, ValueError):
-                pass  # not a regular file (e.g. BytesIO listing) — copy in userspace
+                # If bytes were already sent the stream is broken — re-raise
+                # rather than resend (which would overrun a range). Only retry in
+                # userspace when nothing went out.
+                if source.tell() != before:
+                    raise
         if count is None:
             shutil.copyfileobj(source, self.wfile)
         else:
@@ -265,9 +293,10 @@ def _unweak(tag: str) -> str:
 def _not_modified_since(header: str, mtime: float) -> bool:
     try:
         since = email.utils.parsedate_to_datetime(header)
-    except (TypeError, ValueError, IndexError, OverflowError):
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=datetime.UTC)
+        # A corrupt/extreme on-disk mtime must not crash the conditional path.
+        last = datetime.datetime.fromtimestamp(mtime, datetime.UTC).replace(microsecond=0)
+    except (TypeError, ValueError, IndexError, OverflowError, OSError):
         return False
-    if since.tzinfo is None:
-        since = since.replace(tzinfo=datetime.UTC)
-    last = datetime.datetime.fromtimestamp(mtime, datetime.UTC).replace(microsecond=0)
     return last <= since

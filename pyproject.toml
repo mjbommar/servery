@@ -95,7 +95,7 @@ known-first-party = ["servery"]
 # The handler deliberately works at the os.path level: its security model uses an
 # empty-string sentinel for escaped paths, and Path("") resolves to the cwd. It
 # also mirrors the stdlib send_head "close-on-error then re-raise" idiom.
-"src/servery/handler.py" = ["PTH112", "PTH123", "TRY300"]
+"src/servery/handler.py" = ["PTH112", "PTH113", "PTH118", "PTH123", "TRY300"]
 
 [tool.ty.environment]
 python-version = "3.13"

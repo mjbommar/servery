@@ -21,6 +21,18 @@ import hmac
 _HASH_ALGORITHMS = ("sha256", "sha512")
 
 
+def _ct_equal(expected: str, given: str) -> bool:
+    """Length-independent constant-time string comparison.
+
+    ``hmac.compare_digest`` short-circuits on differing lengths, leaking length
+    via timing; hashing both sides to a fixed width removes that signal.
+    """
+    return hmac.compare_digest(
+        hashlib.sha256(expected.encode("utf-8")).digest(),
+        hashlib.sha256(given.encode("utf-8")).digest(),
+    )
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class Credential:
     """A single username + password verifier."""
@@ -30,15 +42,13 @@ class Credential:
     algorithm: str  # "plain", "sha256", or "sha512"
 
     def verify(self, username: str, password: str) -> bool:
-        """Constant-time check of a username/password pair."""
-        user_ok = hmac.compare_digest(self.username.encode("utf-8"), username.encode("utf-8"))
+        """Constant-time check of a username/password pair (length-independent)."""
+        user_ok = _ct_equal(self.username, username)
         if self.algorithm == "plain":
-            pass_ok = hmac.compare_digest(self.secret.encode("utf-8"), password.encode("utf-8"))
+            pass_ok = _ct_equal(self.secret, password)
         else:
             digest = hashlib.new(self.algorithm, password.encode("utf-8")).hexdigest()
-            pass_ok = hmac.compare_digest(
-                self.secret.lower().encode("ascii"), digest.encode("ascii")
-            )
+            pass_ok = _ct_equal(self.secret.lower(), digest)
         return bool(user_ok & pass_ok)
 
     def check_header(self, header: str) -> bool:
