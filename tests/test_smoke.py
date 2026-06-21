@@ -54,6 +54,13 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("openssl", out.getvalue())
 
+    def test_startup_warnings(self):
+        unsafe = servery.Config.create(".", host="0.0.0.0", auth="u:p")
+        warnings = unsafe.startup_warnings()
+        self.assertTrue(any("network" in w for w in warnings))
+        self.assertTrue(any("cleartext" in w for w in warnings))
+        self.assertEqual(servery.Config.create(".").startup_warnings(), [])
+
     def test_tls_config_and_password_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             pw = Path(tmp) / "pw.txt"

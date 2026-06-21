@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from servery.server import ServeryHTTPServer
 
 _COPY_BUFSIZE = 64 * 1024
+_WWW_AUTHENTICATE = 'Basic realm="servery", charset="UTF-8"'
 
 
 def _copy_n(source: SupportsRead[bytes], dest: SupportsWrite[bytes], count: int) -> None:
@@ -72,6 +73,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
     def send_head(self) -> BinaryIO | None:
         self._body_remaining = None
+        if not self._authorized():
+            return None
         path = self.translate_path(self.path)
         if os.path.isdir(path):
             # Directory redirect / index lookup / listing stays in the base.
@@ -162,6 +165,21 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             shutil.copyfileobj(source, self.wfile)
         else:
             _copy_n(source, self.wfile, count)
+
+    # --- authentication --------------------------------------------------
+
+    def _authorized(self) -> bool:
+        credential = self._server.credential
+        if credential is None:
+            return True
+        header = self.headers.get("Authorization")
+        if header is not None and credential.check_header(header):
+            return True
+        self.send_response(HTTPStatus.UNAUTHORIZED)
+        self.send_header("WWW-Authenticate", _WWW_AUTHENTICATE)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
 
     # --- conditional requests -------------------------------------------
 

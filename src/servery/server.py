@@ -15,6 +15,7 @@ import sys
 from http.server import ThreadingHTTPServer
 from typing import Any
 
+from servery import auth
 from servery.config import Config
 from servery.handler import ServeryHandler
 
@@ -28,6 +29,7 @@ class ServeryHTTPServer(ThreadingHTTPServer):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.root_real = os.path.realpath(config.directory)
+        self.credential = auth.parse(config.auth)
         if ":" in config.host:
             self.address_family = socket.AF_INET6
         super().__init__((config.host, config.port), ServeryHandler)
@@ -77,10 +79,7 @@ def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (C
     with make_server(config) as httpd:
         if not config.quiet:
             print(f"servery: serving {config.directory} at {server_url(httpd)}", file=sys.stderr)
-            if not config.is_loopback_bind:
-                print(
-                    f"servery: WARNING bound to {config.host} — reachable from the network",
-                    file=sys.stderr,
-                )
+            for warning in config.startup_warnings():
+                print(f"servery: WARNING {warning}", file=sys.stderr)
         with contextlib.suppress(KeyboardInterrupt):
             httpd.serve_forever()

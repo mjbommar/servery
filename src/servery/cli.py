@@ -58,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="suppress request logging and the startup banner",
     )
     parser.add_argument(
+        "--auth",
+        metavar="USER:PASS",
+        help="require HTTP Basic auth (USER:PASS, or USER:sha256:HEX / USER:sha512:HEX)",
+    )
+    parser.add_argument(
         "--tls-cert",
         metavar="PATH",
         help="TLS certificate chain (PEM); enables HTTPS",
@@ -91,6 +96,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         tls_cert=args.tls_cert,
         tls_key=args.tls_key,
         tls_password=tls_password,
+        auth=args.auth,
     )
 
 

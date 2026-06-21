@@ -28,6 +28,7 @@ class Config:
     tls_cert: str | None = None
     tls_key: str | None = None
     tls_password: str | None = None
+    auth: str | None = None
 
     @property
     def is_loopback_bind(self) -> bool:
@@ -38,6 +39,15 @@ class Config:
     def uses_tls(self) -> bool:
         """True when HTTPS is configured (a certificate was provided)."""
         return self.tls_cert is not None
+
+    def startup_warnings(self) -> list[str]:
+        """Return human-readable warnings about an unsafe configuration."""
+        warnings: list[str] = []
+        if not self.is_loopback_bind:
+            warnings.append(f"bound to {self.host} — reachable from the network")
+        if self.auth is not None and not self.uses_tls:
+            warnings.append("Basic auth is enabled without TLS — credentials travel in cleartext")
+        return warnings
 
     @classmethod
     def create(
@@ -51,6 +61,7 @@ class Config:
         tls_cert: str | None = None,
         tls_key: str | None = None,
         tls_password: str | None = None,
+        auth: str | None = None,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
         return cls(
@@ -62,4 +73,5 @@ class Config:
             tls_cert=tls_cert,
             tls_key=tls_key,
             tls_password=tls_password,
+            auth=auth,
         )

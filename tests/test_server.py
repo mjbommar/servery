@@ -247,6 +247,52 @@ class ServerTestCase(unittest.TestCase):
             outside.unlink(missing_ok=True)
 
 
+class AuthServerTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        directory = Path(self._tmp.name)
+        (directory / "hello.txt").write_text("private")
+        config = Config.create(directory, host="127.0.0.1", port=0, quiet=True, auth="alice:secret")
+        self.httpd = make_server(config)
+        self.host = str(self.httpd.server_address[0])
+        self.port = int(self.httpd.server_address[1])
+        self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self._thread.join(timeout=5)
+        self._tmp.cleanup()
+
+    def _request(self, headers: dict[str, str]) -> http.client.HTTPResponse:
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        conn.request("GET", "/hello.txt", headers=headers)
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        return resp
+
+    @staticmethod
+    def _basic(username: str, password: str) -> str:
+        import base64
+
+        return "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+
+    def test_401_without_credentials(self):
+        resp = self._request({})
+        self.assertEqual(resp.status, 401)
+        self.assertIn("Basic", resp.getheader("WWW-Authenticate", ""))
+
+    def test_200_with_valid_credentials(self):
+        resp = self._request({"Authorization": self._basic("alice", "secret")})
+        self.assertEqual(resp.status, 200)
+
+    def test_401_with_wrong_credentials(self):
+        resp = self._request({"Authorization": self._basic("alice", "nope")})
+        self.assertEqual(resp.status, 401)
+
+
 class TlsServerTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
