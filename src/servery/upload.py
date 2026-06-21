@@ -17,6 +17,7 @@ import contextlib
 import dataclasses
 import os
 import tempfile
+import urllib.parse
 from typing import Protocol
 
 _CHUNK = 64 * 1024
@@ -134,12 +135,37 @@ def _read_headers(stream: _Stream) -> dict[bytes, bytes]:
 
 
 def _disposition_filename(headers: dict[bytes, bytes]) -> str | None:
-    disposition = headers.get(b"content-disposition", b"").decode("latin-1", "replace")
+    # multipart/form-data bodies (and thus part headers) are UTF-8 per RFC 7578
+    # §5.1.1 — what browsers send for a non-ASCII plain filename.
+    disposition = headers.get(b"content-disposition", b"").decode("utf-8", "replace")
+    plain: str | None = None
+    extended: str | None = None
     for parameter in disposition.split(";"):
         parameter = parameter.strip()
-        if parameter.startswith("filename="):
-            return parameter[len("filename=") :].strip().strip('"')
-    return None
+        if parameter.startswith("filename*="):
+            extended = parameter[len("filename*=") :].strip()
+        elif parameter.startswith("filename="):
+            plain = parameter[len("filename=") :].strip().strip('"')
+    # RFC 6266 §4.3: the extended (UTF-8) form is preferred when both are present.
+    if extended is not None:
+        decoded = _decode_ext_value(extended)
+        if decoded is not None:
+            return decoded
+    return plain
+
+
+def _decode_ext_value(value: str) -> str | None:
+    """Decode an RFC 5987/8187 ext-value: ``charset'lang'pct-encoded``."""
+    parts = value.split("'", 2)
+    if len(parts) != 3:
+        return None
+    charset, _language, encoded = parts
+    if charset.lower() not in {"utf-8", "iso-8859-1"}:  # RFC 8187 §3.2.1
+        return None
+    try:
+        return urllib.parse.unquote(encoded, encoding=charset, errors="strict")
+    except (LookupError, ValueError):  # undecodable bytes
+        return None
 
 
 def _safe_name(filename: str) -> str | None:
@@ -179,7 +205,10 @@ def save(
     """Parse a multipart body and write its file parts into ``dest_dir``."""
     stream = _Stream(reader)
     delimiter = b"--" + boundary
-    if stream.readline().rstrip(b"\r\n") != delimiter:
+    first = stream.readline().rstrip(b"\r\n")
+    if first == delimiter + b"--":
+        return []  # a zero-part body (just the close-delimiter) is valid and empty
+    if first != delimiter:
         raise UploadError("missing initial multipart boundary")
 
     saved: list[SavedFile] = []
