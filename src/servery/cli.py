@@ -63,6 +63,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="require HTTP Basic auth (USER:PASS, or USER:sha256:HEX / USER:sha512:HEX)",
     )
     parser.add_argument(
+        "--upload",
+        action="store_true",
+        help="enable file upload (POST multipart/form-data into the served tree)",
+    )
+    parser.add_argument(
+        "--max-upload-size",
+        type=int,
+        default=100 * 1024 * 1024,
+        metavar="BYTES",
+        help="maximum accepted upload size in bytes (default: 100 MiB)",
+    )
+    parser.add_argument(
+        "--allow-overwrite",
+        action="store_true",
+        help="allow uploads to overwrite existing files",
+    )
+    parser.add_argument(
         "--tls-cert",
         metavar="PATH",
         help="TLS certificate chain (PEM); enables HTTPS",
@@ -97,6 +114,9 @@ def config_from_args(args: argparse.Namespace) -> Config:
         tls_key=args.tls_key,
         tls_password=tls_password,
         auth=args.auth,
+        upload=args.upload,
+        max_upload_size=args.max_upload_size,
+        allow_overwrite=args.allow_overwrite,
     )
 
 

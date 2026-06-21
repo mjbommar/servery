@@ -145,6 +145,13 @@ def _row(entry: EntryInfo) -> str:
     )
 
 
+_UPLOAD_FORM = (
+    '<form class="upload" method="post" enctype="multipart/form-data">'
+    '<input type="file" name="file" multiple required>'
+    '<button type="submit">Upload</button></form>'
+)
+
+
 def render(
     fs_dir: str,
     display_path: str,
@@ -153,6 +160,7 @@ def render(
     sort: str = "name",
     order: str = "asc",
     query: str = "",
+    upload: bool = False,
 ) -> bytes:
     """Render a directory listing page as UTF-8 bytes.
 
@@ -172,6 +180,7 @@ def render(
 
     document = _TEMPLATE.format(
         heading=html.escape(display_path),
+        upload_form=_UPLOAD_FORM if upload else "",
         search_value=html.escape(query, quote=True),
         name_header=_sort_link("Name", "N", sort, order, query),
         size_header=_sort_link("Size", "S", sort, order, query),
@@ -210,6 +219,7 @@ footer {{ margin-top: 1rem; font-size: 0.8rem; opacity: 0.6; }}
 </head>
 <body>
 <h1>Index of {heading}</h1>
+{upload_form}
 <form class="search" method="get">
 <input type="search" name="q" value="{search_value}" placeholder="Filter…" aria-label="Filter">
 </form>

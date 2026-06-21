@@ -26,7 +26,7 @@ import urllib.parse
 from http import HTTPStatus
 from typing import TYPE_CHECKING, BinaryIO, cast
 
-from servery import __version__, listing, ranges, security
+from servery import __version__, listing, ranges, security, upload
 
 if TYPE_CHECKING:
     from _typeshed import SupportsRead, SupportsWrite
@@ -110,6 +110,59 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self._send_body(f)
         finally:
             f.close()
+
+    # --- upload (v0.6) ---------------------------------------------------
+
+    def do_POST(self) -> None:
+        if not self._authorized():
+            return
+        config = self._server.config
+        if not config.upload:
+            self.send_error(HTTPStatus.NOT_FOUND, "Upload is not enabled")
+            return
+        dest_dir = self.translate_path(self.path)
+        if not os.path.isdir(dest_dir) or not security.is_contained(
+            self._server.root_real, dest_dir
+        ):
+            self.send_error(HTTPStatus.NOT_FOUND, "Upload directory not found")
+            return
+
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.startswith("multipart/form-data"):
+            self.send_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Expected multipart/form-data")
+            return
+        boundary = upload.extract_boundary(content_type)
+        if boundary is None:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Missing multipart boundary")
+            return
+
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            self.send_error(HTTPStatus.LENGTH_REQUIRED, "Content-Length required for upload")
+            return
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
+            return
+        if length > config.max_upload_size:
+            self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Upload exceeds the size limit")
+            return
+
+        reader = upload.BoundedReader(self.rfile, length)
+        try:
+            upload.save(reader, boundary, dest_dir, allow_overwrite=config.allow_overwrite)
+        except upload.UploadConflictError:
+            self.send_error(HTTPStatus.CONFLICT, "A file with that name already exists")
+            return
+        except upload.UploadError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Malformed upload")
+            return
+        reader.drain()  # keep the connection aligned for keep-alive
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", self.path)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _serve_file(self, path: str) -> BinaryIO | None:
         try:
@@ -247,6 +300,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 sort=sort,
                 order=order,
                 query=query,
+                upload=self._server.config.upload,
             )
         except OSError:
             self.send_error(HTTPStatus.NOT_FOUND, "No permission to list directory")

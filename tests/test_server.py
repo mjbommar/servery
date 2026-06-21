@@ -17,6 +17,14 @@ from servery.config import Config
 from servery.server import make_server, server_url
 
 
+def _multipart_body(boundary: str, filename: str, content: bytes) -> bytes:
+    header = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n\r\n'
+    ).encode()
+    return header + content + f"\r\n--{boundary}--\r\n".encode()
+
+
 class ServerTestCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -76,6 +84,14 @@ class ServerTestCase(unittest.TestCase):
         conn.close()
         self.assertEqual(resp.status, 404)
         self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
+
+    def test_post_rejected_when_upload_disabled(self):
+        conn = self._conn()
+        conn.request("POST", "/", b"--B--\r\n", {"Content-Type": "multipart/form-data; boundary=B"})
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 404)
 
     def test_http_1_1_and_keep_alive(self):
         conn = self._conn()
@@ -328,6 +344,55 @@ class AuthServerTest(unittest.TestCase):
     def test_401_with_wrong_credentials(self):
         resp = self._request({"Authorization": self._basic("alice", "nope")})
         self.assertEqual(resp.status, 401)
+
+
+class UploadServerTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        config = Config.create(
+            self.dir, host="127.0.0.1", port=0, quiet=True, upload=True, max_upload_size=1024
+        )
+        self.httpd = make_server(config)
+        self.host = str(self.httpd.server_address[0])
+        self.port = int(self.httpd.server_address[1])
+        self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self._thread.join(timeout=5)
+        self._tmp.cleanup()
+
+    def _post(self, body: bytes, content_type: str = "multipart/form-data; boundary=B"):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        conn.request("POST", "/", body, {"Content-Type": content_type})
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        return resp
+
+    def test_upload_creates_file(self):
+        resp = self._post(_multipart_body("B", "up.txt", b"payload"))
+        self.assertEqual(resp.status, 303)
+        self.assertEqual((self.dir / "up.txt").read_bytes(), b"payload")
+
+    def test_listing_shows_upload_form(self):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        conn.request("GET", "/")
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8")
+        conn.close()
+        self.assertIn('type="file"', body)
+
+    def test_upload_too_large_returns_413(self):
+        resp = self._post(_multipart_body("B", "big.txt", b"x" * 2000))
+        self.assertEqual(resp.status, 413)
+
+    def test_wrong_content_type_returns_415(self):
+        resp = self._post(b"plain body", content_type="text/plain")
+        self.assertEqual(resp.status, 415)
 
 
 class TlsServerTest(unittest.TestCase):

@@ -29,6 +29,9 @@ class Config:
     tls_key: str | None = None
     tls_password: str | None = None
     auth: str | None = None
+    upload: bool = False
+    max_upload_size: int = 100 * 1024 * 1024
+    allow_overwrite: bool = False
 
     @property
     def is_loopback_bind(self) -> bool:
@@ -62,6 +65,9 @@ class Config:
         tls_key: str | None = None,
         tls_password: str | None = None,
         auth: str | None = None,
+        upload: bool = False,
+        max_upload_size: int = 100 * 1024 * 1024,
+        allow_overwrite: bool = False,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
         return cls(
@@ -74,4 +80,7 @@ class Config:
             tls_key=tls_key,
             tls_password=tls_password,
             auth=auth,
+            upload=upload,
+            max_upload_size=max_upload_size,
+            allow_overwrite=allow_overwrite,
         )
