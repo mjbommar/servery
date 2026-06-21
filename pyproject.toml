@@ -90,6 +90,8 @@ known-first-party = ["servery"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PERF"]
+# The listing module embeds an HTML/CSS template; its lines are data, not code.
+"src/servery/listing.py" = ["E501"]
 
 [tool.ty.environment]
 python-version = "3.13"

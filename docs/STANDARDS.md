@@ -38,15 +38,31 @@ status-line (9112 §4, §2.3). This is a **deliberate override of the stdlib
 default** (`http.server` sets `protocol_version = "HTTP/1.0"`, line 710), which
 turns on persistent connections and enables the framing guarantees below.
 
-### 1.2 What is explicitly OUT, and why (zero-dep justification)
+### 1.2 What the CORE does not speak — and the optional tiers that do
 
-**HTTP/2 (RFC 9113) — OUT.** Not feasible zero-dep:
+> **Reframed (see `docs/TRANSPORTS.md`).** HTTP/2 and HTTP/3 are **not part of the
+> zero-dependency CORE** — the core is HTTP/1.1, and its TLS ALPN advertises only
+> `http/1.1`. They are **no longer flatly out**, however: they are optional, opt-in
+> **transport tiers** that never burden the core. HTTP/2 is in fact **feasible in
+> pure stdlib** (the preferred tier) — TLS/ALPN is already `ssl`, and HPACK +
+> binary framing are pure data + code with *no extra crypto*; the catch is size
+> (~2–4k LOC) and a real DoS-mitigation burden, not a dependency. HTTP/3 genuinely
+> cannot be pure stdlib (QUIC needs AEAD ciphers the stdlib lacks) and is offered
+> via the `aioquic` extra or an experimental `ctypes`→OpenSSL ≥ 3.5 native backend.
+> The per-tier mechanism, crypto-sourcing policy, install matrix, and CVE
+> mitigations are the subject of `docs/TRANSPORTS.md`. The technical facts below
+> remain accurate and explain *why the core stays HTTP/1.1*.
+
+**HTTP/2 (RFC 9113) — not in the core (optional Tier 1; pure-stdlib-feasible).**
+Why it is not core, and what an h2 tier must build:
 
 - **HPACK is mandatory and absent from the stdlib.** 9113 §4.3 / §4.3.1 require
   stateful HPACK (RFC 7541) encoder/decoder contexts; a decode failure MUST be a
   `COMPRESSION_ERROR` connection error. The Python standard library ships **no
-  `hpack` module** — headers cannot even be parsed without a third-party or
-  from-scratch HPACK implementation.
+  `hpack` module** — so the h2 tier must **hand-roll HPACK** (feasible: it is pure
+  data + code, incl. the static Huffman table, *no crypto*) **or** delegate to the
+  `h2`/`hpack` libraries via the `servery[http2]` extra. Either way it is not
+  reachable by the core as-is.
 - **Binary framing layer.** 9113 §4 / §4.1 / §6 replace the text protocol
   `http.server` parses with a binary framing layer (~10 frame types: HEADERS,
   DATA, SETTINGS, WINDOW_UPDATE, RST_STREAM, GOAWAY, CONTINUATION, …). None exists
@@ -59,21 +75,34 @@ turns on persistent connections and enables the framing guarantees below.
   preface; §3.2 defines ALPN id `h2`. Strict TLS rules (9113 §9.2 / §9.2.2 +
   Appendix A: TLS 1.2+, cipher blocklist, SNI) add further machinery.
 
-**HTTP/3 (RFC 9114) — OUT.** Even further from stdlib:
+**HTTP/3 (RFC 9114) — not in the core (optional Tier 2/3; not pure-stdlib).**
+Genuinely impossible in pure stdlib, which is why it is a dependency-bearing or
+system-gated tier rather than core:
 
 - **Runs over QUIC.** 9114 §1.2 / §6 map HTTP semantics onto QUIC (RFC 9000); the
   stdlib has **no QUIC transport**.
 - **QPACK, not HPACK.** 9114 §2 replaces HPACK with QPACK (RFC 9204), also absent
   from the stdlib. ALPN id is `h3`.
+- **Needs AEAD crypto the stdlib does not have.** QUIC packet protection (RFC
+  9001) requires AES-128-GCM / ChaCha20-Poly1305 + HKDF, and a TLS-1.3 handshake
+  driven as bytes inside QUIC frames — the stdlib ships **no symmetric ciphers**
+  and `ssl` cannot drive a QUIC handshake. The supported tier uses the `aioquic`
+  extra (`servery[http3]`); an **experimental** zero-PyPI backend binds system
+  OpenSSL **≥ 3.5** (QUIC server + QUIC-TLS) via `ctypes` (`docs/TRANSPORTS.md`).
 
-**ALPN consequence (normative for servery's TLS path):** because servery cannot
-satisfy `h2` (9113 §3.2) or `h3` (9114), its TLS `SSLContext` MUST advertise
-**only `http/1.1`** via ALPN — which is exactly what `http.server.HTTPSServer`
-already does (`set_alpn_protocols(["http/1.1"])`). servery MUST NOT advertise an
-ALPN protocol it cannot speak. → **NFR-STD-01**.
+**ALPN consequence (normative for servery's TLS path):** the **core** does not
+speak `h2` (9113 §3.2) or `h3` (9114), so the core's TLS `SSLContext` MUST
+advertise **only `http/1.1`** via ALPN — which is exactly what
+`http.server.HTTPSServer` already does (`set_alpn_protocols(["http/1.1"])`).
+servery MUST NOT advertise (via ALPN or `Alt-Svc`) a protocol it cannot speak in
+the current build: when the optional HTTP/2 tier is enabled it advertises `h2`
+(falling back to `http/1.1`), and when an HTTP/3 tier is enabled it advertises
+`h3` via `Alt-Svc` — otherwise neither is advertised. → **NFR-STD-01**.
 
-> Recorded so it is not re-proposed: HTTP/2/3 support fails the zero-dependency
-> gate (`PRINCIPLES.md` §7) and is permanently out of v1.
+> Recorded so the framing is not re-litigated: HTTP/2 and HTTP/3 are **not in the
+> zero-dependency core** (the core is HTTP/1.1), but they are **optional opt-in
+> transport tiers**, not flatly excluded — see `docs/TRANSPORTS.md`. The core never
+> imports them.
 
 ---
 
@@ -321,7 +350,7 @@ Priority: **P0** = correctness/standards gap a modern HTTP/1.1 server must close
 | P2 | **`If-Unmodified-Since` / `If-Match` for writes** (9110 §13.1.1/§13.1.4) | **No** | Optional optimistic-concurrency guard on upload (`412`). | **FR-COND-03** (new, optional) |
 | P2 | **`Vary: Accept-Encoding`** when compression negotiated (9110 §12.5.5) | **No** | Emit iff gzip negotiation ever added (currently out of v1). | FR-SERVE-02 |
 | P2 | **`multipart/byteranges`** for multi-range (9110 §14.6) | **No** | Out of v1 (MAY); multi-range → `200`. | FR-RANGE-05 |
-| — | **HTTP/2 / HTTP/3** (9113 / 9114) | **No** | **OUT** — fails zero-dep gate (HPACK/QPACK/QUIC not in stdlib); ALPN advertises only `http/1.1`. | **NFR-STD-01** (new) |
+| — | **HTTP/2 / HTTP/3** (9113 / 9114) | **No** | **Not in core** (core is HTTP/1.1; ALPN advertises only `http/1.1`). Optional opt-in tiers: h2 pure-stdlib-feasible / `servery[http2]`; h3 via `aioquic` (`servery[http3]`) or experimental `ctypes`→OpenSSL ≥ 3.5. See `docs/TRANSPORTS.md`. | **NFR-STD-01** (new) |
 | ✓ | `Date` IMF-fixdate (9110 §6.6.1) | **Yes** | Keep inherited `date_time_string()`. | — |
 | ✓ | `Last-Modified` / `If-Modified-Since` → `304` (9110 §8.8.2, §13.1.3) | **Yes** | Keep, extend with precedence (C4). | FR-SERVE-05 |
 | ✓ | `Content-Type` / `Content-Length` (9110 §8.3, §8.6) | **Yes** | Keep; route MIME via `guess_file_type`. | FR-SERVE-02 |
@@ -410,7 +439,7 @@ Each maps to a `unittest` case (stdlib `http.client`, real server — see
 | **FR-COND-03** | Optional optimistic-concurrency guard on upload via `If-Match`/`If-Unmodified-Since` → `412`. | 9110 §13.1.1/§13.1.4 | P2 (optional) |
 | **FR-DISP-01** | `Content-Disposition: attachment` with `filename=` + `filename*=UTF-8''…` for downloads/archives. | 6266 §4.2/§4.3, 8187 §3.2.1 | P1 |
 | **FR-SEC-04** | Emit `X-Content-Type-Options: nosniff` by default (anti-MIME-sniff / anti-stored-XSS). | 9110 §8.3 (rationale); WHATWG Fetch | P1 |
-| **NFR-STD-01** | Target HTTP/1.1 (9110/9111/9112) only; HTTP/2 (9113) and HTTP/3 (9114) OUT (zero-dep); TLS ALPN advertises only `http/1.1`. | 9113 §3.2/§4.3, 9114 §1.2/§2 | (constraint) |
+| **NFR-STD-01** | Core targets HTTP/1.1 (9110/9111/9112); core TLS ALPN advertises only `http/1.1`. HTTP/2 (9113) and HTTP/3 (9114) are **optional opt-in tiers** (`docs/TRANSPORTS.md`), not core; `h2`/`h3` are advertised (ALPN/`Alt-Svc`) **only** when their tier is enabled. | 9113 §3.2/§4.3, 9114 §1.2/§2 | (constraint) |
 
 ---
 
@@ -423,6 +452,9 @@ gh-87389-hardened path translation, and **adds** the modern surface the base
 lacks: Range/`206` (9110 §14), full conditional requests + `ETag` (9110 §13, §8.8),
 `Cache-Control` (9111 §5.2.2), `Content-Disposition` UTF-8 filenames (6266/8187),
 RFC 7617 Basic auth, HTTP/1.1 persistent connections (9112 §9.3), and the
-`Host`-required `400` (9112 §3.2). HTTP/2 and HTTP/3 are out, with concrete
-zero-dependency justification, and the TLS ALPN therefore advertises only
-`http/1.1`. Every MUST/SHOULD above is paired with a cite and a test in §4.
+`Host`-required `400` (9112 §3.2). HTTP/2 and HTTP/3 are **not part of this
+zero-dependency core** — the core's TLS ALPN therefore advertises only
+`http/1.1` — but they are **optional opt-in transport tiers**, not flatly
+excluded (h2 is even pure-stdlib-feasible; h3 via `aioquic` or an experimental
+`ctypes`→OpenSSL ≥ 3.5 backend); see `docs/TRANSPORTS.md`. Every MUST/SHOULD above
+is paired with a cite and a test in §4.

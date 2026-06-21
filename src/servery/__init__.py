@@ -2,11 +2,25 @@
 
 A batteries-included ``python -m http.server``: rich sortable directory
 listings, range/resumable downloads, conditional requests, basic auth,
-upload, and HTTPS — implemented with nothing but the Python standard library.
+upload, and HTTPS — built with nothing but the Python standard library.
 
-The implementation arrives milestone by milestone; see ``docs/ROADMAP.md``.
+Public API::
+
+    from servery import Config, serve
+    serve(Config.create("./public", port=8000))
 """
 
-__all__ = ["__version__"]
+from servery._version import __version__
+from servery.config import Config
+from servery.handler import ServeryHandler
+from servery.server import ServeryHTTPServer, make_server, serve, server_url
 
-__version__: str = "0.0.0"
+__all__ = [
+    "Config",
+    "ServeryHTTPServer",
+    "ServeryHandler",
+    "__version__",
+    "make_server",
+    "serve",
+    "server_url",
+]

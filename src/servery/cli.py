@@ -1,15 +1,13 @@
-"""Command-line entry point for servery.
+"""Command-line interface for servery."""
 
-This is a placeholder surface so the package, its console script, and the CI
-gates are real from day one. The actual server lands with the v0.1 walking
-skeleton (see ``docs/ROADMAP.md``).
-"""
+from __future__ import annotations
 
 import argparse
-import sys
 from collections.abc import Sequence
 
-from servery import __version__
+from servery._version import __version__
+from servery.config import Config
+from servery.server import serve
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -19,21 +17,62 @@ def build_parser() -> argparse.ArgumentParser:
         description="Zero-dependency, pure-Python HTTP file server.",
     )
     parser.add_argument(
-        "--version",
-        action="version",
-        version=f"servery {__version__}",
+        "directory",
+        nargs="?",
+        default=".",
+        help="directory to serve (default: current directory)",
     )
+    parser.add_argument(
+        "-p",
+        "--port",
+        type=int,
+        default=8000,
+        help="port to listen on (default: 8000)",
+    )
+    parser.add_argument(
+        "-b",
+        "--bind",
+        dest="host",
+        default="127.0.0.1",
+        metavar="ADDR",
+        help="address to bind (default: 127.0.0.1; use 0.0.0.0 to expose)",
+    )
+    parser.add_argument(
+        "--show-hidden",
+        action="store_true",
+        help="include dotfiles in listings",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="suppress request logging and the startup banner",
+    )
+    parser.add_argument("--version", action="version", version=f"servery {__version__}")
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the servery CLI. Returns a process exit code."""
-    parser = build_parser()
-    parser.parse_args(argv)
-    print(
-        "servery is not implemented yet — see docs/ROADMAP.md for the plan.",
-        file=sys.stderr,
+def config_from_args(args: argparse.Namespace) -> Config:
+    """Convert parsed arguments into a :class:`Config`."""
+    return Config.create(
+        args.directory,
+        host=args.host,
+        port=args.port,
+        show_hidden=args.show_hidden,
+        quiet=args.quiet,
     )
+
+
+def main(
+    argv: Sequence[str] | None = None,
+) -> int:  # pragma: no cover - CLI entry, blocks on serve()
+    """Run the servery CLI. Returns a process exit code."""
+    args = build_parser().parse_args(argv)
+    config = config_from_args(args)
+    try:
+        serve(config)
+    except KeyboardInterrupt:
+        return 0
     return 0
 
 

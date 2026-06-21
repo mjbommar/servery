@@ -8,12 +8,22 @@ question, and where it does not, the scope rubric in §7 does.
 
 ## 0. Zero dependencies. Pure standard library. Forever.
 
-**servery has zero third-party runtime dependencies and depends only on the
-Python standard library. This is non-negotiable and outranks every other
-principle here.** It is the soul of the project, not a nice-to-have.
+**The servery CORE has zero third-party (PyPI) runtime dependencies and depends
+only on the Python standard library. This is non-negotiable and outranks every
+other principle here.** It is the soul of the project, not a nice-to-have.
 
 If `pip install servery` pulls in anything other than servery itself, we have
 failed — no matter how good the feature was.
+
+**Refinement (transport tiers).** The zero-PyPI mandate is on the **core**. The
+optional, opt-in HTTP/2 and HTTP/3 transport tiers (`docs/TRANSPORTS.md`) **may**
+use vetted libraries behind extras (`servery[http2]`, `servery[http3]`) — but only
+after preferring two cheaper sources first: a stdlib path, and **binding
+already-present OS libraries via `ctypes` (stdlib) rather than adding a PyPI
+dependency** (e.g. system OpenSSL `libcrypto`/`libssl` or Windows CNG for QUIC
+crypto). The order of preference is therefore: **stdlib → OS library via `ctypes`
+→ vetted PyPI extra (explicit opt-in only).** A bare `pip install servery` stays
+empty-`dependencies` forever; the core never imports any of that.
 
 This is the *point*, not a constraint we tolerate. The entire value proposition
 is "you already have everything you need." Every dependency we could add is a
@@ -113,11 +123,15 @@ to modern HTTP semantics with the stdlib alone:
 
 The map of exactly what each RFC requires, what the base already gives us, and
 what servery adds lives in `STANDARDS.md`. **This principle is subordinate to
-Principle 0:** any compliance target reachable only by adding a dependency is out
-of scope and recorded as such — that is why **HTTP/2 (RFC 9113) and HTTP/3 (RFC
-9114) are permanently out** (no stdlib HPACK/QPACK/QUIC), and the TLS ALPN
-advertises only `http/1.1`. Standards conformance never outranks the zero-dep
-mandate; it is what we achieve *within* it.
+Principle 0:** any compliance target reachable only by adding a *core* dependency
+is out of the core and recorded as such. The **core** therefore speaks HTTP/1.1
+and its TLS ALPN advertises only `http/1.1`. **HTTP/2 (RFC 9113) and HTTP/3 (RFC
+9114) are not part of the zero-dep core, but they are no longer flatly out:** they
+are optional, opt-in **transport tiers** (`docs/TRANSPORTS.md`) — h2 is feasible in
+pure stdlib (the preferred path) with an optional `h2` backend; h3 is offered via
+`aioquic` or an experimental `ctypes`→OpenSSL ≥ 3.5 native backend. ALPN/`Alt-Svc`
+advertise `h2`/`h3` **only** when the corresponding tier is enabled. Standards
+conformance never outranks the zero-dep mandate; it is what we achieve *within* it.
 
 ## 1b. Secure web-facing defaults
 
@@ -191,6 +205,30 @@ Rationale (as of mid-2026):
 - *(Open question for the requirements authors: if a concrete user need for
   3.11/3.12 emerges, is the cost of a hand-rolled-multipart-only backport worth
   lowering the floor? Default answer today: no.)*
+
+## 3a. Free-threading is a first-class target
+
+servery must run correctly and well on the **free-threaded (no-GIL) CPython
+builds** (3.13t / 3.14t), not merely tolerate them. A threaded file server is
+exactly the workload free-threading is meant to speed up, and the multiplexing
+HTTP/2 backend (`docs/TRANSPORTS.md`) makes thread-safety load-bearing rather than
+incidental.
+
+- **No module-level mutable state.** Shared state lives on the `Config` (frozen)
+  or on per-request/per-connection objects — never in module globals that
+  concurrent threads could race.
+- **Do not rely on the GIL for correctness.** Anything previously "safe because
+  the GIL made it atomic" (dict mutation, counter increments, lazy caches) must be
+  made explicitly safe — immutable, thread-local, or guarded by a lock — because
+  on a free-threaded build that atomicity is gone.
+- **Test on free-threaded builds.** The suite (`ARCHITECTURE.md` §7) runs on
+  3.13t/3.14t in CI alongside the default builds; concurrency-sensitive paths
+  (listing, range, upload, and any h2 stream table) get explicit multi-threaded
+  tests.
+
+This is subordinate to Principle 0 — it is reached with the stdlib alone
+(`threading`, `concurrent.futures`) — and reinforces Principle 5: code that holds
+no hidden shared state is also the code that is easiest to read and hack.
 
 ## 4. CLI-and-importable ergonomics
 
