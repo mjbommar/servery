@@ -123,6 +123,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="enable HTTP/2 (ALPN 'h2' over TLS, and h2c prior-knowledge cleartext)",
     )
     parser.add_argument(
+        "--http3",
+        action="store_true",
+        help="serve HTTP/3 over QUIC (requires TLS and the 'servery[http3]' extra)",
+    )
+    parser.add_argument(
         "--tls-cert",
         metavar="PATH",
         help="TLS certificate chain (PEM); enables HTTPS",
@@ -180,7 +185,12 @@ def main(
         return 0
     config = config_from_args(args)
     try:
-        serve(config)
+        if args.http3:
+            from servery.http3 import serve_http3
+
+            serve_http3(config)
+        else:
+            serve(config)
     except KeyboardInterrupt:
         return 0
     return 0

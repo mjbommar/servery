@@ -37,6 +37,11 @@ Homepage = "https://github.com/mjbommar/servery"
 Repository = "https://github.com/mjbommar/servery"
 Issues = "https://github.com/mjbommar/servery/issues"
 
+# Optional protocol tier. The CORE stays zero-dependency; HTTP/3 (QUIC) needs
+# crypto the stdlib lacks, so it is opt-in via the reference QUIC stack.
+[project.optional-dependencies]
+http3 = ["aioquic>=1.0"]
+
 [project.scripts]
 servery = "servery.cli:main"
 
