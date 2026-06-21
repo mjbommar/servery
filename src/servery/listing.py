@@ -1,14 +1,12 @@
-"""Rich HTML directory listings.
+"""Rich, sortable, searchable HTML directory listings.
 
 Where ``http.server`` emits a bare ``<ul>`` of names, servery renders a table
-with human-readable sizes and modification times, directories first. The markup
-is self-contained (inline CSS, light/dark aware), escapes every user-controlled
-value, and carries no inline script — so it is safe to serve under a strict
-Content-Security-Policy.
+with human-readable sizes and modification times, directories first. Columns are
+sortable via the Apache ``mod_autoindex`` query convention (``?C=N|S|M&O=A|D``),
+and a ``?q=`` substring filter narrows the list — both server-side, no JavaScript.
 
-The sort here is fixed (directories first, then case-insensitive name); the
-client-driven ``?C=&O=`` sort scheme arrives in v0.2 and will slot into
-:func:`_sort_key`.
+The markup is self-contained (inline CSS, light/dark aware) and escapes every
+user-controlled value, so it is safe under a strict Content-Security-Policy.
 """
 
 from __future__ import annotations
@@ -18,8 +16,14 @@ import datetime
 import html
 import os
 import urllib.parse
+from collections.abc import Callable
+from typing import Any
 
 _UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+
+# Canonical sort name -> Apache column code, and the reverse.
+_SORT_TO_CODE = {"name": "N", "size": "S", "date": "M"}
+_CODE_TO_SORT = {code: name for name, code in _SORT_TO_CODE.items()}
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -31,6 +35,11 @@ class EntryInfo:
     is_symlink: bool
     size: int | None
     mtime: float | None
+
+
+def code_to_sort(code: str) -> str:
+    """Map a URL column code (N/S/M) to a canonical sort name."""
+    return _CODE_TO_SORT.get(code, "name")
 
 
 def _human_size(num: int) -> str:
@@ -85,9 +94,41 @@ def _scan(fs_dir: str, *, show_hidden: bool) -> list[EntryInfo]:
     return entries
 
 
-def _sort_key(entry: EntryInfo) -> tuple[bool, str]:
-    # Directories first (False sorts before True), then case-insensitive name.
-    return (not entry.is_dir, entry.name.lower())
+def _key_func(sort: str) -> Callable[[EntryInfo], Any]:
+    if sort == "size":
+        return lambda e: e.size or 0
+    if sort == "date":
+        return lambda e: e.mtime or 0.0
+    return lambda e: e.name.lower()
+
+
+def _sorted(entries: list[EntryInfo], sort: str, order: str) -> list[EntryInfo]:
+    result = sorted(entries, key=_key_func(sort), reverse=(order == "desc"))
+    # Stable second pass keeps directories first regardless of the column/order.
+    result.sort(key=lambda e: not e.is_dir)
+    return result
+
+
+def _filter(entries: list[EntryInfo], query: str) -> list[EntryInfo]:
+    if not query:
+        return entries
+    needle = query.lower()
+    return [e for e in entries if needle in e.name.lower()]
+
+
+def _sort_link(label: str, code: str, sort: str, order: str, query: str) -> str:
+    active = _SORT_TO_CODE.get(sort) == code
+    if active:
+        new_order = "D" if order == "asc" else "A"
+        arrow = " ▲" if order == "asc" else " ▼"
+    else:
+        new_order = "A"
+        arrow = ""
+    params = {"C": code, "O": new_order}
+    if query:
+        params["q"] = query
+    href = "?" + urllib.parse.urlencode(params)
+    return f'<a href="{html.escape(href, quote=True)}">{html.escape(label)}{arrow}</a>'
 
 
 def _row(entry: EntryInfo) -> str:
@@ -104,15 +145,23 @@ def _row(entry: EntryInfo) -> str:
     )
 
 
-def render(fs_dir: str, display_path: str, *, show_hidden: bool) -> bytes:
+def render(
+    fs_dir: str,
+    display_path: str,
+    *,
+    show_hidden: bool,
+    sort: str = "name",
+    order: str = "asc",
+    query: str = "",
+) -> bytes:
     """Render a directory listing page as UTF-8 bytes.
 
     ``fs_dir`` is the filesystem directory; ``display_path`` is the decoded URL
-    path (used for the heading and the parent link). Raises ``OSError`` if the
-    directory cannot be scanned.
+    path. ``sort`` is one of ``name``/``size``/``date``, ``order`` is
+    ``asc``/``desc``, and ``query`` is a case-insensitive name filter. Raises
+    ``OSError`` if the directory cannot be scanned.
     """
-    entries = sorted(_scan(fs_dir, show_hidden=show_hidden), key=_sort_key)
-    safe_heading = html.escape(display_path)
+    entries = _sorted(_filter(_scan(fs_dir, show_hidden=show_hidden), query), sort, order)
 
     rows: list[str] = []
     if display_path != "/":
@@ -122,7 +171,11 @@ def render(fs_dir: str, display_path: str, *, show_hidden: bool) -> bytes:
     rows.extend(_row(e) for e in entries)
 
     document = _TEMPLATE.format(
-        heading=safe_heading,
+        heading=html.escape(display_path),
+        search_value=html.escape(query, quote=True),
+        name_header=_sort_link("Name", "N", sort, order, query),
+        size_header=_sort_link("Size", "S", sort, order, query),
+        mtime_header=_sort_link("Modified", "M", sort, order, query),
         rows="\n".join(rows),
         count=len(entries),
     )
@@ -140,10 +193,15 @@ _TEMPLATE = """\
 :root {{ color-scheme: light dark; }}
 body {{ font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 60rem; padding: 0 1rem; }}
 h1 {{ font-size: 1.2rem; font-weight: 600; word-break: break-all; }}
+.search {{ margin: 0.5rem 0 1rem; }}
+.search input {{ padding: 0.35rem 0.6rem; width: 100%; max-width: 20rem; box-sizing: border-box; }}
 table {{ border-collapse: collapse; width: 100%; }}
-th, td {{ text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }}
-th {{ font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.7; }}
-td.size, th.size, td.mtime, th.mtime {{ text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }}
+th, td {{ text-align: left; padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }}
+th {{ font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }}
+th a {{ color: inherit; opacity: 0.7; }}
+td.size, th.size, td.mtime, th.mtime {{ text-align: right; white-space: nowrap;
+  font-variant-numeric: tabular-nums; }}
 a {{ text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
 .sym {{ opacity: 0.6; }}
@@ -152,8 +210,12 @@ footer {{ margin-top: 1rem; font-size: 0.8rem; opacity: 0.6; }}
 </head>
 <body>
 <h1>Index of {heading}</h1>
+<form class="search" method="get">
+<input type="search" name="q" value="{search_value}" placeholder="Filter…" aria-label="Filter">
+</form>
 <table>
-<thead><tr><th class="name">Name</th><th class="size">Size</th><th class="mtime">Modified</th></tr></thead>
+<thead><tr><th class="name">{name_header}</th><th class="size">{size_header}</th>\
+<th class="mtime">{mtime_header}</th></tr></thead>
 <tbody>
 {rows}
 </tbody>

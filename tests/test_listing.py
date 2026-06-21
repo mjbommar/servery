@@ -59,6 +59,26 @@ class RenderTest(unittest.TestCase):
         self.assertIn("a&amp;b&lt;c&gt;", body)
         self.assertNotIn("a&b<c>.txt", body)
 
+    def test_sortable_headers_present(self):
+        body = listing.render(str(self.dir), "/", show_hidden=False).decode("utf-8")
+        self.assertIn("C=N", body)
+        self.assertIn("C=S", body)
+        self.assertIn("C=M", body)
+        self.assertIn('type="search"', body)
+
+    def test_sort_by_size_desc(self):
+        (self.dir / "big.bin").write_bytes(b"x" * 5000)
+        (self.dir / "tiny.bin").write_bytes(b"x")
+        body = listing.render(str(self.dir), "/", show_hidden=False, sort="size", order="desc")
+        text = body.decode("utf-8")
+        self.assertLess(text.index("big.bin"), text.index("tiny.bin"))
+
+    def test_query_filters(self):
+        (self.dir / "needle.txt").write_text("x")
+        body = listing.render(str(self.dir), "/", show_hidden=False, query="needle").decode("utf-8")
+        self.assertIn("needle.txt", body)
+        self.assertNotIn("alpha.txt", body)
+
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
     def test_symlink_entry_marked(self):
         link = self.dir / "shortcut"

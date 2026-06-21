@@ -1,11 +1,13 @@
 """End-to-end server tests: spin up on an ephemeral port and make real requests."""
 
 import contextlib
+import email.utils
 import http.client
 import io
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -94,6 +96,113 @@ class ServerTestCase(unittest.TestCase):
         conn.close()
         self.assertEqual(resp.status, 301)
         self.assertTrue(resp.getheader("Location", "").endswith("/sub/"))
+
+    def test_full_response_advertises_range_and_etag(self):
+        conn = self._conn()
+        conn.request("GET", "/hello.txt")
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertEqual(resp.getheader("Accept-Ranges"), "bytes")
+        self.assertTrue(resp.getheader("ETag", "").startswith('"'))
+
+    def test_range_partial(self):
+        conn = self._conn()
+        conn.request("GET", "/hello.txt", headers={"Range": "bytes=0-3"})
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 206)
+        self.assertEqual(body, b"hi t")
+        self.assertEqual(resp.getheader("Content-Range"), "bytes 0-3/8")
+        self.assertEqual(resp.getheader("Content-Length"), "4")
+
+    def test_range_suffix(self):
+        conn = self._conn()
+        conn.request("GET", "/hello.txt", headers={"Range": "bytes=-3"})
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 206)
+        self.assertEqual(body, b"ere")
+        self.assertEqual(resp.getheader("Content-Range"), "bytes 5-7/8")
+
+    def test_range_unsatisfiable(self):
+        conn = self._conn()
+        conn.request("GET", "/hello.txt", headers={"Range": "bytes=100-200"})
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 416)
+        self.assertEqual(resp.getheader("Content-Range"), "bytes */8")
+
+    def test_conditional_if_none_match(self):
+        conn = self._conn()
+        conn.request("GET", "/hello.txt")
+        first = conn.getresponse()
+        first.read()
+        etag = first.getheader("ETag")
+        assert etag is not None
+        conn.request("GET", "/hello.txt", headers={"If-None-Match": etag})
+        second = conn.getresponse()
+        body = second.read()
+        conn.close()
+        self.assertEqual(second.status, 304)
+        self.assertEqual(body, b"")
+
+    def test_conditional_if_modified_since_future(self):
+        future = email.utils.formatdate(time.time() + 3600, usegmt=True)
+        conn = self._conn()
+        conn.request("GET", "/hello.txt", headers={"If-Modified-Since": future})
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 304)
+
+    def test_if_range_match_honors_range(self):
+        conn = self._conn()
+        conn.request("GET", "/hello.txt")
+        first = conn.getresponse()
+        first.read()
+        etag = first.getheader("ETag")
+        assert etag is not None
+        conn.request("GET", "/hello.txt", headers={"Range": "bytes=0-3", "If-Range": etag})
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 206)
+        self.assertEqual(body, b"hi t")
+
+    def test_if_range_etag_mismatch_serves_full(self):
+        conn = self._conn()
+        conn.request(
+            "GET",
+            "/hello.txt",
+            headers={"Range": "bytes=0-3", "If-Range": '"deadbeef-1"'},
+        )
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body, b"hi there")
+
+    def test_if_range_stale_date_serves_full(self):
+        past = email.utils.formatdate(time.time() - 3600, usegmt=True)
+        conn = self._conn()
+        conn.request("GET", "/hello.txt", headers={"Range": "bytes=0-3", "If-Range": past})
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+
+    def test_listing_accepts_sort_and_query(self):
+        conn = self._conn()
+        conn.request("GET", "/?C=S&O=D&q=hello")
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8")
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        self.assertIn("hello.txt", body)
 
     def test_request_logging_when_not_quiet(self):
         config = Config.create(self.dir, host="127.0.0.1", port=0, quiet=False)

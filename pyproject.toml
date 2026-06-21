@@ -92,6 +92,10 @@ known-first-party = ["servery"]
 "tests/**" = ["PERF"]
 # The listing module embeds an HTML/CSS template; its lines are data, not code.
 "src/servery/listing.py" = ["E501"]
+# The handler deliberately works at the os.path level: its security model uses an
+# empty-string sentinel for escaped paths, and Path("") resolves to the cwd. It
+# also mirrors the stdlib send_head "close-on-error then re-raise" idiom.
+"src/servery/handler.py" = ["PTH112", "PTH123", "TRY300"]
 
 [tool.ty.environment]
 python-version = "3.13"
