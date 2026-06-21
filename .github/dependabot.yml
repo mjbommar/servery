@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Keep GitHub Actions current (and enable SHA-pin maintenance).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+
+  # Dev/CI tooling only (runtime deps are zero by mandate).
+  - package-ecosystem: uv
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps

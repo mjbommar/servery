@@ -1,0 +1,119 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "servery"
+version = "0.0.0"
+description = "Zero-dependency, batteries-included pure-Python HTTP file server."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Michael Bommarito" }]
+keywords = ["http", "server", "fileserver", "static", "stdlib", "zero-dependency"]
+classifiers = [
+  "Development Status :: 1 - Planning",
+  "Environment :: Console",
+  "Environment :: Web Environment",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+  "Typing :: Typed",
+]
+
+# The defining constraint of this project: ZERO third-party runtime
+# dependencies. This list MUST stay empty forever (enforced by the
+# scripts/check_zero_deps.py CI gate). Dev tooling lives in
+# [dependency-groups] below and never ships in the wheel.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/mjbommar/servery"
+Repository = "https://github.com/mjbommar/servery"
+Issues = "https://github.com/mjbommar/servery/issues"
+
+[project.scripts]
+servery = "servery.cli:main"
+
+[dependency-groups]
+# Development / CI tooling only. Isolated from runtime; never published.
+dev = [
+  "ruff>=0.6",
+  "mypy>=1.11",
+  "bandit[toml]>=1.7",
+  "coverage>=7.5",
+  "build>=1.2",
+  "twine>=5.0",
+  "pre-commit>=3.7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/servery"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "W",   # pycodestyle + pyflakes
+  "I",             # isort
+  "N",             # pep8-naming
+  "UP",            # pyupgrade
+  "B",             # flake8-bugbear
+  "C4",            # flake8-comprehensions
+  "SIM",           # flake8-simplify
+  "PTH",           # flake8-use-pathlib
+  "RET",           # flake8-return
+  "PIE",           # flake8-pie
+  "PERF",          # perflint
+  "FLY",           # flynt
+  "A",             # flake8-builtins
+  "TRY",           # tryceratops
+  "RUF",           # ruff-specific
+]
+ignore = [
+  "TRY003",        # allow longer inline exception messages
+  "COM812",        # handled by the formatter
+  "ISC001",        # handled by the formatter
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["servery"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PERF"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src", "tests"]
+warn_unreachable = true
+enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["servery"]
+omit = ["*/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_lines = [
+  "pragma: no cover",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+]

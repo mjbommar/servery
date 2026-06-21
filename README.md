@@ -1,5 +1,10 @@
 # servery
 
+[![CI](https://github.com/mjbommar/servery/actions/workflows/ci.yml/badge.svg)](https://github.com/mjbommar/servery/actions/workflows/ci.yml)
+[![Security](https://github.com/mjbommar/servery/actions/workflows/security.yml/badge.svg)](https://github.com/mjbommar/servery/actions/workflows/security.yml)
+![Python](https://img.shields.io/badge/python-3.13%2B-blue)
+![Dependencies](https://img.shields.io/badge/runtime%20dependencies-zero-brightgreen)
+
 A **zero-dependency, pure-Python** HTTP file server — *a batteries-included `python -m http.server`*.
 
 Serve or share a directory over HTTP with the niceties people expect from tools like
@@ -53,6 +58,20 @@ is no routing or app-building here.
 | [docs/BEST-PRACTICES.md](docs/BEST-PRACTICES.md) | 2026 stdlib-only implementation best practices (zero-dep) |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phased milestones from v0.1 to v1.0 |
 | [docs/REFERENCES.md](docs/REFERENCES.md) | Prior art, what to borrow, stdlib feasibility map |
+
+## Development
+
+Requires [uv](https://docs.astral.sh/uv/). All gates run locally exactly as in CI:
+
+```bash
+uv sync                      # dev tooling (never ships in the wheel)
+uv run pre-commit install    # local commit gates
+make check                   # lint + type + security + tests
+make build                   # build + zero-dependency gate
+```
+
+The runtime stays **zero-dependency** — a CI gate fails the build if the wheel
+ever declares a dependency. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
