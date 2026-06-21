@@ -101,6 +101,8 @@ known-first-party = ["servery"]
 "src/servery/upload.py" = ["PTH"]
 # The archive module walks the tree with os.walk + os.path for arcname building.
 "src/servery/archive.py" = ["PTH"]
+# The HTTP/2 connection resolves paths at the os level (shared with the handler).
+"src/servery/http2/connection.py" = ["PTH"]
 
 [tool.ty.environment]
 python-version = "3.13"

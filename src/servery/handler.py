@@ -108,6 +108,24 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         # A default socket timeout bounds slow/idle clients (Slowloris).
         self.connection.settimeout(self._server.config.timeout)
 
+    def handle(self) -> None:
+        if self._server.config.http2 and self._is_http2():
+            from servery.http2.connection import H2Connection
+
+            H2Connection(self).run()
+            return
+        super().handle()
+
+    def _is_http2(self) -> bool:
+        sock = self.connection
+        if isinstance(sock, ssl.SSLSocket):
+            return sock.selected_alpn_protocol() == "h2"
+        try:
+            # h2c prior-knowledge: the client opens with the connection preface.
+            return cast("io.BufferedReader", self.rfile).peek(24).startswith(b"PRI * HTTP/2.0")
+        except (OSError, ValueError):  # pragma: no cover - peek unsupported/closed
+            return False
+
     # --- path safety -----------------------------------------------------
 
     def translate_path(self, path: str) -> str:

@@ -38,6 +38,7 @@ class Config:
     security_headers: bool = True
     timeout: float = 30.0
     max_workers: int | None = None
+    http2: bool = False
 
     @property
     def cache_control(self) -> str:
@@ -87,6 +88,7 @@ class Config:
         security_headers: bool = True,
         timeout: float = 30.0,
         max_workers: int | None = None,
+        http2: bool = False,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
         return cls(
@@ -108,4 +110,5 @@ class Config:
             security_headers=security_headers,
             timeout=timeout,
             max_workers=max_workers,
+            http2=http2,
         )

@@ -81,7 +81,8 @@ class ServeryHTTPServer(ThreadingHTTPServer):
             # and a secure cipher set; we only advertise HTTP/1.1 over ALPN.
             context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
             context.load_cert_chain(cert, self.config.tls_key, self.config.tls_password)
-            context.set_alpn_protocols(["http/1.1"])
+            protocols = ["h2", "http/1.1"] if self.config.http2 else ["http/1.1"]
+            context.set_alpn_protocols(protocols)
             self.socket = context.wrap_socket(self.socket, server_side=True)
 
     def finish_request(self, request: Any, client_address: Any) -> None:

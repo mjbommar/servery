@@ -118,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="bound concurrency to N worker threads (default: unbounded, thread-per-connection)",
     )
     parser.add_argument(
+        "--http2",
+        action="store_true",
+        help="enable HTTP/2 (ALPN 'h2' over TLS, and h2c prior-knowledge cleartext)",
+    )
+    parser.add_argument(
         "--tls-cert",
         metavar="PATH",
         help="TLS certificate chain (PEM); enables HTTPS",
@@ -161,6 +166,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         security_headers=args.security_headers,
         timeout=args.timeout,
         max_workers=args.max_workers,
+        http2=args.http2,
     )
 
 

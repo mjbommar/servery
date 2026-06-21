@@ -80,10 +80,11 @@ class CliParserTest(unittest.TestCase):
         _log._stderr_handler = None
 
     def test_hardening_flags(self):
-        args = cli.build_parser().parse_args(["--timeout", "10", "--max-workers", "4"])
+        args = cli.build_parser().parse_args(["--timeout", "10", "--max-workers", "4", "--http2"])
         config = cli.config_from_args(args)
         self.assertEqual(config.timeout, 10.0)
         self.assertEqual(config.max_workers, 4)
+        self.assertTrue(config.http2)
 
     def test_startup_warnings(self):
         unsafe = servery.Config.create(".", host="0.0.0.0", auth="u:p")
