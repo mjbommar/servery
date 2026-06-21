@@ -41,6 +41,7 @@ class ParseTest(unittest.TestCase):
 
     def test_empty_file_is_unsatisfiable(self):
         self.assertIs(ranges.parse("bytes=0-", 0), ranges.UNSATISFIABLE)
+        self.assertIs(ranges.parse("bytes=-3", 0), ranges.UNSATISFIABLE)
 
     def test_multiple_ranges_served_full(self):
         self.assertIsNone(ranges.parse("bytes=0-1,5-6", 100))

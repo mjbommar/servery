@@ -82,6 +82,10 @@ class SaveTest(unittest.TestCase):
         self._save(_multipart("B", [("file", "x.txt", b"new")]), allow_overwrite=True)
         self.assertEqual((self.dir / "x.txt").read_text(), "new")
 
+    def test_empty_filename_is_skipped(self):
+        saved = self._save(_multipart("B", [("file", "", b"ignored"), ("real", "r.txt", b"data")]))
+        self.assertEqual([s.filename for s in saved], ["r.txt"])
+
     def test_unsafe_filename_raises(self):
         with self.assertRaises(upload.UploadError):
             self._save(_multipart("B", [("file", "..", b"x")]))

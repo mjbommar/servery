@@ -53,7 +53,10 @@ def _copy_n(source: SupportsRead[bytes], dest: SupportsWrite[bytes], count: int)
 
 def _content_disposition(filename: str) -> str:
     """Build a Content-Disposition with an ASCII fallback + UTF-8 (RFC 6266/8187)."""
-    ascii_name = filename.encode("ascii", "replace").decode("ascii").replace('"', "")
+    ascii_name = filename.encode("ascii", "replace").decode("ascii")
+    # Drop control characters (incl. CR/LF) so a filesystem-derived name can never
+    # inject a response header. The filename* form is percent-encoded already.
+    ascii_name = "".join(c for c in ascii_name if c.isprintable()).replace('"', "")
     extended = urllib.parse.quote(filename, safe="")
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{extended}"
 
@@ -173,8 +176,11 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 archive.stream_zip(path, base_name, writer)
             writer.close()
-        except (BrokenPipeError, ConnectionResetError):  # pragma: no cover - client hung up
-            pass
+        except OSError:  # pragma: no cover - client hung up, or a file changed mid-walk
+            # The chunked body is partly sent and unrecoverable; close the
+            # connection so the client gets a definite end-of-message rather than
+            # a truncated, terminator-less body.
+            self.close_connection = True
         return
 
     def do_GET(self) -> None:
@@ -189,6 +195,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     # --- upload (v0.6) ---------------------------------------------------
 
     def do_POST(self) -> None:
+        self._generated_page = False
         if not self._authorized():
             return
         config = self._server.config
@@ -305,6 +312,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
     def _send_body(self, source: BinaryIO) -> None:
         count = self._body_remaining
+        if count == 0:
+            return  # socket.sendfile treats count==0 as "whole file"; never that
         sock = self.connection
         # Zero-copy fast path for plain sockets. (socket.sendfile transparently
         # handles non-regular sources like BytesIO via its own send loop; TLS
@@ -412,6 +421,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         super().send_error(code, message, explain)
 
     def do_OPTIONS(self) -> None:
+        self._generated_page = False
         # Preflight must succeed without auth, or the real request never happens.
         self.send_response(HTTPStatus.NO_CONTENT)
         if self._server.config.cors:

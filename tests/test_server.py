@@ -514,6 +514,20 @@ class FeatureFlagTest(unittest.TestCase):
             self.assertIsNone(resp.getheader("X-Content-Type-Options"))
             self.assertIsNone(resp.getheader("Content-Security-Policy"))
 
+    def test_options_after_listing_has_no_csp(self):
+        # The _generated_page flag must not leak from a listing into a later
+        # bodiless response on the same keep-alive connection.
+        with _running(self._config(cors=True)) as (host, port):
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request("GET", "/")
+            conn.getresponse().read()
+            conn.request("OPTIONS", "/")
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+        self.assertEqual(resp.status, 204)
+        self.assertIsNone(resp.getheader("Content-Security-Policy"))
+
     def test_bounded_concurrency_serves(self):
         with _running(self._config(max_workers=2)) as (host, port):
             for _ in range(3):

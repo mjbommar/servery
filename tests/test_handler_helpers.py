@@ -5,7 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from servery.handler import _copy_n, _etag_matches, _make_etag, _not_modified_since
+from servery.handler import (
+    _content_disposition,
+    _copy_n,
+    _etag_matches,
+    _make_etag,
+    _not_modified_since,
+)
 
 
 class EtagMatchTest(unittest.TestCase):
@@ -42,6 +48,18 @@ class CopyNTest(unittest.TestCase):
         dest = io.BytesIO()
         _copy_n(source, dest, 100)
         self.assertEqual(dest.getvalue(), b"ab")
+
+
+class ContentDispositionTest(unittest.TestCase):
+    def test_strips_crlf_to_prevent_header_injection(self):
+        value = _content_disposition("ev\r\nX-Injected: pwned.zip")
+        self.assertNotIn("\r", value)
+        self.assertNotIn("\n", value)
+
+    def test_normal_filename(self):
+        value = _content_disposition("photo.zip")
+        self.assertIn('filename="photo.zip"', value)
+        self.assertIn("filename*=UTF-8''photo.zip", value)
 
 
 class MakeEtagTest(unittest.TestCase):

@@ -187,7 +187,7 @@ def save(
     while True:
         headers = _read_headers(stream)
         filename = _disposition_filename(headers)
-        if filename is not None:
+        if filename:  # a non-file field, or an empty file input, is skipped
             name = _safe_name(filename)
             if name is None:
                 raise UploadError("unsafe upload filename")

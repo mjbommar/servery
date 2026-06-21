@@ -66,6 +66,8 @@ def parse(header: str | None, size: int) -> ByteRange | _Unsatisfiable | None:
         suffix = int(end_text)
         if suffix <= 0:
             return None
+        if size == 0:
+            return UNSATISFIABLE
         if suffix >= size:
             return ByteRange(0, size)
         return ByteRange(size - suffix, suffix)

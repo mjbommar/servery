@@ -12,6 +12,7 @@ import os
 import socket
 import ssl
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
 from typing import Any
@@ -34,6 +35,9 @@ class ServeryHTTPServer(ThreadingHTTPServer):
         self._executor = (
             ThreadPoolExecutor(max_workers=config.max_workers) if config.max_workers else None
         )
+        # Bound accepted-but-queued connections too, not just running workers, so
+        # a flood can't grow the executor queue (and held sockets) without limit.
+        self._slots = threading.Semaphore(config.max_workers * 4) if config.max_workers else None
         if ":" in config.host:
             self.address_family = socket.AF_INET6
         super().__init__((config.host, config.port), ServeryHandler)
@@ -41,7 +45,8 @@ class ServeryHTTPServer(ThreadingHTTPServer):
     def process_request(self, request: Any, client_address: Any) -> None:
         # Default: a thread per connection (ThreadingMixIn). With --max-workers,
         # bound concurrency through a shared pool instead.
-        if self._executor is not None:
+        if self._executor is not None and self._slots is not None:
+            self._slots.acquire()
             self._executor.submit(self._process_request_pooled, request, client_address)
         else:
             super().process_request(request, client_address)
@@ -49,10 +54,12 @@ class ServeryHTTPServer(ThreadingHTTPServer):
     def _process_request_pooled(self, request: Any, client_address: Any) -> None:
         try:
             self.finish_request(request, client_address)
-        except Exception:
+        except Exception:  # mirror ThreadingMixIn: never let a worker thread die
             self.handle_error(request, client_address)
         finally:
             self.shutdown_request(request)
+            if self._slots is not None:
+                self._slots.release()
 
     def server_close(self) -> None:
         super().server_close()
