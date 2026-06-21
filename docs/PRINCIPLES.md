@@ -94,6 +94,57 @@ reverse proxy in front of it if you need more.* We keep `http.server`'s spirit
 of "not for production," but we move the safe-default needle as far as the
 stdlib lets us.
 
+## 1a. Standards-compliant by default (RFC 9110 / 9111 / 9112)
+
+servery is a **conformant HTTP/1.1 origin server**, not an HTTP/1.0 toy. Where
+the stdlib base is RFC 2616-era and HTTP/1.0-by-default, servery closes the gap
+to modern HTTP semantics with the stdlib alone:
+
+- **HTTP/1.1 with persistent connections** (`protocol_version = "HTTP/1.1"`),
+  honoring `Connection: close`, with every streamed body correctly framed
+  (chunked or `Connection: close`) — RFC 9112.
+- **Correct conditionals and validators**: the full `If-Match` /
+  `If-Unmodified-Since` / `If-None-Match` / `If-Modified-Since` precedence ladder,
+  a weak `ETag`, `304`/`412` with validator echo, and `Range`/`206`/`416` —
+  RFC 9110 §13/§14, §8.8.
+- **Correct caching, dates, and metadata**: `Cache-Control`, IMF-fixdate `Date`,
+  `Content-Type`/`Content-Length`, `Content-Disposition` with RFC 6266/8187
+  filenames.
+
+The map of exactly what each RFC requires, what the base already gives us, and
+what servery adds lives in `STANDARDS.md`. **This principle is subordinate to
+Principle 0:** any compliance target reachable only by adding a dependency is out
+of scope and recorded as such — that is why **HTTP/2 (RFC 9113) and HTTP/3 (RFC
+9114) are permanently out** (no stdlib HPACK/QPACK/QUIC), and the TLS ALPN
+advertises only `http/1.1`. Standards conformance never outranks the zero-dep
+mandate; it is what we achieve *within* it.
+
+## 1b. Secure web-facing defaults
+
+servery renders HTML listings containing user-controlled filenames, so it is an
+XSS sink by construction; its defaults must be safe for a web-facing surface
+out of the box — not opt-in hardening:
+
+- **`X-Content-Type-Options: nosniff` on every response** (a `.txt` must not be
+  sniffed into `text/html`).
+- **Context-correct output escaping**: `html.escape(name)` with `quote=True` for
+  every value that could land in HTML text *or* an attribute, `urllib.parse.quote`
+  for URL targets, and control-character stripping in filenames — never the base's
+  `quote=False`.
+- **Defense-in-depth headers** on servery-**generated** pages: a tight
+  `Content-Security-Policy` (listings/error pages only, never on served user
+  HTML), `Referrer-Policy`, and `Strict-Transport-Security` **only under TLS**.
+- **Safe operational defaults**: a per-request socket **timeout** (Slowloris
+  mitigation) on by default; fail-closed path resolution (404, never a 403 leak).
+
+These are all `send_header`/stdlib calls — zero-dep — and **on by default**, with
+a `--no-security-headers` escape hatch. This principle **does not** promise
+production hardening: rate limiting, WAF behavior, DoS resistance, and CSRF
+frameworks remain out of scope (Principle 1) — the honest posture is "safe
+defaults for trusted networks; front it with a reverse proxy for exposure."
+Like Principle 1a, it is subordinate to Principle 0: every default here is
+reachable with the standard library alone.
+
 ## 2. File server, not framework — scope discipline
 
 servery serves a directory. It does not help you build an application.

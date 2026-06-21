@@ -85,6 +85,37 @@ behavior).
 returns `404`/`403` by default; with `--follow-symlinks`, it serves the target.
 In-root symlinks (pointing to a sibling under root) are served in both modes.
 
+### 1.1a HTTP/1.1 & Connections
+
+> servery is a conformant **HTTP/1.1** origin server (RFC 9112). The stdlib base
+> defaults to HTTP/1.0 with keep-alive off; servery overrides this. See
+> `STANDARDS.md` §2.5 for the full framing/connection compliance checklist.
+
+**FR-CONN-01 — HTTP/1.1 with persistent connections.**
+servery sets `protocol_version = "HTTP/1.1"` so the status line emits `HTTP/1.1`
+and keep-alive (persistent connections) is the default (RFC 9112 §2.3, §9.3). It
+honors a client `Connection: close` and MUST NOT process further requests on a
+connection after a `close`. Every response that streams a body without a known
+`Content-Length` (chunked archives, streamed zip — FR-ARCHIVE-02) MUST be framed
+by valid chunked transfer-coding **or** `Connection: close`, so a kept-alive
+client never hangs waiting for unbounded body bytes.
+*Acceptance:* the status line of any response reads `HTTP/1.1`; two sequential
+`GET`s over one `http.client.HTTPConnection` (default keep-alive) both succeed on
+the same socket; a request with `Connection: close` yields a response carrying
+`Connection: close` and the socket is closed after it; a streamed `tar.gz`
+download over a keep-alive connection delivers a complete, non-hanging body
+delimited by chunked framing or `Connection: close`. (RFC 9112 §2.3, §9.3, §9.6,
+§7.1; `STANDARDS.md` H1–H4, H9.)
+
+**FR-HOST-01 — Host header validation → `400`.**
+An HTTP/1.1 request with a missing `Host` field, more than one `Host` field line,
+or an invalid `Host` value is rejected with `400 (Bad Request)` (RFC 9112 §3.2).
+The base class validates the request line but does not enforce Host presence;
+servery adds the check in the handler.
+*Acceptance:* an HTTP/1.1 request with no `Host` header returns `400`; a request
+with two `Host` lines returns `400`; a normal request with a single valid `Host`
+is served. (RFC 9112 §3.2; `STANDARDS.md` H6, E15.)
+
 ### 1.2 Directory Listing
 
 **FR-LIST-01 — Rich HTML listing.**
@@ -365,6 +396,22 @@ A directory may be downloaded as a single archive via a query trigger
 respectively), `Content-Disposition: attachment; filename="sub.tar.gz"`, and a
 body that extracts to the directory contents.
 
+**FR-DISP-01 — `Content-Disposition` with RFC 6266/8187 filenames.**
+Explicit downloads (force-download links) and on-the-fly archives (FR-ARCHIVE-01)
+carry `Content-Disposition: attachment` with **both** an ASCII-sanitized
+`filename="…"` fallback and an RFC 8187 `filename*=UTF-8''<pct-encoded>` extended
+form for non-ISO-8859-1 (UTF-8) names, e.g.
+`attachment; filename="EURO rates"; filename*=UTF-8''%e2%82%ac%20rates`. The
+basename is sanitized first (strip CR/LF/`"` and path components) to prevent
+header injection; the UTF-8 octets are percent-encoded per RFC 8187 §3.2.1 (only
+`attr-char` survive unescaped).
+*Acceptance:* an archive download of a directory named `€` yields
+`Content-Disposition: attachment` with `filename*=UTF-8''%e2%82%ac…` plus an
+ASCII `filename=` fallback; an ASCII directory name yields a plain quoted
+`filename="sub.tar.gz"` (the `filename*` form, if also emitted, is harmless).
+(RFC 6266 §4.2/§4.3, RFC 8187 §3.2.1; `STANDARDS.md` D1–D7, E19; refines
+FR-ARCHIVE-01.)
+
 **FR-ARCHIVE-02 — Streaming, memory-bounded archives.**
 Archives stream to the socket rather than being fully buffered in memory.
 `tar`/`tar.gz` use `tarfile.open(fileobj=wfile, mode="w|gz")` (true streaming).
@@ -419,11 +466,55 @@ suitable for a dev tool unless a max-age is set.
 `--no-cache` (or `-c -1`), responses carry `Cache-Control: no-cache` (and no
 positive max-age).
 
-**FR-CACHE-02 — ETag (OPTIONAL).**
-servery MAY emit a weak `ETag` derived from size+mtime (`hashlib`) and honor
-`If-None-Match` → `304`, complementing the inherited `Last-Modified`/`304`.
-*Acceptance (if implemented):* a `GET` returns an `ETag`; a follow-up `GET` with
-matching `If-None-Match` returns `304`.
+**FR-CACHE-02 — ETag (weak, size+mtime_ns).**
+servery emits a **weak** `ETag` derived from the file's size and `st_mtime_ns`
+(`os.stat`), e.g. `W/"<size-hex>-<mtime_ns-hex>"` (the `W/` prefix is required —
+an mtime/size validator is not a strong validator per RFC 9110 §8.8.1), and
+honors `If-None-Match` (weak comparison) → `304`, complementing the inherited
+`Last-Modified`/`304`. The tag MUST be quoted (RFC 9110 §8.8.3). A strong,
+content-hashed `ETag` MAY be offered behind a flag but is not the default (cost).
+*Acceptance:* a `GET` returns a `W/"…"` `ETag`; a follow-up `GET` with a matching
+`If-None-Match` returns `304` with no body; a non-matching `If-None-Match`
+returns `200`. (RFC 9110 §8.8.3, §8.8.3.1; `STANDARDS.md` C2.)
+
+**FR-COND-01 — Full conditional-request precedence (`304`/`412`).**
+servery evaluates the four preconditions in the RFC 9110 §13.2.2 order:
+1. `If-Match` (strong compare) false → `412`;
+2. else `If-Unmodified-Since` false → `412`;
+3. else `If-None-Match` (weak compare) false → `304` for GET/HEAD, `412` for
+   other methods (`*` matches any current representation);
+4. else `If-Modified-Since` false → `304` (ignored entirely when `If-None-Match`
+   is present).
+All preconditions are ignored if the unconditioned response would be other than
+`2xx`/`412`. A `304` carries **no body** and echoes the validator/cache fields it
+would have sent on `200` (`ETag`, `Date`, `Vary`, `Cache-Control`, and
+`Last-Modified` when there is no `ETag`).
+*Acceptance:* a request with a failing `If-Match` + a present `If-None-Match`
+returns `412` (the ladder stops at `If-Match`); both `If-None-Match` and
+`If-Modified-Since` present → the decision is driven by `If-None-Match` and
+`If-Modified-Since` is ignored; `If-None-Match: *` on an existing file → `304`; a
+`412` and a `304` each carry the appropriate validators and the `304` has a
+zero-length (or absent) body. (RFC 9110 §13.1, §13.2.1, §13.2.2, §15.4.5;
+`STANDARDS.md` C1–C12, E9–E12.)
+
+**FR-COND-02 — `If-Range` gating of `Range`.**
+When both `Range` and `If-Range` are present on a GET, servery applies the range
+(`206`) only if `If-Range` matches, otherwise it ignores `Range` and serves the
+full `200`. The date form matches only when it **exactly** equals
+`Last-Modified` (treated as a strong validator); a **weak** `ETag` in `If-Range`
+is treated as **no match** (servery's default `ETag` is weak, so clients must not
+use it here per RFC 9110 §13.1.5).
+*Acceptance:* `If-Range: W/"…"` + `Range:` → full `200`; an `If-Range` date that
+exactly matches `Last-Modified` + `Range:` → `206`; a non-matching `If-Range`
+date → full `200`. (RFC 9110 §13.1.5; `STANDARDS.md` C7, E7.)
+
+**FR-COND-03 — Optimistic-concurrency guard on upload (OPTIONAL).**
+On the write path (`do_POST`, when `--upload` is active), servery MAY honor
+`If-Match` / `If-Unmodified-Since` as an optimistic-concurrency guard, returning
+`412` when the precondition fails before any write occurs.
+*Acceptance (if implemented):* a `POST` whose `If-Unmodified-Since` is older than
+the existing target's mtime returns `412` and writes nothing. (RFC 9110 §13.1.1,
+§13.1.4; `STANDARDS.md` C5–C6, E11.)
 
 **FR-CLEAN-01 — Clean/pretty URLs (OPTIONAL, opt-in).**
 `--pretty-urls`: if a request path has no extension and `<path>.html` exists, it is
@@ -437,6 +528,56 @@ reusing the base `extra_response_headers` hook. This is the escape hatch for HST
 extra CORS, etc.
 *Acceptance:* `--header "X-Test: 1"` causes every response to include `X-Test: 1`;
 the flag may be given multiple times and all are emitted.
+
+### 1.9a Security Headers & Output Escaping
+
+> Secure web-facing defaults (`PRINCIPLES.md`). These are all `send_header` calls
+> (zero-dep) and are **on by default**, with a `--no-security-headers` escape
+> hatch. See `STANDARDS.md` §2.4 and `BEST-PRACTICES.md` §3.2.
+
+**FR-SEC-04 — `X-Content-Type-Options: nosniff` by default.**
+Every response carries `X-Content-Type-Options: nosniff` by default, disabling
+client MIME-sniffing (a `.txt` cannot be sniffed into `text/html` — the classic
+stored-XSS vector for a server of arbitrary user content). It is suppressible via
+`--no-security-headers`.
+*Acceptance:* `GET /a.txt` includes `X-Content-Type-Options: nosniff`; with
+`--no-security-headers` the header is absent. (RFC 9110 §8.3 rationale; WHATWG
+Fetch; `STANDARDS.md` M8, E18.)
+
+**FR-SEC-05 — Security headers on servery-generated pages.**
+servery emits the following defense-in-depth headers, **on by default**:
+- **`Content-Security-Policy`** — scoped to **servery-GENERATED pages only**
+  (directory listings and error pages), NOT to arbitrary served `.html` files
+  (a CSP on user content would break legitimate hosted HTML). Default value:
+  `default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src
+  'unsafe-inline'; form-action 'self'` (`'unsafe-inline'` is required because the
+  listing ships its CSS and small filter script inline, zero-dep). A nonce-based
+  CSP (via `secrets.token_urlsafe`) is a stretch goal.
+- **`Referrer-Policy: no-referrer`** — on all responses, keeping local paths out
+  of the `Referer` of outbound links.
+- **`Strict-Transport-Security: max-age=63072000; includeSubDomains`** — emitted
+  **ONLY under TLS** (never on plain HTTP, where HSTS is meaningless). `preload`
+  is off by default. Enabled only when serving HTTPS; an optional `--hsts` may
+  tune/force it.
+All of the above are suppressed by `--no-security-headers`.
+*Acceptance:* a directory listing response carries the `Content-Security-Policy`
+above and `Referrer-Policy: no-referrer`; a served user `.html` file does **not**
+carry the CSP; under TLS, responses carry `Strict-Transport-Security` while plain
+HTTP responses do not; `--no-security-headers` removes all three. (RFC 9110 §8.3;
+WHATWG/RFC 6797; `STANDARDS.md` §2.4; `BEST-PRACTICES.md` §3.2.)
+
+**FR-SEC-06 — Listing escaping & control-char stripping (XSS choke-point).**
+Every attacker-influenced byte rendered into a listing is context-correctly
+encoded: display text uses `html.escape(name)` with `quote=True` (NOT the base's
+`quote=False`, which leaves `"`/`'` unescaped and is unsafe the moment a name
+lands in an attribute such as `title=`/`data-name`/`download=`); URL targets use
+`urllib.parse.quote(name)`. Control characters (`\r`, `\n`, `\x00`, C0/C1 controls)
+in filenames are stripped or escaped before rendering, never emitted raw into the
+page. This refines and hardens FR-LIST-03.
+*Acceptance:* a file literally named `"><img src=x onerror=alert(1)>.txt` appears
+only as escaped text with no unescaped markup, including inside any attribute; a
+filename containing `\r\n` or `\x00` produces no raw control bytes in the response
+body. (`STANDARDS.md` §2.4; `BEST-PRACTICES.md` §3.1; refines FR-LIST-03.)
 
 ### 1.10 Logging & Startup
 
@@ -464,6 +605,40 @@ the default localhost bind emits no such warning.
 verbosity is otherwise at a sane default.
 *Acceptance (if implemented):* with `-q`, per-request lines are suppressed while
 the startup banner and warnings still appear.
+
+**FR-LOG-05 — Route logging through the `logging` module (library `NullHandler`).**
+servery emits log records via a module logger (`logging.getLogger("servery")`)
+rather than writing straight to `sys.stderr`. As a library it installs a
+`logging.NullHandler` at import and produces **no output** unless the embedding
+application configures handlers; the **CLI** (not the library) attaches a
+`StreamHandler` to stderr so `python -m servery` still prints request lines with
+TTY-aware colorization. (Refines FR-LOG-01.)
+*Acceptance:* `import servery` and a request produce no stderr output until the
+embedder adds a handler; `python -m servery` prints per-request lines as today;
+overriding `log_message`/`log_request` routes through `logger`, asserted by a
+test capturing records on `logging.getLogger("servery")`.
+(`BEST-PRACTICES.md` §6.1.)
+
+**FR-LOG-06 — Capture status AND byte count; quiet client disconnects.**
+Access logging records both the response **status** and the **bytes actually
+sent** (the base reports `-` because `send_response` runs before the body is
+written; servery tracks a running byte count and logs the real total at
+end-of-request). Expected client disconnects mid-body
+(`BrokenPipeError`/`ConnectionResetError`/`ConnectionAbortedError`/`TimeoutError`)
+are handled quietly — no traceback, at most a single debug-level line — and never
+caught as a bare `Exception`.
+*Acceptance:* a completed `GET` logs a non-`-` byte count equal to the bytes sent;
+a client that closes mid-download produces no traceback and the server keeps
+serving other clients. (`BEST-PRACTICES.md` §5.4, §6.2.)
+
+**FR-LOG-07 — Optional access log (Common/Combined Log Format).**
+`--access-log[=FORMAT]` enables an access log in **Common Log Format**
+(`host - - [time] "request" status bytes`) or **Combined** (adds
+`Referer`/`User-Agent`); `--log-format` selects between them. Off by default; the
+human-friendly per-request line remains the default for dev use.
+*Acceptance:* with `--access-log=combined`, requests are logged in Combined Log
+Format including status and byte count; without the flag, no CLF/Combined output
+is produced. (`BEST-PRACTICES.md` §6.2.)
 
 ---
 
@@ -512,6 +687,12 @@ auth/upload/TLS.
 | `--no-cache` | | flag | (default posture) | Send `Cache-Control: no-cache, no-store`. |
 | `--content-type` | | `MIME` | `application/octet-stream` | Default content type for unknown extensions. |
 | `--header` | `-H` | `"Name: Value"` | none | Add a custom response header (repeatable). |
+| `--no-security-headers` | | flag | off (headers ON) | Disable the default security headers (`nosniff`, CSP on generated pages, `Referrer-Policy`, HSTS). |
+| `--hsts` | | flag/`MAX-AGE` | off (auto under TLS) | Force/tune `Strict-Transport-Security` (only meaningful under TLS). |
+| `--timeout` | | `SECONDS` | `30` | Per-request socket timeout (Slowloris mitigation); `0` disables. |
+| `--max-workers` | | `N` | unbounded | Bound concurrency with a `ThreadPoolExecutor` (default: unbounded thread-per-connection). |
+| `--access-log` | | `[FORMAT]` | off | Enable an access log in `common`/`combined` Log Format. |
+| `--log-format` | | `common\|combined` | `common` | Access-log format when `--access-log` is on. |
 | `--quiet` | `-q` | flag | off | Suppress per-request logs. *(optional)* |
 | `--version` | | flag | — | Print version and exit. |
 | `--help` | `-h` | flag | — | Print help and exit. |
@@ -520,9 +701,18 @@ Notes:
 - `--cache`/`-c` and `--no-cache` are two spellings of one concern; `-c -1`
   equals `--no-cache` (http-server convention, borrowed).
 - `--spa` and `--single` are aliases (servery vs `serve`/miniserve naming).
-- mTLS (`--tls-client-ca`) and `--pretty-urls`/`--quiet`/ETag are explicitly
+- mTLS (`--tls-client-ca`) and `--pretty-urls`/`--quiet` are explicitly
   marked nice-to-have/optional; they MUST default off and never change baseline
-  behavior.
+  behavior. (ETag is now default-on per FR-CACHE-02.)
+- Security headers default **ON** (FR-SEC-04/05); `--no-security-headers` is the
+  escape hatch. `--hsts` only takes effect under TLS (HSTS over plain HTTP is
+  meaningless). `--max-workers` defaults to unbounded (NFR-PERF-04).
+- **`zstd` content-coding is Python 3.14+ only** (`compression.zstd`, PEP 784).
+  servery's floor is 3.13, where it is absent. If response compression is ever
+  added, `gzip`/`deflate` are always available and may be negotiated
+  unconditionally; `zstd` MUST be probed/gated behind a
+  `try: from compression import zstd` / `sys.version_info >= (3, 14)` check and
+  advertised in `Accept-Encoding` matching only when the import succeeds.
 
 ### 2.3 Configuration precedence
 
@@ -590,6 +780,46 @@ in bounded chunks; none buffers an entire payload in memory.
 *Acceptance:* serving, archiving, and uploading a payload larger than a set memory
 budget each complete with peak RSS well below the payload size (covered by
 FR-RANGE-02, FR-UPLOAD-02, FR-ARCHIVE-02 tests).
+
+**NFR-PERF-03 — Zero-copy file transfer via `socket.sendfile()`.**
+The full-file `200` download path attempts kernel zero-copy by overriding
+`copyfile` to call `socket.socket.sendfile()` (which uses `os.sendfile` and falls
+back internally), with a bounded `shutil.copyfileobj(..., length=64*1024)`
+fallback for non-regular files or platforms without `sendfile`. servery MUST
+**skip** the sendfile path when the connection is an `ssl.SSLSocket` (TLS
+encryption happens in userspace; `SSLSocket` cannot zero-copy) and go straight to
+the buffered copy. The default copy buffer is **64 KiB**.
+*Acceptance:* a plain-HTTP full-file download succeeds (and uses `sendfile` where
+available, asserted by a fileno/`isinstance` guard test); an HTTPS download of the
+same file succeeds via the buffered fallback without attempting `sendfile`; a
+non-regular source (e.g. a pipe) falls back to the buffered copy. (`socket.py`
+`sendfile`; `BEST-PRACTICES.md` §2.1.)
+
+**NFR-PERF-04 — Default socket timeout (Slowloris mitigation) + optional bounded concurrency.**
+servery sets a per-request socket timeout (`ServeryHandler.timeout`, default e.g.
+**30 s**, configurable via `--timeout`; `0`/`None` disables) so a stalled
+read/write raises `TimeoutError` instead of pinning a worker indefinitely. It
+optionally bounds concurrency via a `concurrent.futures.ThreadPoolExecutor`
+(`--max-workers`); the **default is unbounded** (matching the stdlib
+`ThreadingMixIn` and NFR-PERF-01), with the cap available for network-exposed
+deployments. This is a mitigation, not a production-hardening promise
+(NFR-SEC-03).
+*Acceptance:* a client that connects and sends no request bytes is dropped after
+the timeout rather than holding the worker forever; with `--max-workers N`, no
+more than `N` request handlers run concurrently (excess connections queue);
+without the flag, concurrency is unbounded as today. (`socketserver` timeout;
+`concurrent.futures`; `BEST-PRACTICES.md` §5.1, §5.2.)
+
+**NFR-STD-01 — HTTP/1.1 (9110/9111/9112) only; HTTP/2 & HTTP/3 out of scope.**
+servery targets HTTP/1.1 under RFC 9110/9111/9112. **HTTP/2 (RFC 9113) and HTTP/3
+(RFC 9114) are explicitly out of scope**: the standard library ships no HPACK
+(9113), no QPACK or QUIC (9114), so neither is reachable zero-dep (Principle 0,
+absolute). Consequently the TLS `SSLContext` advertises **only `http/1.1`** via
+ALPN and MUST NOT advertise a protocol servery cannot speak (`h2`/`h3`).
+*Acceptance:* the TLS ALPN protocol list is exactly `["http/1.1"]`; no HTTP/2 or
+HTTP/3 code path exists; an ALPN-negotiating client offered only `h2` does not get
+an `h2` connection. (RFC 9113 §3.2/§4.3, RFC 9114 §1.2/§2; `STANDARDS.md` §1.2,
+NFR-STD-01.)
 
 **NFR-PORT-01 — Cross-platform (Linux / macOS / Windows).**
 servery runs on Linux, macOS, and Windows. Path handling is

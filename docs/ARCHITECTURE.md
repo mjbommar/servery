@@ -55,7 +55,11 @@ base class *is* the boring path).
 | `guess_type` | **reuse, retargeted** | Keep the method; ensure it routes through `mimetypes.guess_file_type` (the 3.13 path-aware API) rather than the soft-deprecated `guess_type(url)`. |
 | `send_head` | **override** | The single GET/HEAD choke-point. servery's version adds auth gate, path-safety, `Range`/`206`, SPA/clean-URL fallback, and cache/CORS headers, then delegates the actual file open back to base semantics where possible. |
 | `list_directory` | **override** | The headline feature: rich sortable listing (size/mtime/sort/breadcrumbs) replaces the plain `<ul>`. |
-| `copyfile` | **override (thin)** | Keep `shutil.copyfileobj` but with an explicit bounded buffer and a `Range`-aware bounded variant. |
+| `copyfile` | **override** | Attempt kernel zero-copy via `self.connection.sendfile(source)` on the full-file `200` path — but **only when the connection is not an `ssl.SSLSocket`** and `source` exposes a real `fileno()`; otherwise fall back to a bounded `shutil.copyfileobj(..., length=64*1024)`. The `Range` `206` path keeps the bounded `seek`+chunked-write loop (NFR-PERF-03; `handler.py`, with the TLS/concurrency wrappers in `server.py`). |
+| `protocol_version` | **override (class attr)** | Set to `"HTTP/1.1"` to enable persistent connections + framing guarantees (FR-CONN-01). |
+| `timeout` | **override (class attr)** | Set a per-request socket timeout (default 30 s) so `StreamRequestHandler.setup` calls `settimeout` — Slowloris mitigation (NFR-PERF-04). |
+| `log_message` / `log_request` | **override** | Route through `logging.getLogger("servery")` (with a library `NullHandler`) instead of writing straight to `sys.stderr`; track the real byte count for access logs (FR-LOG-05/06; `_log.py`). |
+| `process_request` (server) | **override (conditional)** | When `config.max_workers` is set, submit `process_request_thread` to a bounded `concurrent.futures.ThreadPoolExecutor` instead of an unbounded thread (NFR-PERF-04; `server.py`). |
 | `do_GET` / `do_HEAD` | **reuse** | They already just call `send_head`; all our logic lands in `send_head`. |
 | `do_POST` | **add** | Upload (§6). Absent in the base class. |
 | `do_OPTIONS` | **add (conditional)** | CORS preflight when `--cors` is set. |
@@ -69,6 +73,23 @@ base class *is* the boring path).
 > deliberately re-state base logic (the dir-redirect, index-file, and
 > `If-Modified-Since` branches) — it is small, well-understood, and the seam where
 > all our GET features must compose.
+
+### Deliberate improvements over the stdlib base
+
+Subclassing inherits the base's correct HTTP plumbing — and four of its 2026-era
+*weaknesses*. servery fixes each one deliberately, zero-dep, in a named seam.
+(Full RFC rationale in `STANDARDS.md`; implementation rationale in
+`BEST-PRACTICES.md`.)
+
+| Inherited weakness (stdlib base) | servery fix | Where |
+|---|---|---|
+| **HTTP/1.0 default, keep-alive off.** `protocol_version = "HTTP/1.0"` gates off persistent connections; a listing of N assets means N connections. | Set `protocol_version = "HTTP/1.1"` to flip keep-alive on via the base's existing logic; honor `Connection: close`; frame every streamed (`Content-Length`-less) body with chunked or `Connection: close` so a reused socket never hangs. (FR-CONN-01, NFR-STD-01) | `server.py`/`handler.py` (class attr); framing audit across `ranges`/`archive` |
+| **No zero-copy.** `copyfile` is a userspace `shutil.copyfileobj` read/write loop; never calls `sendfile`. | Override `copyfile` to use `socket.sendfile()` (kernel `os.sendfile`, internal fallback) on the full-file `200` path, with a bounded `copyfileobj` fallback — and **skip sendfile for `ssl.SSLSocket`** (TLS must encrypt in userspace). (NFR-PERF-03) | `handler.py` (override), TLS guard in `server.py` |
+| **No timeout, unbounded threads.** `socketserver` `timeout = None`; `ThreadingMixIn` spawns an uncapped thread per connection → Slowloris + thread/FD exhaustion exposure. | Set a per-request socket `timeout` (default 30 s) so stalled I/O raises `TimeoutError`; offer an optional `concurrent.futures.ThreadPoolExecutor` cap via `--max-workers` (default still unbounded). A mitigation, not a hardening promise (NFR-SEC-03). (NFR-PERF-04) | `handler.py` (`timeout` attr); `server.py` (`process_request`) |
+| **Logs straight to `sys.stderr`.** `log_message` writes to stderr with no level/handler; an embedder cannot redirect or silence it; access logs always show `-` for size. | Route through `logging.getLogger("servery")` with a library `NullHandler` (library quiet, CLI loud); track the real byte count and status; swallow expected client disconnects without tracebacks; optional CLF/Combined access log. (FR-LOG-05/06/07) | `_log.py`; `handler.py` (`log_message`/`log_request`) |
+
+These are additive overrides at named seams — never a fork of the base. Each is
+gated or defaulted so a bare `servery` stays minimal and safe.
 
 ---
 
@@ -91,7 +112,8 @@ servery/
 │       ├── server.py         # ServeryHTTPServer / ServeryHTTPSServer, dual-stack, make_server(), TLS wrap
 │       ├── handler.py        # ServeryHandler(SimpleHTTPRequestHandler): send_head, list_directory, do_POST, do_OPTIONS
 │       ├── security.py       # path containment + symlink policy; the one choke-point
-│       ├── httputil.py       # header helpers: CORS, Cache-Control, ETag, fallback/clean-URL resolution
+│       ├── httputil.py       # header helpers: CORS, Cache-Control, ETag + conditional ladder, security headers, Content-Disposition (6266/8187), fallback/clean-URL resolution
+│       ├── _log.py           # logging.getLogger("servery") + NullHandler; access-log (CLF/Combined) formatting
 │       ├── ranges.py         # Range header parse → (start, end); 206/416 helpers; bounded emit
 │       ├── auth.py           # Authenticator: Basic parse, hmac.compare_digest, hashed-file format
 │       ├── upload.py         # do_POST body: multipart streaming parser → temp → os.replace
@@ -119,6 +141,22 @@ servery/
   features.
 - **`httputil.py` vs `ranges.py` vs `archive.py`** are split by HTTP concern so
   the default download path (no range, no archive) pulls in almost nothing.
+- **ETag + the conditional-request ladder, security headers, and
+  `Content-Disposition` live in `httputil.py`** (not a separate `conditional.py`).
+  All three are header-emission helpers driven from the same `send_head` step
+  ([5]/[6] below): the validator/precedence logic (FR-COND-01/02), the
+  default security headers (FR-SEC-04/05), and the RFC 6266/8187 filename builder
+  (FR-DISP-01) are small, stateless functions over the request headers + `os.stat`
+  result. Folding them into `httputil` keeps the closely-coupled "decide status +
+  emit headers" logic in one place and honors the ~12-module ceiling; a dedicated
+  `conditional.py` would fragment the ladder from the `ETag`/`Cache-Control` it
+  depends on for little gain. (If the precedence ladder grows unwieldy it can be
+  promoted to its own module later — a pure refactor, no behavior change.)
+- **`_log.py` IS a new module**, because routing through `logging` + a library
+  `NullHandler` + access-log (CLF/Combined) formatting is a distinct
+  responsibility (FR-LOG-05/06/07) that the handler should call into, not own.
+  The handler's `log_message`/`log_request` overrides are one-liners that delegate
+  here.
 - **`_templates.py`** is data, not logic — inline `string.Template` HTML/CSS
   shipped in the wheel; no build step, satisfying "no asset pipeline"
   (`PRINCIPLES.md` §0).
@@ -286,28 +324,47 @@ url_path) -> str | None`. It is the *only* function that turns a URL into a
 filesystem path, and every feature (GET, listing, archive, upload target) calls
 it. It composes the base `translate_path` with a containment check:
 
+This follows Starlette's audited `lookup_path` model (`BEST-PRACTICES.md` §3.3,
+Appendix): **`realpath` BOTH sides**, then `os.path.commonpath` containment, with
+absolute-path and NUL-byte rejection, failing **closed to 404**:
+
 ```python
 def resolve(handler, url_path) -> str | None:
     candidate = handler.translate_path(url_path)   # base: normpath, drops .., strips //
-    root = handler.server.config.root_realpath     # realpath(directory), computed once
-    real = os.path.realpath(candidate)             # collapses symlinks
-    # containment: real must equal root or sit under root + os.sep
-    if real != root and not real.startswith(root + os.sep):
-        return None                                # → 404 (do not distinguish from missing)
+    root = handler.server.config.root_realpath     # os.path.realpath(directory), once
+    try:
+        real = os.path.realpath(candidate)         # collapse symlinks on the candidate
+        # containment via commonpath: separator-correct, cross-platform.
+        # commonpath raises ValueError on mixed-absoluteness/different drives → fail closed.
+        if os.path.commonpath([real, root]) != root:
+            return None                            # client tried to break out → 404
+    except ValueError:
+        return None                                # NUL byte, mixed drives, etc. → 404
     if handler.server.config.no_symlinks and os.path.islink(candidate):
         return None
     return candidate
 ```
 
 - We **reuse** the base `translate_path` (it already drops `..`, drive letters,
-  and the `//` open-redirect) and **add** the `realpath` containment so a symlink
-  *inside* the root cannot point *outside* it.
+  and the `//` open-redirect) and **add** `realpath`-both-sides + `commonpath`
+  containment so a symlink *inside* the root cannot point *outside* it.
+- **Prefer `os.path.commonpath([real, root]) == root` over a string
+  `real.startswith(root + os.sep)` check.** `commonpath` is the cross-platform,
+  separator-correct comparison Starlette uses (`staticfiles.py:154-173`) and
+  avoids the `/a/rootEVIL` vs `/a/root` prefix-collision class of bug.
+- Reject **absolute and backslash-absolute** request paths
+  (`path.startswith(("/", "\\"))`) and **catch `ValueError` from embedded NUL
+  bytes** → 404, mirroring Starlette's caller. Keep the security-critical
+  containment in `os.path` (not `pathlib`) — the string-level `commonpath` check
+  is the audited primitive (`BEST-PRACTICES.md` §7).
 - The default symlink policy is conservative: `--no-symlinks` rejects symlinks
   outright; without it, symlinks are followed but the `realpath` containment
   check still forbids escaping the root. A symlink can never become a traversal
   bypass.
-- Failures return **404, never 403** — we do not leak whether a forbidden path
-  exists.
+- Failures (traversal, symlink-escape, permission, NUL byte) all return **404,
+  never 403** — we do not leak whether a forbidden path exists, and we map
+  `PermissionError` to `404` too (a dev tool need not advertise an
+  exists-but-unreadable file).
 
 ### 5.2 Constant-time auth
 

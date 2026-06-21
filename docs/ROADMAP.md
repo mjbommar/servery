@@ -31,7 +31,11 @@ A milestone is not "shipped" until:
 - [ ] **Tests pass via stdlib `unittest`.** New behavior covered by
       `unittest`-based tests (using `http.client` / `urllib.request` against a
       live `ThreadingHTTPServer` on an ephemeral port). No third-party test
-      runner. Coverage measured with stdlib facilities where used.
+      runner. Coverage measured with stdlib facilities where used. **RFC-conformance
+      cases** for any standards behavior in the milestone (the `STANDARDS.md` §4
+      corpus — e.g. the conditional-ladder E9–E13, the `Host` `400` E15, the
+      `nosniff`/escaping E18, the `Content-Disposition` E19, the keep-alive
+      framing E21) are encoded as part of the suite.
 - [ ] **Runs on every supported CPython** (3.13 and each newer non-EOL release),
       exercised in CI on Linux, macOS, and Windows.
 - [ ] **Safe defaults intact.** Still binds `127.0.0.1` by default;
@@ -54,13 +58,13 @@ A milestone is not "shipped" until:
 |-----|-----------------|-------------------------|
 | **v0.1** | Walking skeleton: installable, runnable, *rich* listing, safe bind | `python -m servery` shows size/mtime/dir-first listing on localhost |
 | **v0.2** | Sortable + searchable listing (Apache `?C=&O=`) | Clicking a column re-sorts JS-free; `?q=` filters |
-| **v0.3** | Range/resumable downloads + correct caching headers | `curl -r` returns `206` + `Content-Range`; `ETag`/`304` work |
+| **v0.3** | Range + conditional requests (ETag/`If-*` ladder) + zero-copy | `curl -r` returns `206`; full `If-*` precedence → `304`/`412`; `sendfile` zero-copy |
 | **v0.4** | TLS (user cert/key) | `--tls cert.pem key.pem` serves HTTPS via `SSLContext` |
 | **v0.5** | Basic Auth (+ hashed, constant-time, no-TLS warning) | `--auth u:p` gates access; wrong creds → `401`; loud HTTP warning |
 | **v0.6** | Upload (opt-in, streamed, bounded, overwrite-off) | `--upload` accepts multipart to disk, bounded, no traversal |
 | **v0.7** | Archive download (zip / tar.gz) | `?archive=tar.gz` streams a folder; zip option present |
 | **v0.8** | CORS + SPA fallback + cache flags | `--cors`, `--spa`, `-c<n>`/`-c-1` behave per conventions |
-| **v0.9** | Hardening & polish (logging, error pages, cross-platform, coverage) | Themed error pages; Windows-clean; high coverage |
+| **v0.9** | Hardening & polish (logging/access-log, bounded concurrency, error pages, cross-platform) | Themed error pages; `--max-workers`/`--access-log`; Windows-clean; high coverage |
 | **v1.0** | Stability + packaging + PyPI release | `pip install servery` from PyPI; API/CLI frozen for 1.x |
 
 ---
@@ -86,12 +90,26 @@ safely to localhost.
   `string.Template`; `urllib.parse.quote` links; light/dark via
   `prefers-color-scheme`. Guard per-entry `OSError` (broken symlinks).
 - Switch MIME lookup to `mimetypes.guess_file_type` (path-preferred, 3.13+).
+- **HTTP/1.1 by default:** set `protocol_version = "HTTP/1.1"` (keep-alive on;
+  honor `Connection: close`). Cheap one-liner that turns on persistent
+  connections — `FR-CONN-01`. (Streamed/`Content-Length`-less bodies arrive in
+  later milestones; framing audit travels with them.)
+- **Secure-by-default headers from day one:** `X-Content-Type-Options: nosniff`
+  on every response (`FR-SEC-04`), plus correct **listing escaping** —
+  `html.escape(name)` with `quote=True` and control-char stripping in filenames
+  (`FR-SEC-06`, hardening `FR-LIST-03`). Security headers must be default-on, not
+  bolted on later. `--no-security-headers` escape hatch.
+- **Default socket timeout** (`ServeryHandler.timeout`, e.g. 30 s) as a safe
+  default — Slowloris mitigation, zero cost (`NFR-PERF-04`); `--timeout` to tune.
 - **Safe-default bind 127.0.0.1**; `--host 0.0.0.0` is the explicit opt-in.
 - Basic CLI (stdlib `argparse`): `[directory]`, `--host`, `--port`, `--bind`
-  alias, `--version`. Friendly startup banner (bound address).
+  alias, `--timeout`, `--no-security-headers`, `--version`. Friendly startup
+  banner (bound address).
 
-**Out of scope (for now):** sorting/search UI, Range, TLS, auth, upload,
-archives, CORS/SPA, themes selector, hidden-file toggle.
+**Out of scope (for now):** sorting/search UI, Range, ETag/conditional ladder,
+TLS, auth, upload, archives, CORS/SPA, themes selector, hidden-file toggle,
+remaining security headers (CSP/Referrer-Policy/HSTS — land with their
+milestones).
 
 **Exit criteria:**
 
@@ -99,6 +117,12 @@ archives, CORS/SPA, themes selector, hidden-file toggle.
   `import servery; servery.serve(...)` all serve the cwd with the rich listing.
 - Listing shows size + mtime + dirs-first and renders correctly for an empty
   dir, a dir with subdirs, and a dir with a broken symlink (no crash).
+- The status line reads `HTTP/1.1`; two sequential requests reuse one keep-alive
+  connection; `Connection: close` is honored (`FR-CONN-01`).
+- Every response carries `X-Content-Type-Options: nosniff`; a hostile filename
+  (`"><img …>.txt`, and one with `\r\n`/`\x00`) renders fully escaped with no raw
+  control bytes (`FR-SEC-04`, `FR-SEC-06`); `--no-security-headers` removes the
+  header.
 - Default bind is `127.0.0.1`; a test asserts it does **not** bind `0.0.0.0`
   without the flag.
 - Path-traversal regression test passes (`..`, encoded, absolute tricks all 404
@@ -146,11 +170,12 @@ for the core path.
 
 ---
 
-## v0.3 — Range / resumable downloads + caching headers
+## v0.3 — Range + conditional requests + zero-copy
 
 **Goal.** Make large files and media behave: resumable downloads and seeking,
-plus correct, controllable cache validation. Pure handler work with no new
-config surface coupling — which is why it precedes TLS/Auth.
+correct RFC 9110 conditional-request handling, and kernel zero-copy on the hot
+path. Pure handler work with no new config surface coupling — which is why it
+precedes TLS/Auth.
 
 **In scope:**
 
@@ -159,24 +184,45 @@ config surface coupling — which is why it precedes TLS/Auth.
   `Content-Range: bytes a-b/total` + bounded `Content-Length`, `seek()` + bounded
   read. Handle suffix (`bytes=-N`) and open-ended (`bytes=a-`) forms; `416` for
   unsatisfiable. Single-range only (multipart byteranges out of scope).
-- **Caching:** keep the base class's `Last-Modified` / `If-Modified-Since` →
-  `304`; add an **`ETag`** derived from size+mtime (`hashlib`) and honor
-  `If-None-Match` → `304`.
+- **`ETag` (weak):** emit a weak `W/"<size>-<mtime_ns>"` validator from `os.stat`
+  (`FR-CACHE-02`); quoted, `W/`-prefixed.
+- **Full conditional-request ladder (`FR-COND-01`):** implement the RFC 9110
+  §13.2.2 precedence — `If-Match` / `If-Unmodified-Since` (→ `412`) before
+  `If-None-Match` / `If-Modified-Since` (→ `304` for GET/HEAD); ignore
+  `If-Modified-Since` when `If-None-Match` is present; `304` carries no body and
+  echoes validators (`ETag`/`Date`/`Vary`/`Cache-Control`). Keep the inherited
+  `Last-Modified`/`If-Modified-Since` path as the bottom rung.
+- **`If-Range` gating (`FR-COND-02`):** apply `Range` only when `If-Range`
+  matches (date-exact or strong-ETag); a weak `ETag` in `If-Range` → full `200`.
+- **Zero-copy via `socket.sendfile()` (`NFR-PERF-03`):** override `copyfile` for
+  the full-file `200` path to use `self.connection.sendfile(source)` (kernel
+  `os.sendfile`, internal fallback) with a bounded `copyfileobj` fallback;
+  **skip sendfile under TLS (`ssl.SSLSocket`)**. The `206` path keeps the bounded
+  seek/read loop.
 
 **Out of scope (for now):** multi-range responses, gzip response compression
-(lands in v0.8 with the other header flags), the `Cache-Control` *flag* (v0.8).
+(lands in v0.8 with the other header flags), the `Cache-Control` *flag* (v0.8),
+the optional upload-write `If-Match`/`If-Unmodified-Since` guard (`FR-COND-03`,
+revisited with upload in v0.6).
 
 **Exit criteria:**
 
 - `curl -r 0-99 <url>` returns `206`, correct `Content-Range`, exactly 100 bytes;
   suffix and open-ended ranges work; an out-of-bounds range returns `416`.
 - A resumed/aborted download completes correctly across two range requests.
-- Conditional GET with a stale `If-None-Match` returns `304`; fresh returns
-  `200`.
+- The full conditional ladder is tested per `STANDARDS.md` §4: failing `If-Match`
+  + present `If-None-Match` → `412` (precedence); `If-None-Match` beats
+  `If-Modified-Since`; `If-None-Match: *` → `304`; `304` has no body and echoes
+  `ETag`; `Range` is ignored when the conditional yields `304`; weak-`ETag`
+  `If-Range` → full `200`.
+- A plain-HTTP full-file download uses `sendfile` (asserted by guard test); an
+  HTTPS download of the same file falls back to the buffered copy without
+  attempting `sendfile`.
 - Definition-of-Done satisfied.
 
-**Primary stdlib modules:** `http.server`, `os`/`io` (`seek`, bounded read),
-`hashlib`, `email.utils` (HTTP-date), `shutil`.
+**Primary stdlib modules:** `http.server`, `os`/`io` (`seek`, bounded read,
+`sendfile`), `socket` (`sendfile`), `ssl` (TLS guard), `hashlib`, `email.utils`
+(HTTP-date), `shutil`.
 
 ---
 
@@ -190,13 +236,18 @@ generation (the stdlib cannot mint certs), so cert/key are user-provided.
 - `--tls CERT KEY` (and `--tls-cert` / `--tls-key`, plus
   `--tls-password-file` for an encrypted key) wired through the server.
 - Build context via `ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)` +
-  `ctx.load_cert_chain(...)` + ALPN `["http/1.1"]`, mirroring
-  `http.server.HTTPSServer` / `ThreadingHTTPSServer`. Never `ssl.wrap_socket`.
+  `ctx.load_cert_chain(...)` + ALPN **`["http/1.1"]` only** (HTTP/2/3 are
+  permanently out — no stdlib HPACK/QPACK/QUIC; `NFR-STD-01`). Never
+  `ssl.wrap_socket`. Leave the default cipher suite and session tickets;
+  `minimum_version = TLSv1_2`.
+- **HSTS under TLS (`FR-SEC-05`):** emit `Strict-Transport-Security` (e.g.
+  `max-age=63072000; includeSubDomains`, `preload` off) **only** when serving
+  HTTPS — never on plain HTTP. `--hsts` may tune/force it.
 - Startup banner reflects `https://` and the bound address.
 
 **Out of scope (for now):** mTLS / client-cert verification (deferred — see
 backlog), stdlib self-signed cert generation (impossible; documented as such),
-HSTS header (lands with header flags in v0.8).
+the non-TLS security headers CSP/`Referrer-Policy` (land in v0.8 with CORS).
 
 **Exit criteria:**
 
@@ -303,7 +354,11 @@ temp-file is the contract; document the memory boundary honestly).
 - **zip:** `zipfile.ZipFile` with `ZIP_DEFLATED`; stream chunked to the socket
   (or temp-file-then-stream) to avoid an in-RAM full archive. Since streamed
   archives cannot set `Content-Length`, use chunked transfer / connection-close
-  appropriately.
+  appropriately (the keep-alive framing corollary of `FR-CONN-01`).
+- **`Content-Disposition` (`FR-DISP-01`):** `attachment` with both an
+  ASCII-sanitized `filename="…"` fallback and an RFC 8187
+  `filename*=UTF-8''<pct-encoded>` extended form for non-ASCII directory names;
+  sanitize the basename first (strip CR/LF/`"`) against header injection.
 - Respect path-traversal/symlink rules while walking (`os.walk`); skip entries
   that escape the root.
 
@@ -315,6 +370,11 @@ tuning.
 
 - `?archive=tar.gz` of a folder streams a valid gzip tar that extracts to the
   original tree; `?archive=zip` likewise extracts correctly.
+- An archive of a directory named `€` carries
+  `Content-Disposition: attachment; filename*=UTF-8''%e2%82%ac…` plus an ASCII
+  `filename=` fallback (`FR-DISP-01`).
+- A streamed `tar.gz` over a keep-alive connection is delimited by chunked or
+  `Connection: close` and delivers a complete, non-hanging body.
 - Memory stays bounded for a large tree (no full-archive buffering for tar.gz;
   documented bound for zip).
 - Symlinks/paths that would escape the root are not included.
@@ -340,9 +400,19 @@ and routing-level flags that share machinery.
   `-c-1` as the explicit "no cache" sentinel.
 - Optional **clean URLs** (opt-in): serve `/about` from `/about.html`,
   301-redirect the `.html` form to the clean form.
-- **gzip response compression** (opt-in): honor `Accept-Encoding: gzip` for text
-  types, set `Content-Encoding: gzip`, skip already-compressed types.
-- Custom headers via the base `extra_response_headers` / `-H` hook (HSTS, etc.).
+- **Remaining security headers (`FR-SEC-05`):** `Content-Security-Policy` scoped
+  to servery-**generated** pages only (listings/error pages — never on served
+  user `.html`), default `default-src 'none'; img-src 'self'; style-src
+  'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'`; and
+  `Referrer-Policy: no-referrer` on all responses. Default-on; suppressible with
+  `--no-security-headers`. (`nosniff` already shipped in v0.1; HSTS-under-TLS in
+  v0.4.)
+- **gzip response compression** (opt-in): honor `Accept-Encoding: gzip`/`deflate`
+  for text types, set `Content-Encoding`, skip already-compressed types, emit
+  `Vary: Accept-Encoding`. `gzip`/`deflate` are always stdlib; **`zstd` is 3.14+
+  only** (`compression.zstd`) and MUST be probed/gated, never advertised on 3.13.
+- Custom headers via the base `extra_response_headers` / `-H` hook (extra CORS,
+  etc.).
 
 **Out of scope (for now):** per-origin CORS allowlists, route-prefix / random
 route (low priority; backlog), healthcheck endpoint (backlog).
@@ -352,6 +422,9 @@ route (low priority; backlog), healthcheck endpoint (backlog).
 - `--cors` sets the header and answers preflight `OPTIONS` with `204`.
 - With `--spa`, a deep non-file path returns `index.html` body with a `200` (no
   redirect); a present `404.html` is served on miss.
+- A directory-listing response carries the default `Content-Security-Policy` and
+  `Referrer-Policy: no-referrer`; a served user `.html` file does **not** carry
+  the CSP; `--no-security-headers` removes both (`FR-SEC-05`).
 - `-c3600` sets `Cache-Control: max-age=3600`; `-c-1` disables caching.
 - gzip path returns `Content-Encoding: gzip` only for eligible types and decodes
   to the original bytes.
@@ -368,10 +441,18 @@ error pages, cross-platform correctness, and real test depth.
 
 **In scope:**
 
-- **Logging:** TTY-aware request logging (reuse/extend `log_message` /
-  `_colorize`); a `--quiet` and a `--verbose`/access-log toggle; clear,
-  consistent startup banner summarizing host/port, TLS on/off, auth on/off (+
-  no-TLS warning), upload on/off.
+- **Logging through `logging` (`FR-LOG-05/06/07`):** route request logging
+  through `logging.getLogger("servery")` with a library `NullHandler` (library
+  quiet, CLI loud — CLI attaches a TTY-aware `StreamHandler`); capture status AND
+  real byte count (not the stdlib's `-`); swallow expected client disconnects
+  (`BrokenPipeError`/`ConnectionResetError`/`TimeoutError`) without tracebacks.
+  `--quiet`, plus an opt-in **access log** in Common/Combined Log Format
+  (`--access-log[=FORMAT]` / `--log-format`). Clear startup banner summarizing
+  host/port, TLS on/off, auth on/off (+ no-TLS warning), upload on/off.
+- **Bounded concurrency (`NFR-PERF-04`):** optional `--max-workers` cap via a
+  `concurrent.futures.ThreadPoolExecutor` (override `process_request`); default
+  stays unbounded thread-per-connection. (The default socket `--timeout` already
+  shipped in v0.1.)
 - **Error pages:** themed, escaped HTML for `401/403/404/413/416/500` matching
   the listing's look; never leak filesystem paths or stack traces to clients.
 - **Cross-platform:** Windows path quirks (drive letters, separators, reserved
@@ -393,6 +474,11 @@ beyond avoiding obvious O(n²)/full-buffer patterns.
 
 - Error responses are themed, escaped, and leak nothing; verified per status
   code.
+- `import servery` is silent until the embedder adds a handler; `--access-log`
+  emits Common/Combined Log Format with a real byte count; a mid-download client
+  disconnect produces no traceback (`FR-LOG-05/06/07`).
+- `--max-workers N` caps concurrent handlers at `N` (excess queue); default is
+  unbounded (`NFR-PERF-04`).
 - Full CI matrix (all supported CPython × Linux/macOS/Windows) green.
 - Security regression suite passes (traversal, symlink, upload sanitation,
   timing-safe auth).
@@ -494,5 +580,7 @@ Parked ideas, each with the reason. Nothing here blocks 1.0.
 | **Basic Auth over plain HTTP misunderstood as private** | Med × Med | Loud startup warning when auth is on without TLS; docs are explicit that base64 ≠ encryption; banner restates TLS state. |
 | **Accidental dependency creep** | Low × Critical (breaks the promise) | Release gate that fails the build if `dependencies` is non-empty or anything but `servery` imports from a clean install; reviewer checklist item; Principle 0 is the tie-breaker on every design call. |
 | **Streamed archive/gzip can't set `Content-Length`** → client confusion | Low × Med | Use chunked transfer-encoding / connection-close deliberately; test that clients (curl, browsers) receive complete archives; document the streaming contract. |
+| **Keep-alive framing correctness** (HTTP/1.1 default reuses the socket; a wrong/missing `Content-Length` corrupts the *next* request) | Med × High | Framing audit on every body-writing path (files/ranges send exact `Content-Length`; listings/errors too); streamed/`Content-Length`-less bodies (`tar.gz`, zip) use chunked or `Connection: close`; a keep-alive test asserts a complete, non-hanging body and that a second request on the same socket is not corrupted (`STANDARDS.md` E9/E21; `FR-CONN-01`). |
+| **`sendfile`/TLS interaction** (`ssl.SSLSocket` cannot zero-copy; `os.sendfile` absent on some platforms) | Low × Med | `copyfile` skips `sendfile` when `isinstance(self.connection, ssl.SSLSocket)` and goes straight to the bounded buffered copy; `socket.sendfile` also falls back internally for non-regular files; a guard test asserts HTTPS uses the fallback and plain HTTP uses zero-copy where available (`NFR-PERF-03`; `BEST-PRACTICES.md` §2.1). |
 | **Concurrency races on upload** (same target file, atomic visibility) | Low × Med | Temp-file + atomic `os.rename`; overwrite-off by default with collision handling; tests under concurrent POSTs. |
 | **Scope creep toward "a worse Flask"** | Med × High (to the project's identity) | Every feature runs the §7 scope rubric; the north-star backlog records the *no*s with reasons so they aren't re-litigated; "the default answer is no." |
