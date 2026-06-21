@@ -217,6 +217,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         # nosniff on everything, including error pages: we serve arbitrary files,
         # so MIME-sniffing is a stored-XSS vector we close by default.
         self.send_header("X-Content-Type-Options", "nosniff")
+        if isinstance(self.connection, ssl.SSLSocket):
+            # HSTS is only meaningful (and only valid) over TLS.
+            self.send_header("Strict-Transport-Security", "max-age=63072000")
         super().end_headers()
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (matches base signature)

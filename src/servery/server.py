@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import os
 import socket
+import ssl
 import sys
 from http.server import ThreadingHTTPServer
 from typing import Any
@@ -38,6 +39,17 @@ class ServeryHTTPServer(ThreadingHTTPServer):
                 self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
         super().server_bind()
 
+    def server_activate(self) -> None:
+        super().server_activate()
+        cert = self.config.tls_cert
+        if cert is not None:
+            # create_default_context already enforces a sane minimum (TLS 1.2+)
+            # and a secure cipher set; we only advertise HTTP/1.1 over ALPN.
+            context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            context.load_cert_chain(cert, self.config.tls_key, self.config.tls_password)
+            context.set_alpn_protocols(["http/1.1"])
+            self.socket = context.wrap_socket(self.socket, server_side=True)
+
     def finish_request(self, request: Any, client_address: Any) -> None:
         ServeryHandler(
             request,
@@ -53,10 +65,11 @@ def make_server(config: Config) -> ServeryHTTPServer:
 
 
 def server_url(server: ServeryHTTPServer) -> str:
-    """Return the http:// URL the server is actually listening on."""
+    """Return the URL the server is actually listening on."""
     host, port = server.server_address[:2]
     host_display = f"[{host}]" if ":" in str(host) else host
-    return f"http://{host_display}:{port}/"
+    scheme = "https" if server.config.uses_tls else "http"
+    return f"{scheme}://{host_display}:{port}/"
 
 
 def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (CLI entry)

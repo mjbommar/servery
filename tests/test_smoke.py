@@ -2,7 +2,9 @@
 
 import contextlib
 import io
+import tempfile
 import unittest
+from pathlib import Path
 
 import servery
 from servery import cli
@@ -44,6 +46,24 @@ class CliParserTest(unittest.TestCase):
             cli.main(["--version"])
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("servery", out.getvalue())
+
+    def test_tls_help_prints_and_exits_zero(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(["--tls-help"])
+        self.assertEqual(code, 0)
+        self.assertIn("openssl", out.getvalue())
+
+    def test_tls_config_and_password_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pw = Path(tmp) / "pw.txt"
+            pw.write_text("s3cret\n")
+            args = cli.build_parser().parse_args(
+                ["--tls-cert", "c.pem", "--tls-key", "k.pem", "--tls-password-file", str(pw)]
+            )
+            config = cli.config_from_args(args)
+        self.assertTrue(config.uses_tls)
+        self.assertEqual(config.tls_password, "s3cret")
 
 
 if __name__ == "__main__":

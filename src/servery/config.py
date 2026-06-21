@@ -25,11 +25,19 @@ class Config:
     port: int = 8000
     show_hidden: bool = False
     quiet: bool = False
+    tls_cert: str | None = None
+    tls_key: str | None = None
+    tls_password: str | None = None
 
     @property
     def is_loopback_bind(self) -> bool:
         """True when bound to a loopback address (the safe default)."""
         return self.host in {"127.0.0.1", "::1", "localhost"}
+
+    @property
+    def uses_tls(self) -> bool:
+        """True when HTTPS is configured (a certificate was provided)."""
+        return self.tls_cert is not None
 
     @classmethod
     def create(
@@ -40,6 +48,9 @@ class Config:
         port: int = 8000,
         show_hidden: bool = False,
         quiet: bool = False,
+        tls_cert: str | None = None,
+        tls_key: str | None = None,
+        tls_password: str | None = None,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
         return cls(
@@ -48,4 +59,7 @@ class Config:
             port=port,
             show_hidden=show_hidden,
             quiet=quiet,
+            tls_cert=tls_cert,
+            tls_key=tls_key,
+            tls_password=tls_password,
         )

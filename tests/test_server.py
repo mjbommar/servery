@@ -5,6 +5,8 @@ import email.utils
 import http.client
 import io
 import os
+import ssl
+import subprocess
 import tempfile
 import threading
 import time
@@ -243,6 +245,81 @@ class ServerTestCase(unittest.TestCase):
             self.assertNotIn(b"LEAK", body)
         finally:
             outside.unlink(missing_ok=True)
+
+
+class TlsServerTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        directory = Path(self._tmp.name)
+        (directory / "hello.txt").write_text("secure hi")
+        cert = directory / "cert.pem"
+        key = directory / "key.pem"
+        try:
+            subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-nodes",
+                    "-keyout",
+                    str(key),
+                    "-out",
+                    str(cert),
+                    "-days",
+                    "1",
+                    "-subj",
+                    "/CN=localhost",
+                ],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            self._tmp.cleanup()
+            self.skipTest("openssl not available")
+
+        config = Config.create(
+            directory,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            tls_cert=str(cert),
+            tls_key=str(key),
+        )
+        self.httpd = make_server(config)
+        self.host = str(self.httpd.server_address[0])
+        self.port = int(self.httpd.server_address[1])
+        self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self._thread.join(timeout=5)
+        self._tmp.cleanup()
+
+    def _client_context(self) -> ssl.SSLContext:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        return context
+
+    def test_https_serves_file_with_hsts(self):
+        conn = http.client.HTTPSConnection(
+            self.host, self.port, timeout=5, context=self._client_context()
+        )
+        conn.request("GET", "/hello.txt")
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body, b"secure hi")
+        self.assertIn("max-age", resp.getheader("Strict-Transport-Security", ""))
+
+    def test_server_url_is_https(self):
+        self.assertTrue(server_url(self.httpd).startswith("https://"))
 
 
 if __name__ == "__main__":
