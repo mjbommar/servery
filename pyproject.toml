@@ -54,6 +54,9 @@ dev = [
   "build>=1.2",
   "twine>=5.0",
   "pre-commit>=3.7",
+  # Interop-only: an independent client to cross-check the server (HTTP/1.1 + 2).
+  # Never a runtime dependency; interop tests skip when it is absent.
+  "httpx[http2]>=0.27",
 ]
 # Note: ty (the type checker) is run via `uvx ty` — it is preview-versioned and
 # fast-moving, so we pull the latest ephemerally rather than pinning it here.
