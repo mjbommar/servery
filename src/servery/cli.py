@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -175,24 +176,30 @@ def config_from_args(args: argparse.Namespace) -> Config:
     )
 
 
-def main(
-    argv: Sequence[str] | None = None,
-) -> int:  # pragma: no cover - CLI entry, blocks on serve()
+def main(argv: Sequence[str] | None = None) -> int:
     """Run the servery CLI. Returns a process exit code."""
     args = build_parser().parse_args(argv)
     if args.tls_help:
         print(TLS_HELP)
         return 0
-    config = config_from_args(args)
     try:
+        config = config_from_args(args)
         if args.http3:
-            from servery.http3 import serve_http3
+            from servery.http3 import Http3UnavailableError, serve_http3
 
-            serve_http3(config)
+            try:
+                serve_http3(config)  # pragma: no cover - blocking server loop
+            except Http3UnavailableError as exc:
+                print(f"servery: error: {exc}", file=sys.stderr)
+                return 2
         else:
-            serve(config)
-    except KeyboardInterrupt:
+            serve(config)  # pragma: no cover - blocking server loop
+    except KeyboardInterrupt:  # pragma: no cover
         return 0
+    except (ValueError, OSError) as exc:
+        # Bad --auth spec, unreadable --tls-password-file, etc.: fail cleanly.
+        print(f"servery: error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

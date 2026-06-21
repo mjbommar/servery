@@ -2,12 +2,20 @@
 
 > From an empty repo to a polished, PyPI-published v1.0 — sequenced by
 > value-to-effort and dependency order, foundation before features.
+>
+> **Status (1.0 shipped): this document is now a "how it was built" history.**
+> Every milestone below — **v0.1 through v0.9** plus the **HTTP/2** and
+> **HTTP/3** transport tiers — **shipped in 1.0**. servery 1.0 delivers the full
+> HTTP/1.1 core, a pure-stdlib HTTP/2 backend (`--http2`), and an optional HTTP/3
+> tier via the `servery[http3]` aioquic extra (`--http3`). Read the milestones as
+> the delivered build sequence, not as pending work. The tiered transport model is
+> recorded in `docs/TRANSPORTS.md`.
 
 This roadmap is governed by `PRINCIPLES.md` (Principle 0 above all: **zero
-third-party dependencies, pure Python stdlib, forever**) and scoped by
-`VISION.md`. Every milestone is independently shippable. Each lists a **goal**,
-**in scope**, **out of scope (for now)**, **exit criteria**, and the **primary
-stdlib modules** involved.
+third-party dependencies in the core, pure Python stdlib, forever** — the opt-in
+HTTP/3 tier is the one explicit, gated extra) and scoped by `VISION.md`. Every
+milestone is independently shippable. Each lists a **goal**, **in scope**, **out of
+scope (for now)**, **exit criteria**, and the **primary stdlib modules** involved.
 
 Verified design facts that shape the order (see `REFERENCES.md`):
 
@@ -54,18 +62,24 @@ A milestone is not "shipped" until:
 
 ## Milestone overview
 
-| Ver | Goal (one line) | Headline exit criterion |
-|-----|-----------------|-------------------------|
-| **v0.1** | Walking skeleton: installable, runnable, *rich* listing, safe bind | `python -m servery` shows size/mtime/dir-first listing on localhost |
-| **v0.2** | Sortable + searchable listing (Apache `?C=&O=`) | Clicking a column re-sorts JS-free; `?q=` filters |
-| **v0.3** | Range + conditional requests (ETag/`If-*` ladder) + zero-copy | `curl -r` returns `206`; full `If-*` precedence → `304`/`412`; `sendfile` zero-copy |
-| **v0.4** | TLS (user cert/key) | `--tls cert.pem key.pem` serves HTTPS via `SSLContext` |
-| **v0.5** | Basic Auth (+ hashed, constant-time, no-TLS warning) | `--auth u:p` gates access; wrong creds → `401`; loud HTTP warning |
-| **v0.6** | Upload (opt-in, streamed, bounded, overwrite-off) | `--upload` accepts multipart to disk, bounded, no traversal |
-| **v0.7** | Archive download (zip / tar.gz) | `?archive=tar.gz` streams a folder; zip option present |
-| **v0.8** | CORS + SPA fallback + cache flags | `--cors`, `--spa`, `-c<n>`/`-c-1` behave per conventions |
-| **v0.9** | Hardening & polish (logging/access-log, bounded concurrency, error pages, cross-platform) | Themed error pages; `--max-workers`/`--access-log`; Windows-clean; high coverage |
-| **v1.0** | Stability + packaging + PyPI release | `pip install servery` from PyPI; API/CLI frozen for 1.x |
+All milestones below are **delivered in 1.0** (the "Status" column reflects the
+shipped reality). The HTTP/2 and HTTP/3 transport tiers — originally backlogged as
+out-of-scope — also landed in 1.0 (see `docs/TRANSPORTS.md`).
+
+| Ver | Goal (one line) | Headline exit criterion | Status |
+|-----|-----------------|-------------------------|--------|
+| **v0.1** | Walking skeleton: installable, runnable, *rich* listing, safe bind | `python -m servery` shows size/mtime/dir-first listing on localhost | Shipped |
+| **v0.2** | Sortable + searchable listing (Apache `?C=&O=`) | Clicking a column re-sorts JS-free; `?q=` filters | Shipped |
+| **v0.3** | Range + conditional requests (ETag/`If-*` ladder) + zero-copy | `curl -r` returns `206`; full `If-*` precedence → `304`/`412`; `sendfile` zero-copy | Shipped |
+| **v0.4** | TLS (user cert/key) | `--tls-cert`/`--tls-key` serve HTTPS via `SSLContext` | Shipped |
+| **v0.5** | Basic Auth (+ hashed, constant-time, no-TLS warning) | `--auth u:p` gates access; wrong creds → `401`; loud HTTP warning | Shipped |
+| **v0.6** | Upload (opt-in, streamed, bounded, overwrite-off) | `--upload` accepts multipart to disk, bounded, no traversal | Shipped |
+| **v0.7** | Archive download (zip / tar.gz) | `?archive=tar.gz` streams a folder; zip option present | Shipped |
+| **v0.8** | CORS + SPA fallback + cache flags | `--cors`, `--spa`, `--cache<n>` behave per conventions | Shipped |
+| **v0.9** | Hardening & polish (logging, bounded concurrency, error pages, cross-platform) | Themed error pages; `--max-workers`; Windows-clean; high coverage | Shipped |
+| **HTTP/2** | Pure-stdlib HTTP/2 tier (HPACK + framing + flow control) | `--http2`: ALPN `h2` over TLS (+ h2c cleartext); h1.1 fallback | Shipped |
+| **HTTP/3** | Optional HTTP/3-over-QUIC tier via the `servery[http3]` extra | `--http3`: HTTP/3 over QUIC (aioquic), `Alt-Svc` from the TCP tiers | Shipped |
+| **v1.0** | Stability + packaging + PyPI release | `pip install servery` from PyPI; API/CLI frozen for 1.x | Shipped |
 
 ---
 
@@ -236,9 +250,10 @@ generation (the stdlib cannot mint certs), so cert/key are user-provided.
 - `--tls CERT KEY` (and `--tls-cert` / `--tls-key`, plus
   `--tls-password-file` for an encrypted key) wired through the server.
 - Build context via `ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)` +
-  `ctx.load_cert_chain(...)` + ALPN **`["http/1.1"]` only** (HTTP/2/3 are
-  permanently out — no stdlib HPACK/QPACK/QUIC; `NFR-STD-01`). Never
-  `ssl.wrap_socket`. Leave the default cipher suite and session tickets;
+  `ctx.load_cert_chain(...)` + ALPN **`["http/1.1"]`** in the core (the HTTP/2
+  tier later adds `h2` to the ALPN list when `--http2` is enabled — see the
+  HTTP/2 milestone and `docs/TRANSPORTS.md`; the core advertises only `http/1.1`).
+  Never `ssl.wrap_socket`. Leave the default cipher suite and session tickets;
   `minimum_version = TLSv1_2`.
 - **HSTS under TLS (`FR-SEC-05`):** emit `Strict-Transport-Security` (e.g.
   `max-age=63072000; includeSubDomains`, `preload` off) **only** when serving
@@ -540,8 +555,12 @@ servery follows **Semantic Versioning**.
   New features arrive in `1.y` minors (additive, opt-in, safe-default-preserving);
   fixes in `1.y.z` patches.
 - **The one promise that never has a version:** *zero third-party runtime
-  dependencies, forever.* It is not a feature with a version; it is the contract.
-  A release gate enforces it on every build.
+  dependencies in the core, forever.* `pip install servery` installs servery and
+  nothing else, and the default code path imports only the stdlib (the HTTP/2 tier
+  is itself pure-stdlib). The single, explicit exception is the opt-in HTTP/3 tier:
+  `pip install servery[http3]` pulls in `aioquic`, imported only under `--http3`
+  (`PRINCIPLES.md` §0 refinement; `docs/TRANSPORTS.md`). It is not a feature with a
+  version; it is the contract. A release gate enforces it on every build.
 - **Python floor** moves only deliberately, in a minor release, with a changelog
   note — never silently (Principle 3). We test every supported, non-EOL CPython
   from the floor (3.13) up.

@@ -659,54 +659,55 @@ auth/upload/TLS.
 
 ### 2.2 Flag table
 
+This table matches the shipped `servery.cli.build_parser` (1.0) exactly. The
+positional `directory` (default `.`) is the served root.
+
 | Long | Short | Arg | Default | Description |
 |------|-------|-----|---------|-------------|
+| *(positional)* `directory` | | `DIRECTORY` | `.` | Directory to serve (the root). |
 | `--port` | `-p` | `PORT` | `8000` | TCP port to listen on. |
-| `--bind` | `-b` | `ADDR` | `127.0.0.1` | Bind address. Non-loopback (e.g. `0.0.0.0`) triggers an exposure warning. |
-| `--index` | | `NAME` | `index.html,index.htm` | Index document name(s) to serve for directories. |
-| `--no-listing` | | flag | off | Disable directory listings (dir without index → 403/404). |
+| `--bind` | `-b` | `ADDR` | `127.0.0.1` | Bind address (dest `host`). Non-loopback (e.g. `0.0.0.0`) triggers an exposure warning. |
 | `--show-hidden` | | flag | off | Include dotfiles in listings/archives. |
-| `--sort` | | `name\|size\|date` | `name` | Default sort column for listings. |
-| `--order` | | `asc\|desc` | `asc` | Default sort order for listings. |
-| `--ignore-client-sort` | | flag | off | Ignore client `?C=&O=`; always use server default sort. |
-| `--follow-symlinks` | | flag | off | Follow symlinks that resolve outside root (re-enables escape). |
+| `--quiet` | `-q` | flag | off | Suppress request logging and the startup banner. |
 | `--auth` | | `USER:PASS` | none | Enable Basic Auth (single shared credential). Pre-hashed: `USER:sha256:<hex>` / `USER:sha512:<hex>`. |
-| `--tls-cert` | | `PATH` | none | TLS certificate (PEM). Enables HTTPS with `--tls-key`. |
-| `--tls-key` | | `PATH` | none | TLS private key (PEM). |
-| `--tls-password-file` | | `PATH` | none | File containing the private-key passphrase. |
-| `--tls-client-ca` | | `PATH` | none | CA bundle for mutual TLS (require client certs). *(nice-to-have)* |
-| `--tls-help` | | flag | — | Print an `openssl` self-signed cert one-liner and exit. |
-| `--upload` | | flag | off | Enable file upload (POST). |
-| `--upload-dir` | | `PATH` | POST target dir | Destination for uploads (must be within root). |
+| `--upload` | | flag | off | Enable file upload (POST `multipart/form-data` into the served tree). |
 | `--max-upload-size` | | `BYTES` | `104857600` (100 MiB) | Maximum accepted upload size. |
 | `--allow-overwrite` | | flag | off | Allow uploads to overwrite existing files. |
-| `--cors` | | flag | off | Send `Access-Control-Allow-Origin: *` and answer preflight. |
-| `--spa` / `--single` | | flag | off | SPA fallback: serve index for unknown paths (internal rewrite). |
-| `--pretty-urls` | | flag | off | Serve `path.html` for extension-less `path`; 301 `.html`→clean. *(optional)* |
-| `--cache` | `-c` | `SECONDS` | `no-cache` | `Cache-Control: max-age=SECONDS`. `-c -1` / `--no-cache` disables caching. |
-| `--no-cache` | | flag | (default posture) | Send `Cache-Control: no-cache, no-store`. |
-| `--content-type` | | `MIME` | `application/octet-stream` | Default content type for unknown extensions. |
-| `--header` | `-H` | `"Name: Value"` | none | Add a custom response header (repeatable). |
-| `--no-security-headers` | | flag | off (headers ON) | Disable the default security headers (`nosniff`, CSP on generated pages, `Referrer-Policy`, HSTS). |
-| `--hsts` | | flag/`MAX-AGE` | off (auto under TLS) | Force/tune `Strict-Transport-Security` (only meaningful under TLS). |
-| `--timeout` | | `SECONDS` | `30` | Per-request socket timeout (Slowloris mitigation); `0` disables. |
-| `--max-workers` | | `N` | unbounded | Bound concurrency with a `ThreadPoolExecutor` (default: unbounded thread-per-connection). |
-| `--access-log` | | `[FORMAT]` | off | Enable an access log in `common`/`combined` Log Format. |
-| `--log-format` | | `common\|combined` | `common` | Access-log format when `--access-log` is on. |
-| `--quiet` | `-q` | flag | off | Suppress per-request logs. *(optional)* |
+| `--cors` | | flag | off | Send permissive CORS headers (`Access-Control-Allow-Origin: *`). |
+| `--spa` | | flag | off | SPA fallback: serve `/index.html` for unknown paths (internal rewrite). |
+| `--cache` | | `SECONDS` | none (`no-cache`) | `Cache-Control: max-age=SECONDS` for file responses (dest `cache_max_age`); default is no-cache. |
+| `--no-security-headers` | | flag | off (headers ON) | Disable servery's default security response headers. |
+| `--timeout` | | `SECONDS` | `30` | Per-connection socket timeout (Slowloris mitigation). |
+| `--max-workers` | | `N` | unbounded | Bound concurrency to N worker threads (default: unbounded, thread-per-connection). |
+| `--http2` | | flag | off | Enable HTTP/2 (ALPN `h2` over TLS, and h2c prior-knowledge cleartext). Pure-stdlib backend; see `docs/TRANSPORTS.md`. |
+| `--http3` | | flag | off | Serve HTTP/3 over QUIC (requires TLS and the `servery[http3]` extra). |
+| `--tls-cert` | | `PATH` | none | TLS certificate chain (PEM); enables HTTPS. |
+| `--tls-key` | | `PATH` | none | TLS private key (PEM). |
+| `--tls-password-file` | | `PATH` | none | File containing the TLS private-key passphrase. |
+| `--tls-help` | | flag | — | Print how to generate a self-signed certificate, then exit. |
 | `--version` | | flag | — | Print version and exit. |
-| `--help` | `-h` | flag | — | Print help and exit. |
+| `--help` | `-h` | flag | — | Print help and exit (argparse default). |
 
 Notes:
-- `--cache`/`-c` and `--no-cache` are two spellings of one concern; `-c -1`
-  equals `--no-cache` (http-server convention, borrowed).
-- `--spa` and `--single` are aliases (servery vs `serve`/miniserve naming).
-- mTLS (`--tls-client-ca`) and `--pretty-urls`/`--quiet` are explicitly
-  marked nice-to-have/optional; they MUST default off and never change baseline
-  behavior. (ETag is now default-on per FR-CACHE-02.)
+- **Sorting (`?C=&O=`) and archive download (`?archive=…`) are query-param
+  features, not flags.** Column-header links carry the Apache `mod_autoindex`
+  `?C=N|M|S&O=A|D` sort state (FR-SORT-01/02), and a directory is downloaded as an
+  archive via `?archive=zip` / `?archive=tar.gz` (FR-ARCHIVE-01). There is no
+  `--sort`/`--order`/`--archive` flag.
+- **Transports.** `--http2` enables the pure-stdlib HTTP/2 backend (ALPN `h2`
+  over TLS plus h2c prior-knowledge cleartext); `--http3` serves HTTP/3 over QUIC
+  and requires both TLS and the optional `servery[http3]` aioquic extra (it errors
+  out cleanly if the extra is absent). Both are off by default. See
+  `docs/TRANSPORTS.md` for the tiered transport model.
 - Security headers default **ON** (FR-SEC-04/05); `--no-security-headers` is the
-  escape hatch. `--hsts` only takes effect under TLS (HSTS over plain HTTP is
-  meaningless). `--max-workers` defaults to unbounded (NFR-PERF-04).
+  escape hatch. `--max-workers` defaults to unbounded (NFR-PERF-04).
+- **Not in 1.0 / future.** Several flags discussed elsewhere in this document are
+  **not** in the shipped 1.0 CLI and remain future/optional ideas: `--index`,
+  `--no-listing`, `--sort`, `--order`, `--ignore-client-sort`,
+  `--follow-symlinks`, `--upload-dir`, `--pretty-urls`, `--no-cache`,
+  `--content-type`, `-H/--header`, `--hsts`, `--access-log`, `--log-format`, and
+  mTLS `--tls-client-ca`. The corresponding FRs above that mention them describe
+  intended/optional behavior, not 1.0 CLI surface.
 - **`zstd` content-coding is Python 3.14+ only** (`compression.zstd`, PEP 784).
   servery's floor is 3.13, where it is absent. If response compression is ever
   added, `gzip`/`deflate` are always available and may be negotiated
@@ -730,13 +731,20 @@ inconsistently later.
 
 ## 3. Non-Functional Requirements
 
-**NFR-DEP-01 — Zero third-party dependencies (HARD).**
-servery's runtime imports only the Python standard library. `pip install servery`
-installs servery and nothing else. This outranks every other requirement.
-*Acceptance:* `pyproject.toml` declares no `dependencies`; a clean install in an
-empty venv followed by `python -c "import servery"` succeeds with no other
-packages present; a CI check greps the source for imports and fails on any
-non-stdlib top-level module.
+**NFR-DEP-01 — Zero third-party dependencies in the CORE (HARD).**
+servery's **core** runtime imports only the Python standard library.
+`pip install servery` (the default install) installs servery and nothing else, and
+the default GET path imports no third-party package. This outranks every other
+requirement. The **only** exception is the explicitly opt-in HTTP/3 transport tier
+(`PRINCIPLES.md` §0 refinement; `docs/TRANSPORTS.md`): `pip install servery[http3]`
+pulls in `aioquic`, and that code is imported **only** when `--http3` is used. The
+HTTP/2 tier (`--http2`) is itself pure-stdlib and adds **no** dependency. A bare
+`pip install servery` stays empty-`dependencies` forever.
+*Acceptance:* `pyproject.toml` declares no base `dependencies` (the `http3` extra is
+the only `optional-dependencies` entry); a clean default install in an empty venv
+followed by `python -c "import servery"` succeeds with no other packages present; a
+CI check confirms no third-party top-level import is reachable on the default code
+path (the `aioquic` import is reached only via `servery.http3`, behind `--http3`).
 
 **NFR-PY-01 — Python 3.13+ only.**
 `requires-python = ">=3.13"`. The codebase uses the post-`cgi` world natively (one
@@ -810,16 +818,24 @@ more than `N` request handlers run concurrently (excess connections queue);
 without the flag, concurrency is unbounded as today. (`socketserver` timeout;
 `concurrent.futures`; `BEST-PRACTICES.md` §5.1, §5.2.)
 
-**NFR-STD-01 — HTTP/1.1 (9110/9111/9112) only; HTTP/2 & HTTP/3 out of scope.**
-servery targets HTTP/1.1 under RFC 9110/9111/9112. **HTTP/2 (RFC 9113) and HTTP/3
-(RFC 9114) are explicitly out of scope**: the standard library ships no HPACK
-(9113), no QPACK or QUIC (9114), so neither is reachable zero-dep (Principle 0,
-absolute). Consequently the TLS `SSLContext` advertises **only `http/1.1`** via
-ALPN and MUST NOT advertise a protocol servery cannot speak (`h2`/`h3`).
-*Acceptance:* the TLS ALPN protocol list is exactly `["http/1.1"]`; no HTTP/2 or
-HTTP/3 code path exists; an ALPN-negotiating client offered only `h2` does not get
-an `h2` connection. (RFC 9113 §3.2/§4.3, RFC 9114 §1.2/§2; `STANDARDS.md` §1.2,
-NFR-STD-01.)
+**NFR-STD-01 — HTTP/1.1 core (9110/9111/9112); HTTP/2 & HTTP/3 are opt-in tiers.**
+servery's **core** is a conformant HTTP/1.1 origin server under RFC 9110/9111/9112,
+pure-stdlib and zero-PyPI. HTTP/2 and HTTP/3 are **no longer out of scope**: they
+ship as optional, opt-in **transport tiers** (see `docs/TRANSPORTS.md` for the
+tiered model). **HTTP/2 (RFC 9113)** ships in the box as a **pure-stdlib** backend
+(HPACK/framing/flow-control are pure code; TLS+ALPN are stdlib `ssl`), enabled via
+`--http2` (ALPN `h2` over TLS plus h2c prior-knowledge cleartext). **HTTP/3 (RFC
+9114)** cannot be pure stdlib (QUIC needs AEAD ciphers the stdlib lacks), so it
+ships as the optional **`servery[http3]`** aioquic extra, enabled via `--http3`
+(requires TLS). The zero-dependency core is never burdened: with no transport flag,
+the TLS `SSLContext` advertises **only `http/1.1`**, and `h2`/`h3` are advertised
+(via ALPN or `Alt-Svc`) **only** when the corresponding tier is enabled.
+*Acceptance:* with no transport flag, the TLS ALPN list is exactly `["http/1.1"]`
+and no `h2`/`h3` is advertised; with `--http2`, an ALPN client offered `h2` gets an
+HTTP/2 connection (stdlib backend) and a non-h2 client falls back to `http/1.1`;
+with `--http3` and the extra installed, an HTTP/3-over-QUIC listener is served and
+advertised via `Alt-Svc`; `--http3` without the extra fails cleanly (exit 2) rather
+than crashing. (RFC 9113, RFC 9114; `docs/TRANSPORTS.md`; `STANDARDS.md` §1.2.)
 
 **NFR-PORT-01 — Cross-platform (Linux / macOS / Windows).**
 servery runs on Linux, macOS, and Windows. Path handling is

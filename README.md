@@ -3,48 +3,76 @@
 [![CI](https://github.com/mjbommar/servery/actions/workflows/ci.yml/badge.svg)](https://github.com/mjbommar/servery/actions/workflows/ci.yml)
 [![Security](https://github.com/mjbommar/servery/actions/workflows/security.yml/badge.svg)](https://github.com/mjbommar/servery/actions/workflows/security.yml)
 ![Python](https://img.shields.io/badge/python-3.13%2B-blue)
-![Dependencies](https://img.shields.io/badge/runtime%20dependencies-zero-brightgreen)
+![Core dependencies](https://img.shields.io/badge/core%20dependencies-zero-brightgreen)
 
 A **zero-dependency, pure-Python** HTTP file server — *a batteries-included `python -m http.server`*.
 
 Serve or share a directory over HTTP with the niceties people expect from tools like
 [miniserve](https://github.com/svenstaro/miniserve) or `npx serve` — rich sortable
-directory listings, file upload, HTTP Basic Auth, HTTPS, range/resumable downloads — while
-depending on **nothing but the Python standard library**, forever.
+directory listings, file upload, HTTP Basic Auth, HTTPS, range/resumable downloads, on-the-fly
+archive download, even **HTTP/2** — while the core depends on **nothing but the Python standard
+library**.
 
 ```console
-$ servery                 # serve the current directory on http://127.0.0.1:8000
-$ python -m servery ./pub --port 9000
+$ servery                                  # serve the current directory on http://127.0.0.1:8000
+$ python -m servery ./public --port 9000
+$ servery --upload --auth me:secret        # password-protected drop box
+$ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
 ```
 
-> **Status: design phase.** No implementation yet — the repository currently contains the
-> requirements, architecture, and roadmap that the build will follow. See the docs below.
+## Features
 
-## Why
+- **Rich directory listings** — sizes, modified times, directories first, fully escaped; sortable
+  columns (`?C=&O=`, Apache convention) and a `?q=` filter, all server-side with no JavaScript.
+- **Correct downloads** — RFC 9110 `Range`/`206` (resumable), strong `ETag`s, the full
+  conditional-request ladder (`If-None-Match`/`If-Modified-Since`/`If-Range` → `304`/`412`),
+  and zero-copy `sendfile`.
+- **HTTPS** — `--tls-cert`/`--tls-key`, ALPN, HSTS over TLS.
+- **HTTP Basic Auth** — single credential or a pre-hashed `user:sha256:…`, constant-time compare.
+- **Upload** — opt-in `--upload`, streaming `multipart/form-data` (no `cgi`), atomic writes,
+  bounded size, overwrite off by default.
+- **Archive download** — stream any directory as `tar.gz` or `zip` (`?archive=tar.gz`).
+- **CORS, SPA fallback, cache control, security headers** — `--cors`, `--spa`, `--cache`,
+  with `nosniff` everywhere and a scoped CSP on generated pages (off via `--no-security-headers`).
+- **HTTP/2** — `--http2` enables a *pure-stdlib* HTTP/2 server (ALPN `h2` over TLS, or h2c
+  prior-knowledge). The HPACK and frame codecs are implemented against the RFCs with no
+  third-party package.
+- **HTTP/3** — optional, via `pip install servery[http3]` (the `aioquic` QUIC stack); the core
+  stays zero-dependency.
+- **Safe by default** — binds `127.0.0.1`, path-traversal + symlink-escape protection, a
+  default socket timeout, and loud warnings when you expose it or run auth without TLS.
+- **Free-threading ready** — runs under the no-GIL builds (3.13t/3.14t); immutable config,
+  no module-level mutable state.
 
-The stdlib `http.server` gives you a bare, unsortable listing and nothing else — no auth,
-no upload, no HTTPS without hand-rolling. The polished alternatives are either not Python
-(miniserve is Rust; `serve`/`http-server` are Node) or not zero-dependency (`updog` needs
-Flask). The pure-stdlib options that exist (`uploadserver`, `tiny-http-server`) inherit
-http.server's plain listing. **No existing zero-dependency, pure-Python tool combines a rich
-sortable listing + basic auth + upload + HTTPS.** servery fills exactly that gap.
+## Install
 
-It lives in the **file-server lane** (share a folder), *not* the web-framework lane — there
-is no routing or app-building here.
+```bash
+pip install servery            # core: zero dependencies
+pip install servery[http3]     # optional HTTP/3 (aioquic)
+```
 
-## Design at a glance
+Python 3.13+ (free-threaded builds supported).
 
-- **Zero third-party dependencies** — pure Python standard library only. Non-negotiable.
-- **Python 3.13+** — lands us natively after `cgi` was removed, so upload uses one clean
-  hand-rolled multipart parser, no legacy branch.
-- **Standards-compliant** — a conformant HTTP/1.1 origin server (RFC 9110/9111/9112):
-  persistent connections, `Range`/`206`, the full conditional-request ladder with weak
-  `ETag`s, and `Cache-Control`. (HTTP/2/3 are out — no stdlib HPACK/QPACK/QUIC.)
-- **Secure by default** — binds `127.0.0.1`, protects against path traversal and symlink
-  escape, constant-time auth comparison, loud warning if Basic Auth runs without TLS,
-  and secure web-facing headers on by default (`X-Content-Type-Options: nosniff`,
-  scoped CSP on generated pages, HSTS under TLS) with strict listing escaping.
-- **Honest scope** — a dev / LAN / ad-hoc sharing tool, not a production-hardened server.
+## Library use
+
+```python
+from servery import Config, serve
+
+serve(Config.create("./public", host="127.0.0.1", port=8000))
+```
+
+## A note on dependencies
+
+The **core has zero third-party runtime dependencies** — enforced by a CI gate that fails the
+build if the wheel ever declares one. HTTP/3 is the single, opt-in exception: it requires a real
+QUIC + crypto stack the standard library does not provide, so it lives behind the
+`servery[http3]` extra and never burdens the core. (For the curious, `servery._oscrypto` proves
+the standard library *can* reach AEAD crypto with zero PyPI dependencies via `ctypes` → the OS
+OpenSSL — the foundation a future native HTTP/3 could build on.)
+
+It lives in the **file-server lane** (share a folder), not the web-framework lane — there is no
+routing or app-building here. It is a dev / LAN / ad-hoc sharing tool, not a hardened
+public-internet server.
 
 ## Documentation
 
@@ -52,12 +80,13 @@ is no routing or app-building here.
 |---|---|
 | [docs/VISION.md](docs/VISION.md) | The gap, positioning, target users, non-goals |
 | [docs/PRINCIPLES.md](docs/PRINCIPLES.md) | Zero-dependency mandate and the scope rubric |
-| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | Testable requirements, full CLI surface, decisions |
+| [docs/TRANSPORTS.md](docs/TRANSPORTS.md) | The tiered HTTP/1.1→2→3 transport model and crypto policy |
+| [docs/STANDARDS.md](docs/STANDARDS.md) | RFC 9110/9111/9112 compliance map (MUST/SHOULD + tests) |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module layout, request lifecycle, security design |
-| [docs/STANDARDS.md](docs/STANDARDS.md) | RFC 9110/9111/9112 compliance map (per-feature MUST/SHOULD + tests) |
-| [docs/BEST-PRACTICES.md](docs/BEST-PRACTICES.md) | 2026 stdlib-only implementation best practices (zero-dep) |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Phased milestones from v0.1 to v1.0 |
-| [docs/REFERENCES.md](docs/REFERENCES.md) | Prior art, what to borrow, stdlib feasibility map |
+| [docs/BEST-PRACTICES.md](docs/BEST-PRACTICES.md) | 2026 stdlib-only implementation best practices |
+| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | Testable requirements and the CLI surface |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | How it was built, milestone by milestone |
+| [docs/REFERENCES.md](docs/REFERENCES.md) | Prior art and stdlib feasibility map |
 
 ## Development
 
@@ -66,12 +95,12 @@ Requires [uv](https://docs.astral.sh/uv/). All gates run locally exactly as in C
 ```bash
 uv sync                      # dev tooling (never ships in the wheel)
 uv run pre-commit install    # local commit gates
-make check                   # lint + type + security + tests
+make check                   # lint (ruff) + type (ty) + security (bandit) + tests
 make build                   # build + zero-dependency gate
 ```
 
-The runtime stays **zero-dependency** — a CI gate fails the build if the wheel
-ever declares a dependency. See [CONTRIBUTING.md](CONTRIBUTING.md).
+CI runs the suite on Linux/macOS/Windows × CPython 3.13/3.14, the free-threaded 3.13t/3.14t
+builds, and 3.15. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

@@ -47,6 +47,20 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("servery", out.getvalue())
 
+    def test_bad_auth_reports_error_not_traceback(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = cli.main(["--auth", "nocolon"])
+        self.assertEqual(code, 2)
+        self.assertIn("error", err.getvalue())
+
+    def test_http3_without_extra_reports_error(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = cli.main(["--http3"])
+        self.assertEqual(code, 2)
+        self.assertIn("error", err.getvalue())
+
     def test_tls_help_prints_and_exits_zero(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

@@ -102,26 +102,36 @@ responsibility; the dependency arrows point inward toward `config`.
 servery/
 ├── pyproject.toml
 ├── README.md
-├── docs/                     # VISION / PRINCIPLES / REFERENCES / ARCHITECTURE
+├── docs/                     # VISION / PRINCIPLES / REFERENCES / TRANSPORTS / ARCHITECTURE
 ├── src/
 │   └── servery/
 │       ├── __init__.py       # public API: serve(), Config, ServeryHandler, make_server()
 │       ├── __main__.py       # `python -m servery` → cli.main()
-│       ├── cli.py            # argparse → Config; main(); startup banner + warnings
+│       ├── py.typed          # PEP 561 marker (typed package)
+│       ├── _version.py       # __version__ (single source of the version string)
+│       ├── cli.py            # argparse → Config; main(); startup banner + warnings; --http2/--http3 wiring
 │       ├── config.py         # frozen Config dataclass (the single source of truth)
 │       ├── server.py         # ServeryHTTPServer / ServeryHTTPSServer, dual-stack, make_server(), TLS wrap
-│       ├── handler.py        # ServeryHandler(SimpleHTTPRequestHandler): send_head, list_directory, do_POST, do_OPTIONS
+│       ├── handler.py        # ServeryHandler(SimpleHTTPRequestHandler): send_head, list_directory, do_POST, do_OPTIONS; h2/h2c dispatch
 │       ├── security.py       # path containment + symlink policy; the one choke-point
-│       ├── httputil.py       # header helpers: CORS, Cache-Control, ETag + conditional ladder, security headers, Content-Disposition (6266/8187), fallback/clean-URL resolution
-│       ├── _log.py           # logging.getLogger("servery") + NullHandler; access-log (CLF/Combined) formatting
+│       ├── _log.py           # logging.getLogger("servery") + NullHandler; request/access logging
 │       ├── ranges.py         # Range header parse → (start, end); 206/416 helpers; bounded emit
-│       ├── auth.py           # Authenticator: Basic parse, hmac.compare_digest, hashed-file format
+│       ├── auth.py           # Authenticator: Basic parse, hmac.compare_digest, hashed-credential format
 │       ├── upload.py         # do_POST body: multipart streaming parser → temp → os.replace
 │       ├── archive.py        # on-the-fly zip / tar.gz of a directory streamed to wfile
-│       ├── listing.py        # directory → sorted entries → HTML (templates + sort scheme)
-│       └── _templates.py     # inline HTML/CSS strings (string.Template); no asset pipeline
+│       ├── listing.py        # directory → sorted entries → HTML (inline templates + ?C=&O= sort scheme)
+│       ├── _oscrypto.py      # ctypes bindings to OS crypto (libssl/libcrypto / CNG) — opt-in transport use only
+│       ├── http3.py          # optional HTTP/3 backend (aioquic, the servery[http3] extra); Http3UnavailableError
+│       └── http2/            # pure-stdlib HTTP/2 transport tier (subpackage)
+│           ├── __init__.py
+│           ├── hpack.py      # HPACK (RFC 7541): static/dynamic table + Huffman encode/decode
+│           ├── frames.py     # HTTP/2 binary framing (RFC 9113 §4/§6): HEADERS/DATA/SETTINGS/…
+│           └── connection.py # H2Connection: stream state machine, flow control, DoS limits; dispatch into the handler
 └── tests/                    # unittest only (§7)
 ```
+
+Note: listing HTML/CSS is rendered inline from `listing.py` (no separate
+`_templates.py` module — the `string.Template` strings live with the renderer).
 
 ### Why this split
 
@@ -139,30 +149,65 @@ servery/
   code; keeping it in one small module with its own tests (§5, §7) means the
   traversal/symlink rules are reviewable in one place and can't drift across
   features.
-- **`httputil.py` vs `ranges.py` vs `archive.py`** are split by HTTP concern so
+- **`ranges.py` vs `archive.py` vs `listing.py`** are split by HTTP concern so
   the default download path (no range, no archive) pulls in almost nothing.
-- **ETag + the conditional-request ladder, security headers, and
-  `Content-Disposition` live in `httputil.py`** (not a separate `conditional.py`).
-  All three are header-emission helpers driven from the same `send_head` step
-  ([5]/[6] below): the validator/precedence logic (FR-COND-01/02), the
-  default security headers (FR-SEC-04/05), and the RFC 6266/8187 filename builder
-  (FR-DISP-01) are small, stateless functions over the request headers + `os.stat`
-  result. Folding them into `httputil` keeps the closely-coupled "decide status +
-  emit headers" logic in one place and honors the ~12-module ceiling; a dedicated
-  `conditional.py` would fragment the ladder from the `ETag`/`Cache-Control` it
-  depends on for little gain. (If the precedence ladder grows unwieldy it can be
-  promoted to its own module later — a pure refactor, no behavior change.)
-- **`_log.py` IS a new module**, because routing through `logging` + a library
-  `NullHandler` + access-log (CLF/Combined) formatting is a distinct
-  responsibility (FR-LOG-05/06/07) that the handler should call into, not own.
-  The handler's `log_message`/`log_request` overrides are one-liners that delegate
-  here.
-- **`_templates.py`** is data, not logic — inline `string.Template` HTML/CSS
-  shipped in the wheel; no build step, satisfying "no asset pipeline"
-  (`PRINCIPLES.md` §0).
+- **Header-emission logic — ETag + the conditional-request ladder, security
+  headers, Cache-Control/CORS, and `Content-Disposition` — lives with the GET
+  choke-point** (driven from `handler.send_head`, steps [5]/[6] below), not in a
+  separate `httputil`/`conditional` module: the validator/precedence logic
+  (FR-COND-01/02), the default security headers (FR-SEC-04/05), and the RFC
+  6266/8187 filename builder (FR-DISP-01) are small, stateless helpers over the
+  request headers + `os.stat` result. Keeping the closely-coupled "decide status +
+  emit headers" logic together avoids fragmenting the ladder from the
+  `ETag`/`Cache-Control` it depends on.
+- **`_log.py` IS its own module**, because routing through `logging` + a library
+  `NullHandler` + the request/access-log formatting is a distinct responsibility
+  (FR-LOG-05/06) that the handler should call into, not own. The handler's
+  `log_message`/`log_request` overrides are one-liners that delegate here.
+- **Listing templates are data, not a module** — inline `string.Template` HTML/CSS
+  rendered straight from `listing.py`, shipped in the wheel; no build step,
+  satisfying "no asset pipeline" (`PRINCIPLES.md` §0).
+- **The transport tiers are the one deliberate subpackage.** `http2/` (pure
+  stdlib) groups the HPACK + framing + connection state machine that together
+  implement the HTTP/2 tier; `http3.py` is the optional aioquic backend; both are
+  imported **only** when their flag is set, and never on the default GET path. See
+  §2.1 below and `docs/TRANSPORTS.md`.
 
-We keep it deliberately small: ~12 modules, no subpackages. If a module wants to
-become a package, that is a smell that a framework is leaking in (`VISION.md` §5).
+We keep the core deliberately small and flat. The **only** subpackage is `http2/`
+— a transport tier whose 2–4k LOC of framing/HPACK/state-machine genuinely earns a
+package boundary (and stays cleanly behind a flag) — not a framework leaking in
+(`VISION.md` §5). The opt-in `http3.py` and the `_oscrypto.py` ctypes shim are
+likewise transport-only and off the default path.
+
+### 2.1 HTTP/2 (http2/) and HTTP/3 (http3.py) — how the tiers slot in
+
+The transport tiers (`docs/TRANSPORTS.md`) attach at the connection seam without
+touching the file-serving core. The request-handling pipeline (`send_head` /
+`do_POST` / listing / range / auth) is shared; a tier owns only *transport*
+(framing, multiplexing, flow control), never file-serving policy.
+
+- **HTTP/2 — `http2/` (pure stdlib, `--http2`).** `handler.handle` detects HTTP/2
+  on a connection — via TLS ALPN negotiating `h2`, or the h2c prior-knowledge
+  cleartext preface — and dispatches to `http2.connection.H2Connection` instead of
+  the line-based HTTP/1.1 loop. `H2Connection` owns the binary framing
+  (`http2.frames`), HPACK (`http2.hpack`), the stream state machine, flow control,
+  and the required DoS limits (Rapid-Reset / CONTINUATION-flood / HPACK-bomb caps —
+  `docs/TRANSPORTS.md` §6); each request stream is dispatched back into the **same**
+  `send_head`/`do_POST` pipeline. No client picks `h2` → graceful fallback to
+  HTTP/1.1 on the same socket. This tier adds **no** dependency: TLS+ALPN are stdlib
+  `ssl`, and HPACK/framing are pure code.
+- **HTTP/3 — `http3.py` (optional `servery[http3]` extra, `--http3`).** A separate
+  UDP/QUIC listener backed by `aioquic`; it is imported lazily by `cli.main` only
+  when `--http3` is given (raising `Http3UnavailableError` → a clean exit if the
+  extra is absent), and requires TLS. When live, the TCP tiers advertise it via
+  `Alt-Svc`. QUIC + QPACK + h3 framing come from `aioquic`; servery drives the loop
+  and dispatches into the shared handler.
+- **`_oscrypto.py` (ctypes crypto).** A thin, isolated `ctypes` binding to OS crypto
+  already loaded in-process (OpenSSL `libssl`/`libcrypto`, or Windows CNG) — the
+  vetted high-level AEAD/QUIC primitives, never hand-rolled crypto. It exists for the
+  experimental zero-PyPI HTTP/3 path (Tier 3, `docs/TRANSPORTS.md` §4) and is **not**
+  imported on the default code path; like `security.py`, the FFI boundary is kept
+  small and reviewable in one place.
 
 ---
 
@@ -189,15 +234,14 @@ handle_one_request (base)
        │        ├─ index file?     → fall through to file branch with index path
        │        └─ else            → return listing.render(self, fs_path)  ──▶ HTML body
        │
-       ├─[4] not found? ........... apply fallbacks (httputil):
-       │        ├─ clean-URL: path+'.html' exists (if config.clean_urls)
-       │        ├─ SPA: serve config.spa_index (if config.spa)   [rewrite, not redirect]
+       ├─[4] not found? ........... apply fallbacks (in handler):
+       │        ├─ SPA: serve config.spa index (if config.spa)   [rewrite, not redirect]
        │        ├─ 404.html present → serve it with 404 status
        │        └─ else → 404
        │
        ├─[5] conditional GET ...... If-Modified-Since → 304 (base logic, restated)
        │
-       ├─[6] cache/CORS headers ... httputil.apply(self): Cache-Control / ETag / ACAO
+       ├─[6] cache/CORS headers ... Cache-Control / ETag / ACAO (in handler)
        │                            (rides the extra_response_headers hook)
        │
        └─[7] send body ............ Range header present?
@@ -245,8 +289,9 @@ single-purpose helper modules — NOT a mixin tower.**
 
 `ServeryHandler(SimpleHTTPRequestHandler)` is a single class with a handful of
 overridden methods. Each override is short and reads top-to-bottom as a sequence
-of calls into `auth`, `security`, `ranges`, `listing`, `httputil`, `upload`,
-`archive`. The *features* live in modules; the *handler* is the wiring diagram.
+of calls into `auth`, `security`, `ranges`, `listing`, `upload`, and `archive`
+(with header-emission helpers inline in the handler). The *features* live in
+modules; the *handler* is the wiring diagram.
 
 ```python
 class ServeryHandler(SimpleHTTPRequestHandler):
@@ -562,15 +607,21 @@ root pointing outside it.
 
 ## 8. Packaging & entry points
 
-Pure `pyproject.toml`, **no `[project.dependencies]`** (the property that
+Pure `pyproject.toml`, **empty base `[project.dependencies]`** (the property that
 *defines* servery), src-layout, modern build backend (stdlib-adjacent
-`setuptools`/`hatchling` as a build-time-only backend — not a runtime dep).
+`setuptools`/`hatchling` as a build-time-only backend — not a runtime dep). The
+**one** optional extra is the HTTP/3 tier (`servery[http3]` → `aioquic`), declared
+under `[project.optional-dependencies]` and pulled in only on explicit opt-in; the
+HTTP/2 tier needs no extra (it is pure stdlib).
 
 ```toml
 [project]
 name = "servery"
 requires-python = ">=3.13"
-dependencies = []                       # the whole point — empty, forever
+dependencies = []                       # the core — empty, forever
+
+[project.optional-dependencies]
+http3 = ["aioquic"]                     # opt-in HTTP/3 tier only; imported under --http3
 
 [project.scripts]
 servery = "servery.cli:main"            # console script
