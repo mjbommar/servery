@@ -12,7 +12,7 @@ format:
 	uv run ruff check --fix .
 
 type:
-	uv run mypy
+	uvx ty check src tests
 
 security:
 	uv run bandit -c pyproject.toml -r src

@@ -44,13 +44,14 @@ servery = "servery.cli:main"
 # Development / CI tooling only. Isolated from runtime; never published.
 dev = [
   "ruff>=0.6",
-  "mypy>=1.11",
   "bandit[toml]>=1.7",
   "coverage>=7.5",
   "build>=1.2",
   "twine>=5.0",
   "pre-commit>=3.7",
 ]
+# Note: ty (the type checker) is run via `uvx ty` — it is preview-versioned and
+# fast-moving, so we pull the latest ephemerally rather than pinning it here.
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/servery"]
@@ -90,16 +91,11 @@ known-first-party = ["servery"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PERF"]
 
-[tool.mypy]
-python_version = "3.13"
-strict = true
-files = ["src", "tests"]
-warn_unreachable = true
-enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
+[tool.ty.environment]
+python-version = "3.13"
 
-[[tool.mypy.overrides]]
-module = "tests.*"
-disallow_untyped_defs = false
+[tool.ty.src]
+include = ["src", "tests"]
 
 [tool.bandit]
 exclude_dirs = ["tests"]

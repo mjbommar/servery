@@ -31,14 +31,16 @@ Or individually:
 | Gate | Command | What it enforces |
 |------|---------|------------------|
 | Lint & format | `make lint` / `make format` | `ruff check` + `ruff format` |
-| Types | `make type` | `mypy --strict` over `src` and `tests` |
+| Types | `make type` | `ty check` over `src` and `tests` |
 | Security (SAST) | `make security` | `bandit` over `src` |
 | Tests + coverage | `make test` | `unittest` discovery, ≥90% coverage |
 | Packaging | `make build` | builds, asserts zero runtime deps, `twine check` |
 
 CI (`.github/workflows/`) runs the same gates plus a test matrix
-(Linux/macOS/Windows × Python 3.13/3.14, with 3.15-dev allowed to fail),
-a GitHub Actions audit (`zizmor`), and a secret scan (`gitleaks`).
+(Linux/macOS/Windows × Python 3.13/3.14, free-threaded 3.13t/3.14t, and
+3.15/3.15t allowed to fail), a GitHub Actions audit (`zizmor`), and a secret
+scan (`gitleaks`). servery targets free-threaded builds as a first-class
+configuration — no module-level mutable state, no reliance on the GIL.
 
 ## Standards
 
