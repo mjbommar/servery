@@ -54,6 +54,18 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("openssl", out.getvalue())
 
+    def test_feature_flags(self):
+        args = cli.build_parser().parse_args(
+            ["--cors", "--spa", "--cache", "60", "--no-security-headers"]
+        )
+        config = cli.config_from_args(args)
+        self.assertTrue(config.cors)
+        self.assertTrue(config.spa)
+        self.assertEqual(config.cache_max_age, 60)
+        self.assertFalse(config.security_headers)
+        self.assertEqual(config.cache_control, "max-age=60")
+        self.assertEqual(servery.Config.create(".").cache_control, "no-cache")
+
     def test_startup_warnings(self):
         unsafe = servery.Config.create(".", host="0.0.0.0", auth="u:p")
         warnings = unsafe.startup_warnings()

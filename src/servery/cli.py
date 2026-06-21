@@ -80,6 +80,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow uploads to overwrite existing files",
     )
     parser.add_argument(
+        "--cors",
+        action="store_true",
+        help="send permissive CORS headers (Access-Control-Allow-Origin: *)",
+    )
+    parser.add_argument(
+        "--spa",
+        action="store_true",
+        help="single-page-app fallback: serve /index.html for unknown paths",
+    )
+    parser.add_argument(
+        "--cache",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        dest="cache_max_age",
+        help="Cache-Control max-age for file responses (default: no-cache)",
+    )
+    parser.add_argument(
+        "--no-security-headers",
+        action="store_false",
+        dest="security_headers",
+        help="disable servery's default security response headers",
+    )
+    parser.add_argument(
         "--tls-cert",
         metavar="PATH",
         help="TLS certificate chain (PEM); enables HTTPS",
@@ -117,6 +141,10 @@ def config_from_args(args: argparse.Namespace) -> Config:
         upload=args.upload,
         max_upload_size=args.max_upload_size,
         allow_overwrite=args.allow_overwrite,
+        cors=args.cors,
+        spa=args.spa,
+        cache_max_age=args.cache_max_age,
+        security_headers=args.security_headers,
     )
 
 

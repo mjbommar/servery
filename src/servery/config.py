@@ -32,6 +32,17 @@ class Config:
     upload: bool = False
     max_upload_size: int = 100 * 1024 * 1024
     allow_overwrite: bool = False
+    cors: bool = False
+    spa: bool = False
+    cache_max_age: int | None = None
+    security_headers: bool = True
+
+    @property
+    def cache_control(self) -> str:
+        """The Cache-Control value for file responses."""
+        if self.cache_max_age is None:
+            return "no-cache"
+        return f"max-age={self.cache_max_age}"
 
     @property
     def is_loopback_bind(self) -> bool:
@@ -68,6 +79,10 @@ class Config:
         upload: bool = False,
         max_upload_size: int = 100 * 1024 * 1024,
         allow_overwrite: bool = False,
+        cors: bool = False,
+        spa: bool = False,
+        cache_max_age: int | None = None,
+        security_headers: bool = True,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
         return cls(
@@ -83,4 +98,8 @@ class Config:
             upload=upload,
             max_upload_size=max_upload_size,
             allow_overwrite=allow_overwrite,
+            cors=cors,
+            spa=spa,
+            cache_max_age=cache_max_age,
+            security_headers=security_headers,
         )

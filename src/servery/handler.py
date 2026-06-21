@@ -35,6 +35,9 @@ if TYPE_CHECKING:
 
 _COPY_BUFSIZE = 64 * 1024
 _WWW_AUTHENTICATE = 'Basic realm="servery", charset="UTF-8"'
+# CSP for servery-GENERATED pages (listing / error): no scripts, inline styles
+# only, self forms. Served files are NOT given a CSP (it would break real sites).
+_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'"
 
 
 def _copy_n(source: SupportsRead[bytes], dest: SupportsWrite[bytes], count: int) -> None:
@@ -91,6 +94,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     server_version = f"servery/{__version__}"
     index_pages = ("index.html", "index.htm")
     _body_remaining: int | None = None
+    _generated_page: bool = False
 
     @property
     def _server(self) -> ServeryHTTPServer:
@@ -110,11 +114,16 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
     def send_head(self) -> BinaryIO | None:
         self._body_remaining = None
+        self._generated_page = False
         if not self._authorized():
             return None
         path = self.translate_path(self.path)
         if os.path.isdir(path):
             return self._serve_directory(path)
+        if not os.path.exists(path) and self._server.config.spa:
+            index = os.path.join(self._server.root_real, "index.html")
+            if os.path.isfile(index):
+                return self._serve_file(index)
         return self._serve_file(path)
 
     def _serve_directory(self, path: str) -> BinaryIO | None:
@@ -237,6 +246,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             etag = _make_etag(stat)
             last_modified = self.date_time_string(stat.st_mtime)
             ctype = self.guess_type(path)
+            cache_control = self._server.config.cache_control
 
             if self._is_not_modified(etag, stat.st_mtime):
                 self.send_response(HTTPStatus.NOT_MODIFIED)
@@ -263,6 +273,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             if isinstance(requested, ranges.ByteRange):
                 self.send_response(HTTPStatus.PARTIAL_CONTENT)
                 self.send_header("Content-Type", ctype)
+                self.send_header("Cache-Control", cache_control)
                 self.send_header("Content-Range", f"bytes {requested.start}-{requested.end}/{size}")
                 self.send_header("Content-Length", str(requested.length))
                 self.send_header("Accept-Ranges", "bytes")
@@ -275,6 +286,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", cache_control)
             self.send_header("Content-Length", str(size))
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("ETag", etag)
@@ -347,6 +359,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     # --- directory listing (v0.2) ---------------------------------------
 
     def list_directory(self, path: str | os.PathLike[str]) -> io.BytesIO | None:
+        self._generated_page = True
         parts = urllib.parse.urlsplit(self.path)
         params = urllib.parse.parse_qs(parts.query)
         sort = listing.code_to_sort(params.get("C", ["N"])[0])
@@ -375,13 +388,32 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     # --- universal response shaping -------------------------------------
 
     def end_headers(self) -> None:
-        # nosniff on everything, including error pages: we serve arbitrary files,
-        # so MIME-sniffing is a stored-XSS vector we close by default.
-        self.send_header("X-Content-Type-Options", "nosniff")
-        if isinstance(self.connection, ssl.SSLSocket):
-            # HSTS is only meaningful (and only valid) over TLS.
-            self.send_header("Strict-Transport-Security", "max-age=63072000")
+        config = self._server.config
+        if config.security_headers:
+            # nosniff everywhere (we serve arbitrary files); CSP + Referrer-Policy
+            # only on servery-generated HTML; HSTS only over TLS.
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if self._generated_page:
+                self.send_header("Content-Security-Policy", _CSP)
+                self.send_header("Referrer-Policy", "no-referrer")
+            if isinstance(self.connection, ssl.SSLSocket):
+                self.send_header("Strict-Transport-Security", "max-age=63072000")
+        if config.cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
         super().end_headers()
+
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        self._generated_page = True  # the error body is generated HTML
+        super().send_error(code, message, explain)
+
+    def do_OPTIONS(self) -> None:
+        # Preflight must succeed without auth, or the real request never happens.
+        self.send_response(HTTPStatus.NO_CONTENT)
+        if self._server.config.cors:
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (matches base signature)
         if not self._server.config.quiet:

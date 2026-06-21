@@ -25,6 +25,21 @@ def _multipart_body(boundary: str, filename: str, content: bytes) -> bytes:
     return header + content + f"\r\n--{boundary}--\r\n".encode()
 
 
+@contextlib.contextmanager
+def _running(config: Config):
+    httpd = make_server(config)
+    host = str(httpd.server_address[0])
+    port = int(httpd.server_address[1])
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield host, port
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
 class ServerTestCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -84,6 +99,24 @@ class ServerTestCase(unittest.TestCase):
         conn.close()
         self.assertEqual(resp.status, 404)
         self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
+
+    def test_listing_has_csp_and_referrer(self):
+        conn = self._conn()
+        conn.request("GET", "/")
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertIn("default-src", resp.getheader("Content-Security-Policy", ""))
+        self.assertEqual(resp.getheader("Referrer-Policy"), "no-referrer")
+
+    def test_file_has_cache_control_but_no_csp(self):
+        conn = self._conn()
+        conn.request("GET", "/hello.txt")
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertEqual(resp.getheader("Cache-Control"), "no-cache")
+        self.assertIsNone(resp.getheader("Content-Security-Policy"))
 
     def test_post_rejected_when_upload_disabled(self):
         conn = self._conn()
@@ -421,6 +454,58 @@ class UploadServerTest(unittest.TestCase):
     def test_wrong_content_type_returns_415(self):
         resp = self._post(b"plain body", content_type="text/plain")
         self.assertEqual(resp.status, 415)
+
+
+class FeatureFlagTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        (self.dir / "index.html").write_text("<h1>app</h1>")
+        (self.dir / "f.txt").write_text("data")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _config(self, **kwargs) -> Config:
+        return Config.create(self.dir, host="127.0.0.1", port=0, quiet=True, **kwargs)
+
+    @staticmethod
+    def _get(host, port, path, method="GET"):
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.request(method, path)
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        return resp, body
+
+    def test_cors_header(self):
+        with _running(self._config(cors=True)) as (host, port):
+            resp, _ = self._get(host, port, "/f.txt")
+            self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), "*")
+
+    def test_options_preflight(self):
+        with _running(self._config(cors=True)) as (host, port):
+            resp, _ = self._get(host, port, "/", method="OPTIONS")
+            self.assertEqual(resp.status, 204)
+            self.assertIn("GET", resp.getheader("Access-Control-Allow-Methods", ""))
+            self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), "*")
+
+    def test_spa_fallback(self):
+        with _running(self._config(spa=True)) as (host, port):
+            resp, body = self._get(host, port, "/client/side/route")
+            self.assertEqual(resp.status, 200)
+            self.assertIn(b"app", body)
+
+    def test_cache_max_age(self):
+        with _running(self._config(cache_max_age=3600)) as (host, port):
+            resp, _ = self._get(host, port, "/f.txt")
+            self.assertEqual(resp.getheader("Cache-Control"), "max-age=3600")
+
+    def test_security_headers_can_be_disabled(self):
+        with _running(self._config(security_headers=False)) as (host, port):
+            resp, _ = self._get(host, port, "/")
+            self.assertIsNone(resp.getheader("X-Content-Type-Options"))
+            self.assertIsNone(resp.getheader("Content-Security-Policy"))
 
 
 class TlsServerTest(unittest.TestCase):
