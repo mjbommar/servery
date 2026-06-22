@@ -7,9 +7,9 @@ each request to an ASGI ``scope`` + ``receive``/``send`` and runs the lifespan
 protocol — a "mini-uvicorn" in pure stdlib. Zero runtime dependencies; the hosted
 app brings its own.
 
-Scope: the HTTP ASGI scope with keep-alive, Content-Length or chunked framing,
-lifespan, and TLS (shared with the threading server via ``_tls``). WebSocket is
-not handled yet.
+Scopes: the HTTP ASGI scope (keep-alive, Content-Length or chunked framing) and
+the WebSocket scope (RFC 6455, via ``servery._websocket``), plus lifespan and TLS
+(shared with the threading server via ``_tls``).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import ssl
 from http import HTTPStatus
 from typing import Any
 
-from servery import _log, _tls
+from servery import _log, _tls, _websocket
 
 _MAX_BODY = 100 * 1024 * 1024
 _INTERNAL_ERROR = (
@@ -178,6 +178,9 @@ class _Exchange:
             key, val = name.strip().lower(), value.strip()
             headers.append((key, val))
             header_map[key] = val
+        if header_map.get(b"upgrade", b"").lower() == b"websocket":
+            await self._serve_websocket(reader, writer, raw_path, headers, header_map)
+            return False  # the WebSocket owns the connection until it closes
         keep_alive = _wants_keep_alive(version, header_map)
         chunked = b"chunked" in header_map.get(b"transfer-encoding", b"").lower()
         try:
@@ -232,6 +235,49 @@ class _Exchange:
                 '%s "%s %s %s" %s', scope["client"][0], method, raw_path, version, state.status
             )
         return keep_alive and not state.close
+
+    async def _serve_websocket(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        raw_path: str,
+        headers: list[tuple[bytes, bytes]],
+        header_map: dict[bytes, bytes],
+    ) -> None:
+        key = header_map.get(b"sec-websocket-key", b"")
+        if not key or header_map.get(b"sec-websocket-version", b"") != b"13":
+            writer.write(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            await writer.drain()
+            return
+        path, _, query = raw_path.partition("?")
+        subprotocols = [
+            p.strip().decode("latin-1")
+            for p in header_map.get(b"sec-websocket-protocol", b"").split(b",")
+            if p.strip()
+        ]
+        client = list(writer.get_extra_info("peername", ("", 0))[:2])
+        scope = {
+            "type": "websocket",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "scheme": "wss" if self._scheme == "https" else "ws",
+            "path": path,
+            "raw_path": raw_path.encode("latin-1"),
+            "query_string": query.encode("latin-1"),
+            "headers": headers,
+            "subprotocols": subprotocols,
+            "server": list(self._server_addr),
+            "client": client,
+        }
+        _log.logger.info('%s "WEBSOCKET %s"', client[0], raw_path)
+        try:
+            await _websocket.serve(reader, writer, scope, self._app, key)
+        except (ConnectionError, asyncio.IncompleteReadError, ssl.SSLError):
+            pass
+        except Exception:
+            _log.logger.error('WebSocket app error: "%s"', raw_path, exc_info=True)
 
 
 class _ResponseState:

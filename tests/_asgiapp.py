@@ -37,6 +37,18 @@ async def streaming(scope: dict[str, Any], receive: Any, send: Any) -> None:
     await send({"type": "http.response.body", "body": b"part2", "more_body": False})
 
 
+async def ws_echo(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    assert scope["type"] == "websocket"
+    await receive()  # websocket.connect
+    await send({"type": "websocket.accept"})
+    while True:
+        event = await receive()
+        if event["type"] == "websocket.disconnect":
+            return
+        if event["type"] == "websocket.receive":
+            await send({"type": "websocket.send", "text": "echo:" + (event.get("text") or "")})
+
+
 async def crashing(scope: dict[str, Any], receive: Any, send: Any) -> None:
     # Raises out of the app without sending a response — server must 500 + log.
     await receive()

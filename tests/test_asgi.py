@@ -143,6 +143,71 @@ class ASGIChunkedTest(unittest.TestCase):
             self.assertIn(b"asgi POST /p helloworld", data)
 
 
+class WebSocketHandshakeTest(unittest.TestCase):
+    def test_accept_key_matches_rfc6455_example(self):
+        from servery import _websocket
+
+        # The canonical example from RFC 6455 §1.3.
+        self.assertEqual(
+            _websocket.accept_key(b"dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+        )
+
+
+def _ws_open(host: str, port: int, path: str = "/") -> tuple[socket.socket, bytes, bytes]:
+    """Open a WebSocket: do the upgrade, return (sock, key, handshake_response)."""
+    import base64
+    import os
+
+    key = base64.b64encode(os.urandom(16))
+    sock = socket.create_connection((host, port), timeout=5)
+    sock.sendall(
+        b"GET " + path.encode() + b" HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+        b"Connection: Upgrade\r\nSec-WebSocket-Key: " + key + b"\r\n"
+        b"Sec-WebSocket-Version: 13\r\n\r\n"
+    )
+    resp = b""
+    while b"\r\n\r\n" not in resp:
+        resp += sock.recv(4096)
+    return sock, key, resp
+
+
+def _ws_send_text(sock: socket.socket, text: str) -> None:
+    import os
+
+    payload = text.encode()
+    mask = os.urandom(4)
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    sock.sendall(bytes((0x81, 0x80 | len(payload))) + mask + masked)  # FIN+text, masked
+
+
+def _ws_read_text(sock: socket.socket) -> str:
+    head = sock.recv(2)
+    length = head[1] & 0x7F  # server frames are unmasked; payloads here are small
+    data = b""
+    while len(data) < length:
+        data += sock.recv(length - len(data))
+    return data.decode()
+
+
+class WebSocketWireTest(unittest.TestCase):
+    def test_echo_over_the_wire(self):
+        from servery import _websocket
+
+        with serving_asgi("tests._asgiapp:ws_echo") as (host, port):
+            sock, key, resp = _ws_open(host, port)
+            try:
+                self.assertIn(b"101 Switching Protocols", resp)
+                # base64 accept value is case-sensitive — match it verbatim.
+                self.assertIn(_websocket.accept_key(key).encode(), resp)
+                _ws_send_text(sock, "hi")
+                self.assertEqual(_ws_read_text(sock), "echo:hi")
+                _ws_send_text(sock, "again")
+                self.assertEqual(_ws_read_text(sock), "echo:again")
+            finally:
+                sock.close()
+
+
 @unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
 class ASGITLSTest(unittest.TestCase):
     def test_serves_over_https(self):
