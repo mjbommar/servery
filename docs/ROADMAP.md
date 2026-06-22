@@ -71,7 +71,7 @@ out-of-scope — also landed in 1.0 (see `docs/TRANSPORTS.md`).
 | **v0.1** | Walking skeleton: installable, runnable, *rich* listing, safe bind | `python -m servery` shows size/mtime/dir-first listing on localhost | Shipped |
 | **v0.2** | Sortable + searchable listing (Apache `?C=&O=`) | Clicking a column re-sorts JS-free; `?q=` filters | Shipped |
 | **v0.3** | Range + conditional requests (ETag/`If-*` ladder) + zero-copy | `curl -r` returns `206`; full `If-*` precedence → `304`/`412`; `sendfile` zero-copy | Shipped |
-| **v0.4** | TLS (user cert/key) | `--tls-cert`/`--tls-key` serve HTTPS via `SSLContext` | Shipped |
+| **v0.4** | TLS (user cert/key + ad-hoc self-signed) | `--tls-cert`/`--tls-key` serve HTTPS via `SSLContext`; `--tls-self-signed` mints a zero-dep self-signed cert at startup (`_certgen.py`) | Shipped |
 | **v0.5** | Basic Auth (+ hashed, constant-time, no-TLS warning) | `--auth u:p` gates access; wrong creds → `401`; loud HTTP warning | Shipped |
 | **v0.6** | Upload (opt-in, streamed, bounded, overwrite-off) | `--upload` accepts multipart to disk, bounded, no traversal | Shipped |
 | **v0.7** | Archive download (zip / tar.gz) | `?archive=tar.gz` streams a folder; zip option present | Shipped |
@@ -242,8 +242,12 @@ revisited with upload in v0.6).
 
 ## v0.4 — TLS (user-provided cert/key)
 
-**Goal.** Serve over HTTPS using the modern stdlib recipe — no self-signed
-generation (the stdlib cannot mint certs), so cert/key are user-provided.
+**Goal.** Serve over HTTPS using the modern stdlib recipe with user-provided
+cert/key. (Originally this milestone assumed the stdlib could not mint a
+self-signed cert and ruled generation out. That assumption was later proven
+**false** — pure-Python RSA+DER+PKCS#1 in `_certgen.py` mints one with zero
+deps — and ad-hoc self-signed generation now ships via `--tls-self-signed`, added
+to this milestone's scope below.)
 
 **In scope:**
 
@@ -259,10 +263,20 @@ generation (the stdlib cannot mint certs), so cert/key are user-provided.
   `max-age=63072000; includeSubDomains`, `preload` off) **only** when serving
   HTTPS — never on plain HTTP. `--hsts` may tune/force it.
 - Startup banner reflects `https://` and the bound address.
+- **`--tls-self-signed` (zero-dep, pure stdlib):** mint an RSA-2048 self-signed
+  cert at startup via `_certgen.py` (`pow`/`hashlib`/`secrets` + a hand-rolled DER
+  encoder + PKCS#1 v1.5 signing — no `cryptography`, no `openssl` binary, no
+  `ctypes`), write it to a 0600 temp dir, load via OpenSSL through `ssl`, delete.
+  For **opportunistic encryption on a dev box / LAN** only — clients see an
+  "untrusted certificate" warning; it is **not a trust anchor**. Mutually
+  exclusive with `--tls-cert`; emits a startup warning. `--tls-help` still prints
+  an `openssl` recipe for the user-cert path.
 
-**Out of scope (for now):** mTLS / client-cert verification (deferred — see
-backlog), stdlib self-signed cert generation (impossible; documented as such),
-the non-TLS security headers CSP/`Referrer-Policy` (land in v0.8 with CORS).
+**Out of scope (for this milestone):** mTLS / client-cert verification (deferred —
+see backlog); publicly-trusted / auto-renewed certs (**ACME / Let's Encrypt**) — a
+future optional `servery[acme]` extra (mirrors the `servery[http3]` precedent),
+**not implemented**; the non-TLS security headers CSP/`Referrer-Policy` (land in
+v0.8 with CORS).
 
 **Exit criteria:**
 
@@ -577,6 +591,7 @@ Parked ideas, each with the reason. Nothing here blocks 1.0.
 | **Full Markdown README rendering** | Maybe-never | **No stdlib Markdown parser.** Most we'll do is escaped plaintext `<pre>`. A reduced in-house subset renderer is possible but not GFM-fidelity and not worth the surface. |
 | **WebDAV (read-only `PROPFIND`)** | Deferred | Zero-dep feasible (`xml.etree` for `207` multistatus) but laborious real protocol work; low payoff for the file-server lane. Revisit only on real demand. |
 | **mTLS (client-cert verification)** | Deferred | Zero-dep feasible (`load_verify_locations` + `CERT_REQUIRED`); deferred as advanced/niche beyond the single-credential auth model. |
+| **Publicly-trusted / auto-renewed certs (ACME / Let's Encrypt)** | Maybe (optional extra) | The one TLS capability that warrants a dependency: the full ACME protocol + robust long-lived-key crypto + a public domain reachable on :80/:443 is production-public-web-server territory (Caddy's lane), at the edge of servery's dev/LAN scope. Would be a future **`servery[acme]`** extra (e.g. `cryptography` + an ACME client), mirroring `servery[http3]` = aioquic. **Not implemented.** (Ad-hoc *self-signed* certs are already in the core, zero-dep, via `--tls-self-signed`.) |
 | **Themes selector UI** | Deferred | `prefers-color-scheme` covers the 90% case in v0.1; an explicit light/dark selector is polish, not core. |
 | **Recursive directory-size totals** | Deferred | Useful but can be O(n) expensive on big trees; needs a bounded/cached design before it's worth it. |
 | **mkdir / delete / chmod / move file-ops** | Deferred | Each widens the write surface and the security/threat model; upload alone covers the core "send me a file" need. Add only with strong opt-in gating. |

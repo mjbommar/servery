@@ -30,7 +30,9 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
 - **Correct downloads** — RFC 9110 `Range`/`206` (resumable), strong `ETag`s, the full
   conditional-request ladder (`If-None-Match`/`If-Modified-Since`/`If-Range` → `304`/`412`),
   and zero-copy `sendfile`.
-- **HTTPS** — `--tls-cert`/`--tls-key`, ALPN, HSTS over TLS.
+- **HTTPS** — bring your own cert (`--tls-cert`/`--tls-key`) or get an ad-hoc
+  self-signed one with **`--tls-self-signed`** (zero-dependency, generated at
+  startup — handy for a quick encrypted LAN share). ALPN + HSTS over TLS.
 - **HTTP Basic Auth** — single credential or a pre-hashed `user:sha256:…`, constant-time compare.
 - **Upload** — opt-in `--upload`, streaming `multipart/form-data` (no `cgi`), atomic writes,
   bounded size, overwrite off by default.

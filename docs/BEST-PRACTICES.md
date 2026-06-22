@@ -684,7 +684,8 @@ plan for each.
 | **HTTP/2** | No `hpack` (HPACK header compression) or HTTP/2 framing in the stdlib. | Advertise only `http/1.1` via ALPN (§4); HTTP/1.1 + keep-alive (§1.1) is the ceiling. Put a reverse proxy in front for h2. |
 | **HTTP/3 / QUIC** | No QUIC, no `qpack`, no UDP transport stack in the stdlib. | Same: document "front with a proxy" (`NFR-SEC-03`). |
 | **Brotli (`br`) response encoding** | No `brotli` in the stdlib. | Negotiate only what *is* stdlib (below). Never advertise `br`. |
-| **Auto-generated TLS certs** | stdlib `ssl` cannot mint a self-signed cert (no X.509 generation). | Print an `openssl` one-liner via `--tls-help` (`REQUIREMENTS.md` FR-TLS-03 / DEC-TLS); user supplies cert/key. |
+| **Publicly-trusted / ACME certs** | The full ACME protocol + long-lived-key crypto + a public domain on :80/:443 is production-web-server territory; would warrant a future `servery[acme]` extra. | Out of scope; user supplies a publicly-trusted cert via `--tls-cert`. (NB: ad-hoc *self-signed* certs ARE zero-dep feasible and shipped — see next row.) |
+| **Ad-hoc self-signed TLS certs** | *Has* a zero-dep stdlib path. `ssl` itself has no X.509/keygen API, but pure-Python RSA+DER+PKCS#1 (`_certgen.py`) fills the gap with zero deps. | Shipped via `--tls-self-signed` (`REQUIREMENTS.md` FR-TLS-05) for opportunistic encryption (untrusted by clients); `--tls-help` still prints an `openssl` recipe for the user-cert path. |
 | **Markdown / rich rendering** | No stdlib Markdown parser. | Serve README as **escaped plaintext** at most (`PRINCIPLES.md` §0). |
 | **QR code for share URL** | No stdlib QR encoder. | Print the URL as text in the startup banner. |
 

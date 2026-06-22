@@ -4,6 +4,18 @@ All notable changes to servery are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`--tls-self-signed`**: zero-dependency HTTPS with an ad-hoc certificate
+  generated at startup (pure-stdlib RSA-2048 via `servery._certgen` — no
+  `cryptography`, no `openssl` binary, no `ctypes`; works on a bare Windows/Linux
+  Python). For opportunistic encryption on a dev box or LAN — clients see an
+  untrusted-certificate warning (it is not a trust anchor). Mutually exclusive
+  with `--tls-cert`. Publicly-trusted/ACME certs remain a (future) optional
+  `servery[acme]` extra; see `docs/TRANSPORTS.md` for the TLS tier boundary.
+
 ## [1.1.1] — 2026-06-22
 
 First release published to PyPI.

@@ -194,6 +194,45 @@ applies to any future crypto need. Prefer sources in this strict order:
   seam in its own module(s), reviewable in isolation, exactly like `security.py`
   is for path safety (`ARCHITECTURE.md` §5).
 
+### 4.1 TLS / HTTPS certificate tiers (parallel to the transport tiers above)
+
+The transport question is "how do we speak the protocol"; the certificate
+question is "where does the TLS *identity* (cert + key) come from." Same shape,
+same zero-dep-first discipline, same single point where a dependency is warranted.
+The TLS handshake/record layer itself is always OpenSSL via stdlib `ssl` — this
+table is only about minting/sourcing the certificate.
+
+| Tier | Cert source | How | Crypto source | Install | Trust | Status |
+|------|-------------|-----|---------------|---------|-------|--------|
+| **0a — Core: user-provided** | User's own cert/key (PEM) | `--tls-cert`/`--tls-key` (+ `--tls-password-file`); `--tls-help` prints an `openssl` one-liner for users who want to make one | **stdlib `ssl`** loads it (`load_cert_chain`) | `pip install servery` — **zero deps** | Whatever the user's cert is (can be publicly-trusted) | **Shipped** |
+| **0b — Core: ad-hoc self-signed** | Generated at servery startup | `--tls-self-signed`; `_certgen.py` mints RSA-2048 + self-signed X.509 in **pure Python**, writes to a 0600 temp dir, loads via OpenSSL, deletes | **stdlib only** — pure-Python `pow`/`hashlib`/`secrets` + hand-rolled DER + PKCS#1 v1.5; **no `cryptography`, no `openssl` binary, no `ctypes`** | `pip install servery` — **zero deps** | **Untrusted** — opportunistic encryption on a dev box / LAN; clients see an "untrusted certificate" warning; **not a trust anchor** | **Shipped** |
+| **1 — Optional extra: ACME / publicly-trusted** | A CA (Let's Encrypt) via the ACME protocol, auto-renewed | (future) `servery[acme]` extra — e.g. `cryptography` + an ACME client; needs a public domain reachable on :80/:443 | PyPI crypto (the one TLS capability that warrants a dep) | `pip install servery[acme]` | **Publicly trusted** | **Not implemented — documented as the boundary** |
+
+**How to read this table.** Tiers 0a and 0b add **no PyPI dependency** — both are
+pure stdlib, exactly like Tier 0 of the transport model. Tier 1 (ACME) is the TLS
+analogue of the HTTP/3 `servery[http3]` extra: the full ACME protocol + robust
+long-lived-key crypto + a public domain on :80/:443 is production-public-web-server
+territory (Caddy's lane), at the edge of servery's dev/LAN scope, and is the one
+place a TLS dependency is justified. It is **not implemented**; it is recorded here
+as the boundary so it is not mistaken for a current feature.
+
+**The `_certgen.py` finding (parallel to the `_oscrypto.py` finding in §4).** §4
+established that OS crypto unreachable in pure stdlib (QUIC AEADs) is reachable by
+**binding already-present OS libraries via `ctypes`** — the `_oscrypto.py` shim.
+Certificate minting is the *opposite* finding on the same spectrum: the stdlib
+`ssl` module has no X.509 builder and no asymmetric keygen, but the gap is closable
+**without even leaving pure Python** — arbitrary-precision `pow` (modular
+exponentiation/inverse), `hashlib` (SHA-256), and `secrets` (CSPRNG) are exactly
+enough to generate an RSA key and sign a self-signed certificate (`_certgen.py`),
+on a bare Windows/Linux Python with **zero `ctypes` and zero PyPI**. The discipline
+that keeps this honest: only **key generation and signing our own cert once at
+startup** is hand-rolled; the handshake, key exchange, and record encryption all
+stay in OpenSSL via `ssl`. The side-channel concerns that plague hand-rolled crypto
+(timing, padding oracles) do not apply to one-shot self-cert generation. So the
+sourcing order from §4 holds, with cert-minting slotting in ahead of any `ctypes`
+step: **pure stdlib (incl. `_certgen.py` for self-signed) → OS library via `ctypes`
+→ vetted PyPI extra (ACME, explicit opt-in only).**
+
 ---
 
 ## 5. Per-version scope: what "done" means, effort, and risk

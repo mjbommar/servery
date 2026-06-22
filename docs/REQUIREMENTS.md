@@ -286,8 +286,12 @@ writes nothing to disk.
 
 ### 1.6 TLS / HTTPS
 
-> User-provided cert/key ONLY. Pure stdlib cannot generate a self-signed cert,
-> so servery does **not** promise auto-generation (see §6, DEC-TLS).
+> Two zero-dep TLS paths: **user-provided cert/key** (FR-TLS-01) and an **ad-hoc
+> self-signed cert generated at startup** (FR-TLS-05). The stdlib `ssl` module has
+> no X.509/keygen API, but pure-Python RSA+DER+PKCS#1 (`_certgen.py`) fills that
+> gap with **zero dependencies** — so self-signed generation is shipped, not just
+> documented (see §6, DEC-TLS). Publicly-trusted / auto-renewed (ACME) certs are
+> the boundary that would warrant an optional extra; not implemented.
 
 **FR-TLS-01 — Serve over HTTPS with provided cert/key.**
 `--tls-cert <path>` and `--tls-key <path>` enable HTTPS via an
@@ -304,14 +308,14 @@ passphrase is read from a file, not the CLI, to avoid leaking it in process args
 *Acceptance:* an encrypted key plus the correct password file loads and serves;
 an incorrect/missing password file produces a clear startup error.
 
-**FR-TLS-03 — Self-signed helper is documentation, not a feature.**
-When TLS is requested but cert/key are absent, or via `--tls-help`, servery prints
-a ready-to-run `openssl` one-liner for generating a self-signed cert/key. servery
-does not generate certs itself.
-*Acceptance:* invoking `--tls-help` (or `--tls-cert` without a key) prints a
-command of the form
+**FR-TLS-03 — `--tls-help` prints a user-cert recipe.**
+`--tls-help` prints a ready-to-run `openssl` one-liner for users who want to mint
+their own cert/key and serve it via `--tls-cert`/`--tls-key`. This is a
+convenience recipe for the user-provided path, not the only way to get a cert —
+`--tls-self-signed` (FR-TLS-05) generates one with no tooling at all.
+*Acceptance:* invoking `--tls-help` prints a command of the form
 `openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"`
-and exits non-zero (or continues per the absent-arg case) without crashing.
+and exits without crashing.
 
 **FR-TLS-04 — Optional mutual TLS (client certs) [NICE-TO-HAVE].**
 `--tls-client-ca <path>` enables mTLS: `ctx.load_verify_locations(cafile=...)` +
@@ -320,6 +324,24 @@ This is a v1 nice-to-have; if shipped it must be off unless the flag is given.
 *Acceptance (if implemented):* with `--tls-client-ca ca.pem`, a client presenting
 a CA-signed cert connects; a client with no/invalid client cert is rejected at the
 TLS layer.
+
+**FR-TLS-05 — Ad-hoc self-signed certificate, generated in pure stdlib.**
+`--tls-self-signed` enables HTTPS without any cert/key on disk: servery generates
+an RSA-2048 self-signed certificate at startup in **pure Python, zero
+dependencies** (`_certgen.py` — `pow`/`hashlib`/`secrets` + a hand-rolled DER
+encoder + PKCS#1 v1.5 signing; no `cryptography`, no `openssl` binary, no
+`ctypes`). The cert (with SAN entries for `localhost`, the loopback addresses, and
+the bind host) is written to a private 0600 temp dir, loaded via OpenSSL through
+the stdlib `ssl` module, then deleted — nothing persists. This is **opportunistic
+encryption for a dev box or LAN, not a trust anchor**: clients see an "untrusted
+certificate" warning. The TLS handshake itself stays in OpenSSL; only keygen and
+signing-our-own-cert are hand-rolled. `--tls-self-signed` is **mutually exclusive
+with `--tls-cert`** and emits a startup warning. Publicly-trusted, auto-renewed
+certs (ACME / Let's Encrypt) are explicitly out of this requirement and would be a
+future optional extra (see §5, DEC-TLS).
+*Acceptance:* `servery --tls-self-signed` completes a real TLS handshake (e.g.
+`curl -k` succeeds); combining it with `--tls-cert` is a clean config error; no
+cert/key file remains on disk after startup.
 
 ### 1.7 Upload (opt-in, streamed, bounded)
 
@@ -684,7 +706,8 @@ positional `directory` (default `.`) is the served root.
 | `--tls-cert` | | `PATH` | none | TLS certificate chain (PEM); enables HTTPS. |
 | `--tls-key` | | `PATH` | none | TLS private key (PEM). |
 | `--tls-password-file` | | `PATH` | none | File containing the TLS private-key passphrase. |
-| `--tls-help` | | flag | — | Print how to generate a self-signed certificate, then exit. |
+| `--tls-self-signed` | | flag | off | Enable HTTPS with an ad-hoc self-signed cert generated at startup in pure stdlib (`_certgen.py`); opportunistic encryption only (untrusted by clients). Mutually exclusive with `--tls-cert`. |
+| `--tls-help` | | flag | — | Print the `openssl` recipe for minting your own cert, then exit. |
 | `--version` | | flag | — | Print version and exit. |
 | `--help` | `-h` | flag | — | Print help and exit (argparse default). |
 
@@ -897,7 +920,7 @@ reference it borrows from.
 | Range / `206` | Vision §1 ("no range support"); Principle §0 "stdlib lacks it; we add it" | The Range myth + recipe (REFERENCES §0.2, §5) |
 | Basic auth (single, hashed, constant-time) | Principle §1 (constant-time), §0.7 scope (single credential) | uploadserver auth split + miniserve SHA-256/512 format; `hmac.compare_digest` (REFERENCES §3.1, §3.4, §5) |
 | TLS (user cert/key, mTLS option) | Principle §0 (`ssl` only); Vision §1 | `http.server.HTTPSServer` `SSLContext` recipe; uploadserver mTLS (REFERENCES §1, §3.1) |
-| TLS self-signed = openssl doc | Principle §0 (no dep, scope down) | "not zero-dep feasible" finding (REFERENCES §5/§6) |
+| TLS self-signed (`--tls-self-signed`, pure-stdlib) | Principle §0 (zero-dep); Vision §1 | `_certgen.py` — pure-Python RSA+DER+PKCS#1; proven zero-dep feasible and shipped |
 | Streamed bounded upload | Principle §1 (opt-in, bounded, traversal-checked); §0 (no `cgi`) | `email.parser` route; Droopy/uploadserver make_file → temp → atomic rename (REFERENCES §0.1, §3.1, §3.3, §5) |
 | Archive download (zip/tar.gz) | Vision §2 parity gap | woof directory→archive; miniserve `-z/-r/-g`; `tarfile w\|gz` streaming (REFERENCES §3.3, §3.4, §5) |
 | CORS toggle | Vision §2 | `serve`/`http-server` `--cors` (REFERENCES §3.5) |
@@ -924,8 +947,12 @@ Recorded so they are not re-proposed:
   credential.
 - **User-defined routes / endpoints / middleware / app object** — framework lane;
   permanently out.
-- **Auto-generated TLS certs** — not zero-dep feasible; documented `openssl`
-  command instead.
+- **Publicly-trusted / auto-renewed TLS certs (ACME / Let's Encrypt)** — out of
+  v1; this is the one TLS capability that would warrant an optional extra
+  (future `servery[acme]`), since the full ACME protocol + long-lived-key crypto
+  + a public domain on :80/:443 is production-public-web-server territory at the
+  edge of servery's dev/LAN scope. (Ad-hoc *self-signed* certs are **in** scope
+  and shipped — `--tls-self-signed`, FR-TLS-05, zero-dep via `_certgen.py`.)
 - **Directory creation / delete / chmod on upload** — write surface limited to
   bounded file upload in v1.
 - **Environment-variable / config-file configuration** — CLI is the only config
@@ -988,13 +1015,21 @@ memory-safe.
 system); the smallest credential model that meets the "gate it behind a password"
 use case.
 
-**DEC-TLS — User-provided cert/key ONLY; self-signed is a documented `openssl`
-command, not a feature.** *(seeded, recorded)*
-Pure stdlib cannot generate a self-signed cert, so servery prints
-`openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"`
-via `--tls-help` (and when cert/key are requested but absent) rather than
-generating one. Optional mTLS via `--tls-client-ca` is a nice-to-have, off by
-default.
+**DEC-TLS — Two zero-dep cert paths (user-provided + ad-hoc self-signed); ACME is
+the optional-extra boundary.** *(updated — self-signed shipped)*
+Original framing assumed pure stdlib could not mint a self-signed cert. That
+proved **false**: the stdlib `ssl` module has no X.509/keygen API, but pure-Python
+RSA+DER+PKCS#1 (`_certgen.py`) fills the gap with **zero dependencies**. So servery
+now offers two zero-dep TLS paths: **user-provided** cert/key (`--tls-cert`/`--tls-key`,
+with `--tls-help` printing an `openssl` recipe for those who want to mint their
+own), and **ad-hoc self-signed** generated at startup (`--tls-self-signed`,
+FR-TLS-05) for opportunistic encryption on a dev box / LAN — not a trust anchor.
+Only keygen + signing-our-own-cert is hand-rolled; the TLS handshake stays in
+OpenSSL via `ssl`. The boundary that *would* warrant a dependency is
+**publicly-trusted / auto-renewed (ACME / Let's Encrypt)** certs — a future
+optional **`servery[acme]`** extra, mirroring how HTTP/3 is the optional
+`servery[http3]` = aioquic extra; **not implemented**. Optional mTLS via
+`--tls-client-ca` is a nice-to-have, off by default.
 
 **DEC-CONFIG — CLI is the only configuration surface in v1.**
 No env/config-file layer. Reserved future precedence (if added):

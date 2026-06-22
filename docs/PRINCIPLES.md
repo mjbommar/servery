@@ -61,6 +61,20 @@ nobody re-litigates them later:
   simple url-encoded forms. This is a deliberate, owned piece of code, not an
   accident. It must be written carefully (streaming where possible, strict on
   boundaries, bounded in memory).
+- **Self-signed TLS certs ARE a stdlib path (a §0 rule-1 win, not a rule-2/3
+  loss).** The stdlib `ssl` module can *use* TLS but has no X.509/keygen API, so
+  this once looked like a "scope it down to a documented `openssl` command"
+  consequence. It is not: pure-Python RSA-2048 + a hand-rolled DER encoder +
+  PKCS#1 v1.5 signing (`pow`/`hashlib`/`secrets`) mint a self-signed cert with
+  **zero dependencies** (`_certgen.py`), and `--tls-self-signed` ships it. Note
+  the discipline — only **keygen + signing-our-own-cert once at startup** is
+  hand-rolled; the TLS handshake/record encryption stay in OpenSSL via `ssl`, and
+  the side-channel concerns of hand-rolled crypto don't apply to one-shot
+  self-cert generation. The *real* boundary is **publicly-trusted / auto-renewed
+  (ACME / Let's Encrypt)** certs: that needs the full ACME protocol + a public
+  domain, which is exactly where an optional **`servery[acme]`** extra would be
+  warranted — the same rule-of-three logic that makes HTTP/3 a `servery[http3]`
+  extra. Not implemented; documented as the boundary.
 - **No async framework, no template engine, no rich-text/UI toolkit.** Our
   listing UI is server-rendered HTML/CSS built with stdlib string tooling
   (`html.escape`, `string.Template`), shipped inline. No build step, no asset

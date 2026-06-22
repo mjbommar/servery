@@ -12,8 +12,11 @@ from servery.config import Config
 from servery.server import serve
 
 TLS_HELP = (
-    "servery serves user-provided certificates; the standard library cannot mint "
-    "one for you.\nGenerate a self-signed certificate with openssl:\n\n"
+    "For quick HTTPS with no setup, use a generated ad-hoc cert:\n\n"
+    "  servery --tls-self-signed\n\n"
+    "(zero-dependency, generated at startup; clients see an untrusted-cert "
+    "warning — fine for a dev box or LAN).\n\n"
+    "To use your own certificate, generate one with openssl:\n\n"
     "  openssl req -x509 -newkey rsa:2048 -nodes \\\n"
     "    -keyout key.pem -out cert.pem -days 365 -subj '/CN=localhost'\n\n"
     "Then run:  servery --tls-cert cert.pem --tls-key key.pem"

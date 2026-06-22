@@ -137,6 +137,18 @@ servery will **not**:
   LAN / ad-hoc-sharing tool. We aim for *safe defaults*, not hardened
   internet-facing operation. Put it behind a real reverse proxy if you must
   expose it.
+- Issue **publicly-trusted, auto-renewed TLS certificates (ACME / Let's
+  Encrypt).** servery's TLS is **Tier 0 — zero-dependency**: user-provided
+  cert/key (`--tls-cert`/`--tls-key`, with `--tls-help` printing an `openssl`
+  recipe) *and* an **ad-hoc self-signed cert** minted at startup in pure stdlib
+  (`--tls-self-signed`, via `_certgen.py`) for opportunistic encryption on a dev
+  box / LAN. Self-signed is **not a trust anchor** — clients see an "untrusted
+  certificate" warning. Going past that to publicly-trusted, auto-renewed certs
+  means the full ACME protocol against a public domain on :80/:443 — the
+  production-public-web-server lane servery deliberately doesn't occupy. If it
+  ever lands, it lands as an **optional `servery[acme]` extra** (mirroring the
+  `servery[http3]` precedent), never in the zero-dep core; it is **not
+  implemented**.
 - Add **third-party dependencies** for any feature, ever. (See `PRINCIPLES.md`.)
 - Render **arbitrary Markdown**. The stdlib has no Markdown parser, so README
   rendering is out of scope beyond, at most, escaped plaintext. We will not
