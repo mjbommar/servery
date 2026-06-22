@@ -6,6 +6,15 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **Hardened the TLS cipher suite** to forward-secret **AEAD only** (TLS 1.2
+  restricted to `ECDHE+AESGCM`/`ECDHE+CHACHA20`; TLS 1.3 is all-AEAD already).
+  Dropping CBC suites removes the Lucky13/SWEET32 surface. Validated with
+  `testssl.sh` (`make scan-tls`): TLS 1.2/1.3 only, FS offered, every CVE check
+  clean. A failed TLS handshake from an old/scanning client no longer prints a
+  server-side traceback (`handle_error` swallows client-side transport errors).
+
 ### Added
 
 - **`--tls-self-signed`**: zero-dependency HTTPS with an ad-hoc certificate

@@ -1,4 +1,4 @@
-.PHONY: install lint format type security test build check all clean
+.PHONY: install lint format type security test build check all clean scan-tls
 
 install:
 	uv sync
@@ -24,6 +24,9 @@ test:
 build:
 	uv build
 	uv run python scripts/check_zero_deps.py
+
+scan-tls:
+	bash scripts/scan_tls.sh
 
 check: lint type security test
 

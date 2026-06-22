@@ -216,6 +216,18 @@ territory (Caddy's lane), at the edge of servery's dev/LAN scope, and is the one
 place a TLS dependency is justified. It is **not implemented**; it is recorded here
 as the boundary so it is not mistaken for a current feature.
 
+**Validation.** The HTTPS surface (including the `_certgen.py` self-signed cert) is
+audited with [`testssl.sh`](https://testssl.sh), the industry-standard TLS scanner —
+run `make scan-tls` (or `scripts/scan_tls.sh`). Expected, and confirmed: SSLv2/v3
+and TLS 1.0/1.1 **not offered**; TLS 1.2 + 1.3 only; forward-secret **AEAD-only**
+ciphers (CBC dropped, so Lucky13/SWEET32 are off the table); SHA-256/RSA-2048 cert
+with the requested SAN and hostname trust **OK via SAN**; every CVE check
+(Heartbleed, ROBOT, POODLE, FREAK, LOGJAM, BEAST, DROWN, CRIME, …) **not
+vulnerable**. The self-signed "chain of trust" is reported incomplete — correct,
+because it is self-signed. `tests/test_tls.py::TlsHardeningTest` re-asserts the key
+findings (modern protocols + AEAD/forward-secret ciphers + legacy-TLS rejection) as
+a stdlib CI regression.
+
 **The `_certgen.py` finding (parallel to the `_oscrypto.py` finding in §4).** §4
 established that OS crypto unreachable in pure stdlib (QUIC AEADs) is reachable by
 **binding already-present OS libraries via `ctypes`** — the `_oscrypto.py` shim.
