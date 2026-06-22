@@ -34,8 +34,8 @@ async def _read_response(reader: asyncio.StreamReader) -> int:
     return length
 
 
-async def _connection(host: str, port: int, request: bytes, deadline: float,
-                      latencies: list[float], counters: list[int]) -> None:
+async def _keepalive(host: str, port: int, request: bytes, deadline: float,
+                     latencies: list[float], counters: list[int]) -> None:
     reader, writer = await asyncio.open_connection(host, port)
     try:
         while time.monotonic() < deadline:
@@ -51,23 +51,59 @@ async def _connection(host: str, port: int, request: bytes, deadline: float,
             await writer.wait_closed()
 
 
-async def _run_async(host: str, port: int, path: str, conns: int, duration: float) -> dict:
+async def _one_close_request(host: str, port: int, request: bytes, counters: list[int]) -> None:
+    reader, writer = await asyncio.open_connection(host, port)
+    try:
+        writer.write(request)
+        await writer.drain()
+        counters[1] += await _read_response(reader)
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+
+
+async def _churn(host: str, port: int, request: bytes, deadline: float,
+                 latencies: list[float], counters: list[int]) -> None:
+    """A fresh connection per request (Connection: close) — stresses accept/backlog.
+
+    Each cycle is bounded by a timeout so a connect/read stalled by a full backlog
+    can't outlive the run (the loop only re-checks the deadline between cycles).
+    """
+    while time.monotonic() < deadline:
+        t0 = time.monotonic()
+        try:
+            await asyncio.wait_for(_one_close_request(host, port, request, counters), timeout=5.0)
+        except (OSError, asyncio.IncompleteReadError, TimeoutError):
+            counters[2] += 1  # refused/reset/stalled (backlog overflow shows here)
+            continue
+        latencies.append(time.monotonic() - t0)
+        counters[0] += 1
+
+
+async def _run_async(host: str, port: int, path: str, conns: int, duration: float,
+                     close: bool) -> dict:
+    conn_header = "close" if close else "keep-alive"
     request = (
-        f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\n\r\n"
+        f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: {conn_header}\r\n\r\n"
     ).encode("latin-1")
     latencies: list[float] = []
-    counters = [0, 0]  # [requests, bytes]
+    counters = [0, 0, 0]  # [requests, bytes, errors]
     deadline = time.monotonic() + duration
+    worker = _churn if close else _keepalive
     await asyncio.gather(
-        *(_connection(host, port, request, deadline, latencies, counters) for _ in range(conns)),
+        *(worker(host, port, request, deadline, latencies, counters) for _ in range(conns)),
         return_exceptions=True,
     )
-    return {"requests": counters[0], "bytes": counters[1], "latencies": latencies}
+    return {
+        "requests": counters[0], "bytes": counters[1], "errors": counters[2],
+        "latencies": latencies,
+    }
 
 
 def _worker(args: tuple) -> dict:
-    host, port, path, conns, duration = args
-    return asyncio.run(_run_async(host, port, path, conns, duration))
+    host, port, path, conns, duration, close = args
+    return asyncio.run(_run_async(host, port, path, conns, duration, close))
 
 
 def main() -> None:
@@ -76,6 +112,9 @@ def main() -> None:
     parser.add_argument("-c", "--concurrency", type=int, default=64, help="total connections")
     parser.add_argument("-d", "--duration", type=float, default=5.0, help="seconds")
     parser.add_argument("--procs", type=int, default=1, help="client processes")
+    parser.add_argument(
+        "--close", action="store_true", help="new connection per request (stresses accept/backlog)"
+    )
     args = parser.parse_args()
 
     parsed = urllib.parse.urlsplit(args.url)
@@ -85,7 +124,7 @@ def main() -> None:
         path += "?" + parsed.query
 
     per_proc = max(1, args.concurrency // args.procs)
-    job = (host, port, path, per_proc, args.duration)
+    job = (host, port, path, per_proc, args.duration, args.close)
     t0 = time.monotonic()
     if args.procs == 1:
         results = [_worker(job)]
@@ -96,15 +135,18 @@ def main() -> None:
 
     total_req = sum(r["requests"] for r in results)
     total_bytes = sum(r["bytes"] for r in results)
+    total_err = sum(r["errors"] for r in results)
     lat = sorted(ms for r in results for ms in r["latencies"])
     rps = total_req / elapsed
 
     def pct(p: float) -> float:
         return lat[min(len(lat) - 1, int(len(lat) * p))] * 1000 if lat else 0.0
 
+    mode = "close (churn)" if args.close else "keep-alive"
     print(f"url            {args.url}")
+    print(f"mode           {mode}")
     print(f"concurrency    {args.concurrency} conns / {args.procs} proc(s)")
-    print(f"requests       {total_req}  in {elapsed:.2f}s")
+    print(f"requests       {total_req}  in {elapsed:.2f}s   errors={total_err}")
     print(f"throughput     {rps:,.0f} req/s   {total_bytes / elapsed / 1e6:,.1f} MB/s")
     if lat:
         print(

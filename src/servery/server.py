@@ -31,6 +31,10 @@ class ServeryHTTPServer(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    # Listen backlog (socketserver default is 5): too shallow for connection
+    # bursts (e.g. many short non-keep-alive clients), which then get refused
+    # before a worker can accept. 128 absorbs bursts without unbounded queueing.
+    request_queue_size = 128
 
     wsgi_app: Any = None
     cgi_root: str = ""
