@@ -23,6 +23,8 @@ from typing import Any
 from servery import _appspec, _http1, _log
 from servery.handler import ServeryHandler, _ChunkedWriter
 
+_MAX_BODY = 100 * 1024 * 1024  # cap wsgi.input regardless of a lying Content-Length
+
 
 def load_app(spec: str) -> Any:
     """Import a WSGI app from ``"module:attribute"`` (attr defaults to ``application``)."""
@@ -67,7 +69,7 @@ def build_environ(handler: ServeryHandler) -> dict[str, Any]:
     """Build a PEP 3333 ``environ`` from servery's parsed request."""
     path, _, query = handler.path.partition("?")
     headers = handler.headers
-    length = int(headers.get("content-length") or 0)
+    length = max(0, min(int(headers.get("content-length") or 0), _MAX_BODY))
     server_host, server_port = handler.server.server_address[:2]  # ty: ignore[not-subscriptable]
     environ: dict[str, Any] = {
         "REQUEST_METHOD": handler.command,

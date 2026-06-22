@@ -100,7 +100,7 @@ def run(handler: ServeryHandler) -> None:
         handler.send_error(404, "No CGI script found")
         return
     script, path_info = resolved
-    length = min(int(handler.headers.get("content-length") or 0), _MAX_BODY)
+    length = max(0, min(int(handler.headers.get("content-length") or 0), _MAX_BODY))
     body = handler.rfile.read(length) if length else b""
     env = build_env(handler, script, path_info)
     try:

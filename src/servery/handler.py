@@ -387,6 +387,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         except ValueError:
             self.send_error(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
             return
+        if length < 0:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
+            return
         if length > config.max_upload_size:
             self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Upload exceeds the size limit")
             return

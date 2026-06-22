@@ -73,6 +73,18 @@ class WSGIServerTest(unittest.TestCase):
             self.assertEqual(status_of(resp), 200)
             self.assertIn(b"GET /static.txt", body_of(resp))  # app echo, not the file
 
+    def test_negative_content_length_is_clamped(self):
+        # Content-Length: -1 must NOT trigger an unbounded rfile.read(-1) (would
+        # hang reading the whole socket); clamped to 0 -> prompt empty-body reply.
+        with serving(self.cfg) as (host, port):
+            resp = raw_exchange(
+                host,
+                port,
+                b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\nConnection: close\r\n\r\n",
+            )
+            self.assertEqual(status_of(resp), 200)
+            self.assertEqual(body_of(resp), b"POST /x ")
+
     def test_content_length_response_keeps_connection_alive(self):
         # Two pipelined requests on one connection -> keep-alive works.
         with serving(self.cfg) as (host, port):

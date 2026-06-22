@@ -47,17 +47,20 @@ def forward(handler: ServeryHandler, target: str) -> None:
     """Forward the current request to ``target`` and stream the response back."""
     config = handler._server.config
     parsed = urllib.parse.urlsplit(target)
-    length = int(handler.headers.get("content-length") or 0)
+    length = max(0, int(handler.headers.get("content-length") or 0))  # never read(-1)
     if length > config.max_upload_size:
         handler.send_error(413, "Request body too large to proxy")
         return
     body = handler.rfile.read(length) if length else None
 
     scheme = "https" if isinstance(handler.connection, ssl.SSLSocket) else "http"
+    # When servery did its own --auth, the client's Authorization is servery's
+    # credential — don't forward it to the upstream (different trust boundary).
+    drop = {"host", "authorization"} if config.auth is not None else {"host"}
     out_headers = {
         name: value
         for name, value in handler.headers.items()
-        if name.lower() not in _HOP_BY_HOP and name.lower() != "host"
+        if name.lower() not in _HOP_BY_HOP and name.lower() not in drop
     }
     out_headers["Host"] = parsed.netloc
     out_headers["X-Forwarded-For"] = handler.client_address[0]
