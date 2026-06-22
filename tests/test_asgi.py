@@ -213,11 +213,9 @@ class WebSocketWireTest(unittest.TestCase):
 @unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
 class ASGIAuthTest(unittest.TestCase):
     def test_auth_is_enforced(self):
-        with serving_asgi("tests._asgiapp:echo", auth="u:p") as (host, port):
-            with httpx.Client() as client:
-                self.assertEqual(client.get(f"http://{host}:{port}/x").status_code, 401)
-                ok = client.get(f"http://{host}:{port}/x", auth=("u", "p"))
-                self.assertEqual(ok.status_code, 200)
+        with serving_asgi("tests._asgiapp:echo", auth="u:p") as (host, port), httpx.Client() as c:
+            self.assertEqual(c.get(f"http://{host}:{port}/x").status_code, 401)
+            self.assertEqual(c.get(f"http://{host}:{port}/x", auth=("u", "p")).status_code, 200)
 
 
 @unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
