@@ -119,7 +119,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         metavar="N",
-        help="bound concurrency to N worker threads (default: unbounded, thread-per-connection)",
+        help="bound concurrency to N worker threads (default: unbounded, thread-per-connection); "
+        "set N near the CPU core count under high concurrency to avoid thread thrash "
+        "(sharply lower tail latency)",
     )
     parser.add_argument(
         "--http2",

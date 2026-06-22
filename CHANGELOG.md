@@ -6,6 +6,24 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+### Performance
+
+A measured pass over the async/parallel paths (server out-of-process, async
+`scripts/loadgen.py` over loopback; `scripts/abdriver.py` manages the lifecycle):
+
+- **ASGI request parsing**: read the whole request head in one
+  `readuntil(b"\r\n\r\n")` instead of one `await` per header line.
+  **+6%** (102.5k → ~109k req/s keep-alive, c=64; scales with header count).
+- **Listen backlog** raised 5 → 128 (`request_queue_size`). Under connection
+  churn (`--close`, c=500): **3.3k → ~6.4k req/s and 296 → 0 connection errors**.
+- **Characterization** (no code change): file serving is **I/O/syscall-bound**
+  (`recv`/`sendfile` release the GIL), so free-threading (3.14t) gives it **no**
+  throughput gain over the GIL build (82.9k ≈ 82.3k req/s) and the path is already
+  syscall-lean. The single-loop **ASGI** server is ~1-core-bound (~109k req/s).
+  Under high concurrency the unbounded thread-per-connection default thrashes
+  (c=128: 53k req/s, p99 6.2 ms); **`--max-workers` ≈ CPU cores** fixes it
+  (57.5k req/s, **p99 0.40 ms — ~15× lower tail latency**) — now noted in `--help`.
+
 ### Observability
 
 - **Unified logging / telemetry / error handling across every transport**
