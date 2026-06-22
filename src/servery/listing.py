@@ -709,7 +709,7 @@ th, td { text-align: left; padding: 0.3rem 0.6rem;
 th { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
 th a { color: inherit; opacity: 0.7; }
 tbody tr:hover { background: color-mix(in srgb, currentColor 6%, transparent); }
-td.name { width: 100%; }
+td.name { width: 100%; overflow-wrap: anywhere; }
 td.name .icon { display: inline-block; width: 1.4em; }
 td.size, th.size, td.mtime, th.mtime { text-align: right; white-space: nowrap;
   font-variant-numeric: tabular-nums; }
@@ -729,6 +729,13 @@ nav.pager a { color: var(--accent); }
 nav.pager .disabled { opacity: 0.35; }
 nav.pager .range { opacity: 0.7; }
 footer { margin-top: 1rem; font-size: 0.8rem; opacity: 0.6; }
+/* Touch devices cannot hover: keep the per-file download affordance visible and
+   give the chips / toggles / pager comfortable finger-sized tap targets. */
+@media (hover: none) {
+  a.dl { opacity: 0.7; }
+  nav.theme a, nav.facets a { padding: 0.5rem 0.8rem; }
+  nav.pager a, nav.pager .disabled { padding: 0.4rem 0.3rem; }
+}
 """
 
 _TEMPLATE = """\
