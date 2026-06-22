@@ -113,5 +113,64 @@ class SelfSignedServerTest(unittest.TestCase):
             tmp.cleanup()
 
 
+class TlsHardeningTest(unittest.TestCase):
+    """The testssl.sh findings as a stdlib regression: only TLS 1.2/1.3 with
+    forward-secret AEAD ciphers (no CBC -> no Lucky13/SWEET32 surface)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        Path(self._tmp.name, "f.txt").write_text("x")
+        cfg = Config.create(
+            self._tmp.name, host="127.0.0.1", port=0, quiet=True, tls_self_signed=True
+        )
+        self.httpd = make_server(cfg)
+        self.host, self.port = self.httpd.server_address[0], self.httpd.server_address[1]
+        self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self._thread.join(timeout=5)
+        self._tmp.cleanup()
+
+    def _client_ctx(self) -> ssl.SSLContext:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE  # self-signed
+        return ctx
+
+    def _connect(self, ctx: ssl.SSLContext):
+        sock = socket.create_connection((str(self.host), int(self.port)), timeout=5)
+        return ctx.wrap_socket(sock, server_hostname="localhost")
+
+    def test_negotiates_modern_tls_and_aead_cipher(self):
+        with self._connect(self._client_ctx()) as tls:
+            self.assertIn(tls.version(), ("TLSv1.2", "TLSv1.3"))
+            name = tls.cipher()[0]
+            self.assertTrue("GCM" in name or "CHACHA20" in name, name)
+            self.assertNotIn("CBC", name)
+
+    def test_tls12_is_forward_secret_aead(self):
+        ctx = self._client_ctx()
+        ctx.minimum_version = ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        with self._connect(ctx) as tls:
+            self.assertEqual(tls.version(), "TLSv1.2")
+            name = tls.cipher()[0]
+            self.assertIn("ECDHE", name)  # forward secrecy
+            self.assertTrue("GCM" in name or "CHACHA20" in name, name)
+            self.assertNotIn("CBC", name)
+
+    def test_legacy_tls_below_1_2_is_rejected(self):
+        ctx = self._client_ctx()
+        try:
+            ctx.minimum_version = ssl.TLSVersion.TLSv1
+            ctx.maximum_version = ssl.TLSVersion.TLSv1_1
+        except (ValueError, OSError):  # pragma: no cover - build without TLS<1.2
+            self.skipTest("client OpenSSL cannot offer TLS < 1.2")
+        with self.assertRaises((ssl.SSLError, OSError)):
+            self._connect(ctx)
+
+
 if __name__ == "__main__":
     unittest.main()

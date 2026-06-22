@@ -65,6 +65,14 @@ class ServeryHTTPServer(ThreadingHTTPServer):
             if self._slots is not None:
                 self._slots.release()
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # A failed TLS handshake or a dropped connection is a client-side problem,
+        # not a server fault — don't spew a traceback for every old/scanning peer.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ssl.SSLError, ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
     def server_close(self) -> None:
         super().server_close()
         if self._executor is not None:
@@ -85,6 +93,11 @@ class ServeryHTTPServer(ThreadingHTTPServer):
         # create_default_context already enforces a sane minimum (TLS 1.2+) and a
         # secure cipher set; we only advertise HTTP/1.1 (+ h2) over ALPN.
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        # Restrict TLS 1.2 to forward-secret AEAD suites (drop CBC, so the whole
+        # Lucky13/SWEET32 class is off the table). TLS 1.3 suites are all-AEAD
+        # already and unaffected by set_ciphers.
+        with contextlib.suppress(ssl.SSLError):
+            context.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
         if config.tls_cert is not None:
             context.load_cert_chain(config.tls_cert, config.tls_key, config.tls_password)
         else:
