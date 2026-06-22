@@ -15,12 +15,14 @@ redirects, and MIME typing. servery overrides what it improves:
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import email.utils
 import http.server
 import io
 import os
 import shutil
+import socket
 import ssl
 import urllib.parse
 from http import HTTPStatus
@@ -107,6 +109,10 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         super().setup()
         # A default socket timeout bounds slow/idle clients (Slowloris).
         self.connection.settimeout(self._server.config.timeout)
+        # Disable Nagle: response headers and body go out as separate writes, so
+        # Nagle + delayed-ACK adds a ~40 ms stall to every small response.
+        with contextlib.suppress(OSError):
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     def handle(self) -> None:
         if self._server.config.http2 and self._is_http2():
