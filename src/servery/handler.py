@@ -99,6 +99,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     server_version = f"servery/{__version__}"
     index_pages = ("index.html", "index.htm")
     _body_remaining: int | None = None
+    _body_offset: int = 0
     _generated_page: bool = False
     # Our parse_request() populates these (replacing the email-based parser).
     headers: _RequestHeaders
@@ -236,13 +237,16 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
     def send_head(self) -> BinaryIO | None:
         self._body_remaining = None
+        self._body_offset = 0
         self._generated_page = False
         if not self._authorized():
             return None
         path = self.translate_path(self.path)
         if os.path.isdir(path):
             return self._serve_directory(path)
-        if not os.path.exists(path) and self._server.config.spa:
+        # Check the (rare) SPA flag first so the os.path.exists() stat is skipped
+        # entirely on the common, non-SPA path.
+        if self._server.config.spa and not os.path.exists(path):
             index = os.path.join(self._server.root_real, "index.html")
             if os.path.isfile(index):
                 return self._serve_file(index)
@@ -408,6 +412,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 f.seek(requested.start)
                 self._body_remaining = requested.length
+                self._body_offset = requested.start
                 return f
 
             self.send_response(HTTPStatus.OK)
@@ -435,15 +440,17 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         # handles non-regular sources like BytesIO via its own send loop; TLS
         # sockets cannot sendfile, so they take the userspace path below.)
         if not isinstance(sock, ssl.SSLSocket):
-            before = source.tell()
+            # The offset is already known (0, or the range start), so we avoid a
+            # source.tell() lseek on every request.
+            offset = self._body_offset
             try:
-                sock.sendfile(source, before, count)
+                sock.sendfile(source, offset, count)
                 return
             except (OSError, ValueError):
                 # If bytes were already sent the stream is broken — re-raise
                 # rather than resend (which would overrun a range). Only retry in
                 # userspace when nothing went out.
-                if source.tell() != before:
+                if source.tell() != offset:
                     raise
         if count is None:
             shutil.copyfileobj(source, self.wfile)
