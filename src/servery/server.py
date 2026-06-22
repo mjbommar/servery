@@ -8,20 +8,17 @@ root real-path is computed once so the per-request containment check is cheap.
 from __future__ import annotations
 
 import contextlib
-import ipaddress
 import os
-import shutil
 import socket
 import ssl
 import sys
-import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from servery import _log, auth
+from servery import _log, _tls, auth
 from servery.config import Config
 from servery.handler import ServeryHandler
 
@@ -115,45 +112,9 @@ class ServeryHTTPServer(ThreadingHTTPServer):
         config = self.config
         if not config.uses_tls:
             return
-        # create_default_context already enforces a sane minimum (TLS 1.2+) and a
-        # secure cipher set; we only advertise HTTP/1.1 (+ h2) over ALPN.
-        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        # Restrict TLS 1.2 to forward-secret AEAD suites (drop CBC, so the whole
-        # Lucky13/SWEET32 class is off the table). TLS 1.3 suites are all-AEAD
-        # already and unaffected by set_ciphers.
-        with contextlib.suppress(ssl.SSLError):
-            context.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
-        if config.tls_cert is not None:
-            context.load_cert_chain(config.tls_cert, config.tls_key, config.tls_password)
-        else:
-            self._load_self_signed(context)
-        protocols = ["h2", "http/1.1"] if config.http2 else ["http/1.1"]
-        context.set_alpn_protocols(protocols)
+        alpn = ["h2", "http/1.1"] if config.http2 else ["http/1.1"]
+        context = _tls.build_context(config, alpn)
         self.socket = context.wrap_socket(self.socket, server_side=True)
-
-    def _load_self_signed(self, context: ssl.SSLContext) -> None:
-        """Generate an ad-hoc self-signed cert and load it into ``context``.
-
-        The cert/key are written to a private temp dir (0600), loaded by OpenSSL,
-        then removed — nothing persists on disk past startup.
-        """
-        from servery import _certgen
-
-        hosts = ["localhost", "127.0.0.1", "::1"]
-        host = self.config.host
-        if host and host not in hosts and not _is_wildcard_host(host):
-            hosts.append(host)
-        cert_pem, key_pem = _certgen.generate(hosts)
-        tmp = Path(tempfile.mkdtemp(prefix="servery-tls-"))
-        try:
-            cert_path, key_path = tmp / "cert.pem", tmp / "key.pem"
-            for path, data in ((cert_path, cert_pem), (key_path, key_pem)):
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(fd, "w", encoding="ascii") as handle:
-                    handle.write(data)
-            context.load_cert_chain(cert_path, key_path)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
 
     def finish_request(self, request: Any, client_address: Any) -> None:
         # Use the selected handler class (ServeryHandler, or WSGIHandler in
@@ -164,14 +125,6 @@ class ServeryHTTPServer(ThreadingHTTPServer):
             self,
             directory=os.fspath(self.config.directory),
         )
-
-
-def _is_wildcard_host(host: str) -> bool:
-    """True for a bind-all address (0.0.0.0 / ::) — not a real SAN entry."""
-    try:
-        return ipaddress.ip_address(host).is_unspecified
-    except ValueError:
-        return False
 
 
 def make_server(config: Config) -> ServeryHTTPServer:
@@ -195,11 +148,14 @@ def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (C
         from servery import asgi
 
         if not config.quiet:
+            scheme = "https" if config.uses_tls else "http"
             print(
                 f"servery: serving ASGI app {config.asgi_app} at "
-                f"http://{config.host}:{config.port}/ (experimental)",
+                f"{scheme}://{config.host}:{config.port}/ (experimental)",
                 file=sys.stderr,
             )
+            for warning in config.startup_warnings():
+                print(f"servery: WARNING {warning}", file=sys.stderr)
         asgi.run(config)
         return
     with make_server(config) as httpd:

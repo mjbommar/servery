@@ -8,7 +8,8 @@ protocol — a "mini-uvicorn" in pure stdlib. Zero runtime dependencies; the hos
 app brings its own.
 
 Scope: the HTTP ASGI scope with keep-alive, Content-Length or chunked framing,
-and lifespan. WebSocket and TLS are not handled yet (HTTP, cleartext).
+lifespan, and TLS (shared with the threading server via ``_tls``). WebSocket is
+not handled yet.
 """
 
 from __future__ import annotations
@@ -17,10 +18,11 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import ssl
 from http import HTTPStatus
 from typing import Any
 
-from servery import _log
+from servery import _log, _tls
 
 _MAX_BODY = 100 * 1024 * 1024
 _INTERNAL_ERROR = (
@@ -131,9 +133,10 @@ def _wants_keep_alive(version: str, headers: dict[bytes, bytes]) -> bool:
 class _Exchange:
     """One ASGI request/response over an asyncio stream pair."""
 
-    def __init__(self, app: Any, server_addr: tuple[str, int]) -> None:
+    def __init__(self, app: Any, server_addr: tuple[str, int], scheme: str = "http") -> None:
         self._app = app
         self._server_addr = server_addr
+        self._scheme = scheme
 
     async def handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -146,6 +149,7 @@ class _Exchange:
             asyncio.IncompleteReadError,
             asyncio.LimitOverrunError,
             TimeoutError,
+            ssl.SSLError,  # failed TLS handshake from a scanning/old client
         ):
             pass
         finally:
@@ -190,7 +194,7 @@ class _Exchange:
             "asgi": {"version": "3.0", "spec_version": "2.4"},
             "http_version": version.split("/", 1)[1] if "/" in version else "1.1",
             "method": method,
-            "scheme": "http",
+            "scheme": self._scheme,
             "path": path,
             "raw_path": raw_path.encode("latin-1"),
             "query_string": query.encode("latin-1"),
@@ -285,12 +289,17 @@ async def serve_forever(
 ) -> None:
     """Run the ASGI server. ``started(sockname)`` fires once bound; ``stop`` ends it."""
     app = load_app(config.asgi_app)
+    ssl_context = _tls.build_context(config, ["http/1.1"]) if config.uses_tls else None
+    scheme = "https" if config.uses_tls else "http"
     lifespan = _Lifespan(app)
     await lifespan.startup()
     server = await asyncio.start_server(
-        lambda r, w: _Exchange(app, server.sockets[0].getsockname()[:2]).handle_connection(r, w),
+        lambda r, w: _Exchange(app, server.sockets[0].getsockname()[:2], scheme).handle_connection(
+            r, w
+        ),
         config.host,
         config.port,
+        ssl=ssl_context,
     )
     try:
         if started is not None:

@@ -115,8 +115,6 @@ class Config:
             raise ValueError(f"choose only one dynamic handler: {' / '.join(dynamic)}")
         if dynamic and http2:
             raise ValueError(f"{dynamic[0]} is HTTP/1.1 only and cannot be combined with --http2")
-        if asgi_app and (tls_cert is not None or tls_self_signed):
-            raise ValueError("--asgi does not support TLS yet (HTTP only)")
         return cls(
             directory=Path(directory).resolve(),
             host=host,

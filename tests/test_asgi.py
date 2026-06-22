@@ -24,9 +24,11 @@ except ImportError:  # pragma: no cover
 
 
 @contextlib.contextmanager
-def serving_asgi(spec: str) -> Iterator[tuple[str, int]]:
+def serving_asgi(spec: str, *, tls: bool = False) -> Iterator[tuple[str, int]]:
     """Run the ASGI server for ``spec`` in a background event loop; yield (host, port)."""
-    config = Config.create(".", host="127.0.0.1", port=0, quiet=True, asgi_app=spec)
+    config = Config.create(
+        ".", host="127.0.0.1", port=0, quiet=True, asgi_app=spec, tls_self_signed=tls
+    )
     holder: dict[str, Any] = {}
     ready = threading.Event()
     loop = asyncio.new_event_loop()
@@ -65,13 +67,15 @@ class LoadAppTest(unittest.TestCase):
 
 
 class ConfigTest(unittest.TestCase):
-    def test_asgi_exclusivity_and_no_tls(self):
+    def test_asgi_exclusivity(self):
         with self.assertRaises(ValueError):
             Config.create(".", asgi_app="m:a", wsgi_app="m:b")
         with self.assertRaises(ValueError):
             Config.create(".", asgi_app="m:a", http2=True)
-        with self.assertRaises(ValueError):
-            Config.create(".", asgi_app="m:a", tls_self_signed=True)
+
+    def test_asgi_allows_tls(self):
+        cfg = Config.create(".", asgi_app="m:a", tls_self_signed=True)
+        self.assertTrue(cfg.uses_tls)
 
 
 @unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
@@ -137,6 +141,16 @@ class ASGIChunkedTest(unittest.TestCase):
             finally:
                 sock.close()
             self.assertIn(b"asgi POST /p helloworld", data)
+
+
+@unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
+class ASGITLSTest(unittest.TestCase):
+    def test_serves_over_https(self):
+        with serving_asgi("tests._asgiapp:echo", tls=True) as (host, port):
+            with httpx.Client(verify=False) as client:
+                resp = client.get(f"https://{host}:{port}/secure?q=1")
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.text, "asgi GET /secure ")
 
 
 @unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")

@@ -173,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--asgi",
         metavar="MODULE:APP",
-        help="serve an ASGI application (opt-in, experimental, HTTP only), e.g. myapp:app",
+        help="serve an ASGI application (opt-in, experimental; supports TLS), e.g. myapp:app",
     )
     parser.add_argument(
         "--http3",
