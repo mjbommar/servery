@@ -14,8 +14,13 @@ _PREFIX = "bytes="
 
 
 def _digits(text: str) -> bool:
-    """True for a non-empty run of ASCII digits (int() would accept more)."""
-    return bool(text) and all(char in "0123456789" for char in text)
+    """True for a short, non-empty run of ASCII digits.
+
+    The length cap (19 = int64 max) keeps the value sane and avoids the ValueError
+    ``int()`` raises for >4300-digit strings (a DoS via the Range header); anything
+    longer is not a real offset, so the caller treats it as "no range".
+    """
+    return bool(text) and len(text) <= 19 and all(char in "0123456789" for char in text)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

@@ -109,6 +109,16 @@ class Config:
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
         proxy_routes = _parse_proxy_routes(proxy or [])
+        # Numeric sanity — fail at config time with a clear message, not later with
+        # an opaque OSError/UploadError. (port 0 is valid: an ephemeral port.)
+        if not 0 <= port <= 65535:
+            raise ValueError(f"--port must be 0-65535, got {port}")
+        if max_upload_size <= 0:
+            raise ValueError("--max-upload-size must be a positive number of bytes")
+        if timeout <= 0:
+            raise ValueError("--timeout must be a positive number of seconds")
+        if cache_max_age is not None and cache_max_age < 0:
+            raise ValueError("--cache must be >= 0 seconds")
         if tls_self_signed and tls_cert is not None:
             raise ValueError("--tls-self-signed cannot be combined with --tls-cert")
         dynamic = [

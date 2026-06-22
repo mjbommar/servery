@@ -8,7 +8,6 @@ is loaded from ``--tls-cert`` or generated ad-hoc (pure-stdlib, never persisted)
 
 from __future__ import annotations
 
-import contextlib
 import ipaddress
 import os
 import shutil
@@ -16,6 +15,8 @@ import ssl
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from servery import _log
 
 if TYPE_CHECKING:
     from servery.config import Config
@@ -41,10 +42,13 @@ def is_wildcard_host(host: str) -> bool:
 def build_context(config: Config, alpn: list[str]) -> ssl.SSLContext:
     """Build a server TLS context for ``config``, advertising ``alpn`` protocols."""
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2  # explicit floor, not OpenSSL's default
     # Restrict TLS 1.2 to forward-secret AEAD suites (drop CBC, so Lucky13/SWEET32
     # are off the table). TLS 1.3 suites are all-AEAD already and unaffected.
-    with contextlib.suppress(ssl.SSLError):
+    try:
         context.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
+    except ssl.SSLError as exc:  # e.g. a FIPS build rejects CHACHA20 — don't fail silently
+        _log.logger.warning("TLS cipher hardening not applied (%s); using OpenSSL defaults", exc)
     if config.tls_cert is not None:
         context.load_cert_chain(config.tls_cert, config.tls_key, config.tls_password)
     else:

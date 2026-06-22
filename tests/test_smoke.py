@@ -119,5 +119,27 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(config.tls_password, "s3cret")
 
 
+class ConfigValidationTest(unittest.TestCase):
+    def test_rejects_bad_numerics(self):
+        from servery.config import Config
+
+        for kwargs in (
+            {"port": 70000},
+            {"port": -1},
+            {"max_upload_size": 0},
+            {"max_upload_size": -5},
+            {"timeout": 0},
+            {"timeout": -1.0},
+            {"cache_max_age": -1},
+        ):
+            with self.assertRaises(ValueError, msg=kwargs):
+                Config.create(".", **kwargs)
+
+    def test_accepts_ephemeral_port_zero(self):
+        from servery.config import Config
+
+        self.assertEqual(Config.create(".", port=0).port, 0)  # ephemeral is valid
+
+
 if __name__ == "__main__":
     unittest.main()

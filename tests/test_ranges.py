@@ -57,6 +57,13 @@ class ParseTest(unittest.TestCase):
         self.assertIsNone(ranges.parse("bytes= 0 - 1 ", 100))
         self.assertIsNone(ranges.parse("bytes=0-١", 100))  # noqa: RUF001 (Arabic-Indic digit one)
 
+    def test_pathologically_long_digits_do_not_raise(self):
+        # >4300 digits would make int() raise ValueError (a Range-header DoS); the
+        # digit-length cap makes it a clean "no range" instead.
+        huge = "9" * 5000
+        self.assertIsNone(ranges.parse(f"bytes=0-{huge}", 100))
+        self.assertIsNone(ranges.parse(f"bytes=-{huge}", 100))
+
 
 if __name__ == "__main__":
     unittest.main()
