@@ -25,11 +25,18 @@ except ImportError:  # pragma: no cover
 
 @contextlib.contextmanager
 def serving_asgi(
-    spec: str, *, tls: bool = False, auth: str | None = None
+    spec: str, *, tls: bool = False, auth: str | None = None, timeout: float = 30.0
 ) -> Iterator[tuple[str, int]]:
     """Run the ASGI server for ``spec`` in a background event loop; yield (host, port)."""
     config = Config.create(
-        ".", host="127.0.0.1", port=0, quiet=True, asgi_app=spec, tls_self_signed=tls, auth=auth
+        ".",
+        host="127.0.0.1",
+        port=0,
+        quiet=True,
+        asgi_app=spec,
+        tls_self_signed=tls,
+        auth=auth,
+        timeout=timeout,
     )
     holder: dict[str, Any] = {}
     ready = threading.Event()
@@ -122,6 +129,36 @@ class ASGIChunkedTest(unittest.TestCase):
             self.assertIn(b"transfer-encoding: chunked", data.split(b"\r\n\r\n", 1)[0].lower())
             self.assertIn(b"part1", data)
             self.assertIn(b"part2", data)
+
+    def test_unmasked_client_frame_is_rejected(self):
+        # RFC 6455 §5.1: the server MUST close on an unmasked client frame.
+        with serving_asgi("tests._asgiapp:ws_echo") as (host, port):
+            sock, _key, resp = _ws_open(host, port)
+            try:
+                self.assertIn(b"101", resp)
+                sock.sendall(bytes((0x81, 2)) + b"hi")  # unmasked text frame
+                sock.settimeout(3)
+                data = b""
+                with contextlib.suppress(OSError):
+                    while True:
+                        piece = sock.recv(4096)
+                        if not piece:
+                            break
+                        data += piece
+                self.assertNotIn(b"echo:hi", data)  # rejected, not echoed
+            finally:
+                sock.close()
+
+    def test_slow_client_head_times_out(self):
+        # A trickled/never-completed request head must not pin the event loop.
+        with serving_asgi("tests._asgiapp:echo", timeout=0.5) as (host, port):
+            sock = socket.create_connection((host, port), timeout=5)
+            try:
+                sock.sendall(b"GET / HTTP/1.1\r\n")  # partial head, no terminator
+                sock.settimeout(3)
+                self.assertEqual(sock.recv(4096), b"")  # server closed after timeout
+            finally:
+                sock.close()
 
     def test_chunked_request_body_is_reassembled(self):
         # A client chunked request body (no Content-Length) must reach the app

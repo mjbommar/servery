@@ -54,23 +54,31 @@ def _frame(opcode: int, payload: bytes) -> bytes:
     return header + payload
 
 
+_CONTROL = frozenset({_CLOSE, _PING, _PONG})
+
+
 async def _read_frame(reader: asyncio.StreamReader) -> tuple[bool, int, bytes]:
     b0, b1 = await reader.readexactly(2)
+    if b0 & 0x70:  # RSV1-3 MUST be 0 (no extensions negotiated) — RFC 6455 §5.2
+        raise _ClosedError(1002)
     fin = bool(b0 & 0x80)
     opcode = b0 & 0x0F
     masked = bool(b1 & 0x80)
     length = b1 & 0x7F
+    # Control frames: payload <= 125 and never fragmented (RFC 6455 §5.5).
+    if opcode in _CONTROL and (length > 125 or not fin):
+        raise _ClosedError(1002)
     if length == 126:
         length = struct.unpack("!H", await reader.readexactly(2))[0]
     elif length == 127:
         length = struct.unpack("!Q", await reader.readexactly(8))[0]
     if length > _MAX_PAYLOAD:
         raise _ClosedError(1009)  # message too big
-    mask = await reader.readexactly(4) if masked else b""
+    if not masked:  # client frames MUST be masked — RFC 6455 §5.1
+        raise _ClosedError(1002)
+    mask = await reader.readexactly(4)
     payload = await reader.readexactly(length)
-    if masked:  # client frames MUST be masked (RFC 6455 §5.1)
-        payload = bytes(b ^ mask[i & 3] for i, b in enumerate(payload))
-    return fin, opcode, payload
+    return fin, opcode, bytes(b ^ mask[i & 3] for i, b in enumerate(payload))
 
 
 async def _read_message(
@@ -145,7 +153,12 @@ async def serve(
             state["closed"] = True
             return {"type": "websocket.disconnect", "code": exc.code}
         if opcode == _TEXT:
-            return {"type": "websocket.receive", "text": data.decode("utf-8", "replace")}
+            try:  # text frames MUST be valid UTF-8 — RFC 6455 §8.1
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                state["closed"] = True
+                return {"type": "websocket.disconnect", "code": 1007}
+            return {"type": "websocket.receive", "text": text}
         return {"type": "websocket.receive", "bytes": data}
 
     async def send(event: dict[str, Any]) -> None:

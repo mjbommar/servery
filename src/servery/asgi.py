@@ -123,11 +123,13 @@ class _Exchange:
         server_addr: tuple[str, int],
         scheme: str = "http",
         credential: auth.Credential | None = None,
+        timeout: float = 30.0,
     ) -> None:
         self._app = app
         self._server_addr = server_addr
         self._scheme = scheme
         self._credential = credential
+        self._timeout = timeout
 
     async def handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -150,9 +152,15 @@ class _Exchange:
         try:
             # Read the whole request head (request line + headers) in one shot:
             # one readuntil/await beats one await + one buffer scan per header line.
-            head = await reader.readuntil(b"\r\n\r\n")
-        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError):
-            return False  # clean keep-alive close, EOF, or an over-long head -> close
+            # Bounded by the timeout so a slow/idle client can't pin the loop forever.
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), self._timeout)
+        except (
+            asyncio.IncompleteReadError,
+            asyncio.LimitOverrunError,
+            ConnectionError,
+            TimeoutError,
+        ):
+            return False  # close, EOF, over-long head, or slowloris timeout
         request_line, _, rest = head.partition(b"\r\n")
         fields = request_line.decode("latin-1").split()
         if len(fields) != 3:
@@ -180,12 +188,16 @@ class _Exchange:
         chunked = b"chunked" in header_map.get(b"transfer-encoding", b"").lower()
         try:
             if chunked:
-                body = await _read_chunked(reader)
+                body = await asyncio.wait_for(_read_chunked(reader), self._timeout)
             else:
-                length = min(int(header_map.get(b"content-length", b"0") or 0), _MAX_BODY)
-                body = await reader.readexactly(length) if length else b""
-        except (ValueError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
-            return False  # malformed length/framing -> close
+                length = max(0, min(int(header_map.get(b"content-length", b"0") or 0), _MAX_BODY))
+                body = (
+                    await asyncio.wait_for(reader.readexactly(length), self._timeout)
+                    if length
+                    else b""
+                )
+        except (ValueError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
+            return False  # malformed length/framing or slow-body timeout -> close
         path, _, query = raw_path.partition("?")
         scope = {
             "type": "http",
@@ -337,7 +349,7 @@ async def serve_forever(
     await lifespan.startup()
     server = await asyncio.start_server(
         lambda r, w: _Exchange(
-            app, server.sockets[0].getsockname()[:2], scheme, credential
+            app, server.sockets[0].getsockname()[:2], scheme, credential, config.timeout
         ).handle_connection(r, w),
         config.host,
         config.port,
