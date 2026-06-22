@@ -23,6 +23,13 @@ except ImportError:  # pragma: no cover
 
 class _Upstream(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.endswith("/stream"):
+            # No Content-Length (HTTP/1.0 close-delimited upstream).
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"streamed-no-content-length")
+            return
         xff = self.headers.get("X-Forwarded-For", "")
         proto = self.headers.get("X-Forwarded-Proto", "")
         body = f"upstream:{self.path} xff={xff} proto={proto}".encode()
@@ -105,6 +112,32 @@ class ProxyServerTest(unittest.TestCase):
             resp = httpx.post(f"http://{host}:{port}/api/submit", content=b"PAYLOAD")
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.text, "posted:PAYLOAD")
+
+    def test_no_length_upstream_is_chunked_kept_alive_and_dated(self):
+        import socket
+
+        # Upstream omits Content-Length -> servery must chunk it (keep-alive),
+        # not force Connection: close, and backfill Date/Server. (Regression for
+        # the bugs found while unifying the response writers.)
+        with serving(self.cfg) as (host, port):
+            sock = socket.create_connection((host, port), timeout=5)
+            try:
+                sock.sendall(b"GET /api/stream HTTP/1.1\r\nHost: x\r\n\r\n")  # keep-alive
+                sock.settimeout(3)
+                data = b""
+                while b"0\r\n\r\n" not in data:  # read to the chunked terminator
+                    piece = sock.recv(4096)
+                    if not piece:
+                        break
+                    data += piece
+            finally:
+                sock.close()
+            head = data.split(b"\r\n\r\n", 1)[0].lower()
+            self.assertIn(b"transfer-encoding: chunked", head)
+            self.assertNotIn(b"connection: close", head)
+            self.assertIn(b"date:", head)
+            self.assertIn(b"server:", head)
+            self.assertIn(b"streamed-no-content-length", data)
 
 
 if __name__ == "__main__":

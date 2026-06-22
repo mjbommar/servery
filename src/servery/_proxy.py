@@ -15,7 +15,7 @@ import ssl
 import urllib.parse
 from typing import TYPE_CHECKING
 
-from servery import _log
+from servery import _http1, _log
 
 if TYPE_CHECKING:
     from servery.handler import ServeryHandler
@@ -90,19 +90,27 @@ def _relay(
     headers: list[tuple[str, str]],
     response: http.client.HTTPResponse,
 ) -> None:
-    present = {name.lower() for name, _ in headers}
-    lines = [f"{handler.protocol_version} {status} {reason}"]
-    lines += [f"{name}: {value}" for name, value in headers]
-    # Upstream gave no Content-Length (e.g. it was chunked, which we stripped) ->
-    # delimit the body by closing the connection.
-    if "content-length" not in present:
+    head, framing = _http1.build_head(
+        version=handler.protocol_version,
+        status=f"{status} {reason}",
+        headers=headers,
+        is_head=handler.command == "HEAD",
+        keep_alive=not handler.close_connection,
+        server=handler.version_string(),
+        date=handler.date_time_string(),
+    )
+    # No upstream Content-Length (it was chunked, which we stripped) -> chunk it
+    # ourselves to keep the client connection alive, rather than forcing a close.
+    if framing is _http1.Framing.CLOSE:
         handler.close_connection = True
-        lines.append("Connection: close")
-    handler.wfile.write(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
+    handler.wfile.write(head)
     if handler.command != "HEAD":
+        chunked = framing is _http1.Framing.CHUNKED
         while True:
-            chunk = response.read(65536)
-            if not chunk:
+            data = response.read(65536)
+            if not data:
                 break
-            handler.wfile.write(chunk)
+            handler.wfile.write(_http1.chunk(data) if chunked else data)
+        if chunked:
+            handler.wfile.write(_http1.CHUNK_TERMINATOR)
     handler.log_request(status)

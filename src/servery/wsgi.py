@@ -126,43 +126,33 @@ class _Exchange:
         self._headers = list(headers)
         return self._write
 
-    def _header_lines(self) -> tuple[list[str], set[str]]:
+    def _build_head(self, *, body_len: int | None = None) -> tuple[bytes, _http1.Framing]:
         h = self._handler
-        status = self._status or ""  # always set by start_response before we get here
-        present = {name.lower() for name, _ in self._headers}
-        lines = [f"{h.protocol_version} {status}"]
-        lines += [f"{name}: {value}" for name, value in self._headers]
-        if "server" not in present:
-            lines.append(f"Server: {h.version_string()}")
-        if "date" not in present:
-            lines.append(f"Date: {h.date_time_string()}")
-        return lines, present
+        return _http1.build_head(
+            version=h.protocol_version,
+            status=self._status or "",
+            headers=self._headers,
+            is_head=h.command == "HEAD",
+            keep_alive=not h.close_connection,
+            server=h.version_string(),
+            date=h.date_time_string(),
+            body_len=body_len,
+        )
 
     def _send_materialized(self, body: bytes) -> None:
         # Common case: the app returned a list/tuple, so the whole body is known.
-        # Set Content-Length and write head + body in ONE socket write (no chunked).
+        # Content-Length is set and head + body go out in ONE socket write.
         h = self._handler
-        lines, present = self._header_lines()
-        if "content-length" not in present:
-            lines.append(f"Content-Length: {len(body)}")
-        if h.close_connection:
-            lines.append("Connection: close")
-        head = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+        head, _ = self._build_head(body_len=len(body))
         h.wfile.write(head if h.command == "HEAD" else head + body)
 
     def _flush_headers(self) -> None:
         h = self._handler
-        lines, present = self._header_lines()
-        if "content-length" in present:
-            pass  # length known -> keep-alive as the request allows
-        elif h.protocol_version >= "HTTP/1.1" and not h.close_connection and h.command != "HEAD":
-            self._chunked = True
-            lines.append("Transfer-Encoding: chunked")
-        else:
+        head, framing = self._build_head()
+        if framing is _http1.Framing.CLOSE:
             h.close_connection = True
-        if h.close_connection:
-            lines.append("Connection: close")
-        h.wfile.write(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
+        self._chunked = framing is _http1.Framing.CHUNKED
+        h.wfile.write(head)
         self._writer = _ChunkedWriter(h.wfile) if self._chunked else h.wfile
 
     def _write(self, data: bytes) -> None:

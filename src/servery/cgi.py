@@ -28,7 +28,7 @@ import subprocess  # nosec B404 (executing CGI scripts is the whole point of --c
 import sys
 from pathlib import Path
 
-from servery import _log, security
+from servery import _http1, _log, security
 from servery.handler import ServeryHandler
 
 # RFC 3875 §9.2 + httpoxy: request headers that must never become CGI meta-vars.
@@ -156,18 +156,17 @@ def _relay(handler: ServeryHandler, output: bytes) -> None:
             out_headers.append((name, value))
         else:
             out_headers.append((name, value))
-    present = {n.lower() for n, _ in out_headers}
-    lines = [f"{handler.protocol_version} {status}"]
-    lines += [f"{n}: {v}" for n, v in out_headers]
-    if "content-type" not in present and "location" not in present:
-        lines.append("Content-Type: text/plain")
-    if "content-length" not in present:
-        lines.append(f"Content-Length: {len(body)}")
-    if "date" not in present:
-        lines.append(f"Date: {handler.date_time_string()}")
-    if "server" not in present:
-        lines.append(f"Server: {handler.version_string()}")
-    blob = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+    blob, _ = _http1.build_head(
+        version=handler.protocol_version,
+        status=status,
+        headers=out_headers,
+        is_head=handler.command == "HEAD",
+        keep_alive=not handler.close_connection,
+        server=handler.version_string(),
+        date=handler.date_time_string(),
+        default_content_type="text/plain",
+        body_len=len(body),
+    )
     handler.wfile.write(blob if handler.command == "HEAD" else blob + body)
     handler.log_request(status.split(" ", 1)[0])
 
