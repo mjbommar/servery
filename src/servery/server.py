@@ -32,6 +32,8 @@ class ServeryHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    wsgi_app: Any = None
+
     def __init__(self, config: Config) -> None:
         self.config = config
         self.root_real = os.path.realpath(config.directory)
@@ -44,7 +46,15 @@ class ServeryHTTPServer(ThreadingHTTPServer):
         self._slots = threading.Semaphore(config.max_workers * 4) if config.max_workers else None
         if ":" in config.host:
             self.address_family = socket.AF_INET6
-        super().__init__((config.host, config.port), ServeryHandler)
+        # Opt-in dynamic handlers replace file serving entirely (loaded up front
+        # so an import error surfaces at startup, not mid-request).
+        self._handler_cls: type[ServeryHandler] = ServeryHandler
+        if config.wsgi_app:
+            from servery import wsgi
+
+            self.wsgi_app = wsgi.load_app(config.wsgi_app)
+            self._handler_cls = wsgi.WSGIHandler
+        super().__init__((config.host, config.port), self._handler_cls)
 
     def process_request(self, request: Any, client_address: Any) -> None:
         # Default: a thread per connection (ThreadingMixIn). With --max-workers,
@@ -131,7 +141,9 @@ class ServeryHTTPServer(ThreadingHTTPServer):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def finish_request(self, request: Any, client_address: Any) -> None:
-        ServeryHandler(
+        # Use the selected handler class (ServeryHandler, or WSGIHandler in
+        # --wsgi mode), not a hardcoded one.
+        self._handler_cls(
             request,
             client_address,
             self,

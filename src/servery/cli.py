@@ -127,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="enable HTTP/2 (ALPN 'h2' over TLS, and h2c prior-knowledge cleartext)",
     )
     parser.add_argument(
+        "--wsgi",
+        metavar="MODULE:APP",
+        help="serve a WSGI application (opt-in) instead of files, e.g. myapp:application",
+    )
+    parser.add_argument(
         "--http3",
         action="store_true",
         help="serve HTTP/3 over QUIC (requires TLS and the 'servery[http3]' extra)",
@@ -183,6 +188,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         timeout=args.timeout,
         max_workers=args.max_workers,
         http2=args.http2,
+        wsgi_app=args.wsgi,
     )
 
 

@@ -17,6 +17,12 @@ All notable changes to servery are documented here. The format follows
 
 ### Added
 
+- **`--wsgi module:app`** (opt-in, off by default): host a WSGI (PEP 3333)
+  application instead of files — phase D1 of `docs/DYNAMIC.md`. A lean,
+  zero-dependency HTTP/1.1 engine (keep-alive; one write + `Content-Length` for
+  materialized bodies; chunked for streaming) rather than the HTTP/1.0 `wsgiref`
+  server; PEP 3333 compliance is gated by `wsgiref.validate` in the tests.
+  ~20k req/s single-core. HTTP/1.1 only (rejected alongside `--http2`).
 - **`--tls-self-signed`**: zero-dependency HTTPS with an ad-hoc certificate
   generated at startup (pure-stdlib RSA-2048 via `servery._certgen` — no
   `cryptography`, no `openssl` binary, no `ctypes`; works on a bare Windows/Linux

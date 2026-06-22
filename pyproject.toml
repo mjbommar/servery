@@ -124,6 +124,9 @@ known-first-party = ["servery"]
 "src/servery/archive.py" = ["PTH"]
 # The HTTP/2 connection resolves paths at the os level (shared with the handler).
 "src/servery/http2/connection.py" = ["PTH"]
+# The WSGI handler's do_GET/do_PUT/... must keep the HTTP-method casing the
+# stdlib request dispatcher requires (N802), and resolves paths at the os level.
+"src/servery/wsgi.py" = ["N802", "PTH"]
 
 [tool.ty.environment]
 python-version = "3.13"

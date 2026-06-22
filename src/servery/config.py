@@ -40,6 +40,7 @@ class Config:
     timeout: float = 30.0
     max_workers: int | None = None
     http2: bool = False
+    wsgi_app: str | None = None  # "module:callable" — opt-in dynamic handler
 
     @property
     def cache_control(self) -> str:
@@ -96,10 +97,13 @@ class Config:
         timeout: float = 30.0,
         max_workers: int | None = None,
         http2: bool = False,
+        wsgi_app: str | None = None,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
         if tls_self_signed and tls_cert is not None:
             raise ValueError("--tls-self-signed cannot be combined with --tls-cert")
+        if wsgi_app is not None and http2:
+            raise ValueError("--wsgi is HTTP/1.1 only and cannot be combined with --http2")
         return cls(
             directory=Path(directory).resolve(),
             host=host,
@@ -121,4 +125,5 @@ class Config:
             timeout=timeout,
             max_workers=max_workers,
             http2=http2,
+            wsgi_app=wsgi_app,
         )
