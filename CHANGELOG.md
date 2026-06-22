@@ -35,8 +35,11 @@ All notable changes to servery are documented here. The format follows
   HTTP/1.1 server ("mini-uvicorn" in pure stdlib): the HTTP scope with keep-alive
   + Content-Length/chunked framing, plus the lifespan protocol (degrades
   gracefully if the app doesn't support it). ~19k req/s single-core; verified to
-  run a real **Starlette** app (request + full startup/shutdown lifespan).
-  HTTP/1.1 only; TLS not yet supported (rejected alongside `--http2`/TLS).
+  run a real **Starlette** app (request + full startup/shutdown lifespan), and a
+  full **FastAPI** app over HTTP — pydantic validation (422), streaming responses,
+  redirects, exception→500, chunked request bodies, `/docs` and `/openapi.json`
+  (12/12 feature checks). HTTP/1.1 only; TLS not yet supported (rejected alongside
+  `--http2`/TLS). WebSocket is not implemented.
 - **`--tls-self-signed`**: zero-dependency HTTPS with an ad-hoc certificate
   generated at startup (pure-stdlib RSA-2048 via `servery._certgen` — no
   `cryptography`, no `openssl` binary, no `ctypes`; works on a bare Windows/Linux

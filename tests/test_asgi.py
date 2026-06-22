@@ -115,6 +115,27 @@ class ASGIChunkedTest(unittest.TestCase):
             self.assertIn(b"part1", data)
             self.assertIn(b"part2", data)
 
+    def test_chunked_request_body_is_reassembled(self):
+        # A client chunked request body (no Content-Length) must reach the app
+        # whole — and must not desync the connection (FastAPI streaming uploads).
+        with serving_asgi("tests._asgiapp:echo") as (host, port):
+            sock = socket.create_connection((host, port), timeout=5)
+            try:
+                sock.sendall(
+                    b"POST /p HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n"
+                    b"Connection: close\r\n\r\n5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n"
+                )
+                sock.settimeout(3)
+                data = b""
+                while True:
+                    piece = sock.recv(4096)
+                    if not piece:
+                        break
+                    data += piece
+            finally:
+                sock.close()
+            self.assertIn(b"asgi POST /p helloworld", data)
+
 
 if __name__ == "__main__":
     unittest.main()

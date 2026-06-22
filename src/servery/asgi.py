@@ -87,6 +87,25 @@ class _Lifespan:
                 await self._task
 
 
+async def _read_chunked(reader: asyncio.StreamReader) -> bytes:
+    """Decode a client chunked request body (RFC 9112 §7.1), bounded by _MAX_BODY."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        size_line = await reader.readuntil(b"\r\n")
+        size = int(size_line.split(b";", 1)[0].strip() or b"0", 16)  # ignore extensions
+        if size == 0:
+            while (await reader.readuntil(b"\r\n")) != b"\r\n":  # consume any trailers
+                pass
+            break
+        total += size
+        if total > _MAX_BODY:
+            raise ValueError("chunked request body exceeds limit")
+        chunks.append(await reader.readexactly(size))
+        await reader.readexactly(2)  # the CRLF that terminates each chunk
+    return b"".join(chunks)
+
+
 def _wants_keep_alive(version: str, headers: dict[bytes, bytes]) -> bool:
     conn = headers.get(b"connection", b"").lower()
     if version >= "HTTP/1.1":
@@ -124,9 +143,10 @@ class _Exchange:
             request_line = await reader.readuntil(b"\r\n")
         except (asyncio.IncompleteReadError, ConnectionError):
             return False
-        if not request_line.strip():
-            return False
-        method, raw_path, version = request_line.decode("latin-1").rstrip().split()
+        fields = request_line.decode("latin-1").split()
+        if len(fields) != 3:
+            return False  # empty keep-alive probe or malformed line -> close
+        method, raw_path, version = fields
         headers: list[tuple[bytes, bytes]] = []
         header_map: dict[bytes, bytes] = {}
         while True:
@@ -137,9 +157,16 @@ class _Exchange:
             key, val = name.strip().lower(), value.strip()
             headers.append((key, val))
             header_map[key] = val
-        length = min(int(header_map.get(b"content-length", b"0") or 0), _MAX_BODY)
         keep_alive = _wants_keep_alive(version, header_map)
-        body = await reader.readexactly(length) if length else b""
+        chunked = b"chunked" in header_map.get(b"transfer-encoding", b"").lower()
+        try:
+            if chunked:
+                body = await _read_chunked(reader)
+            else:
+                length = min(int(header_map.get(b"content-length", b"0") or 0), _MAX_BODY)
+                body = await reader.readexactly(length) if length else b""
+        except (ValueError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+            return False  # malformed length/framing -> close
         path, _, query = raw_path.partition("?")
         scope = {
             "type": "http",
