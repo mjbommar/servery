@@ -16,34 +16,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 import ssl
 from http import HTTPStatus
 from typing import Any
 
-from servery import _log, _tls, _websocket
+from servery import _appspec, _http1, _log, _tls, _websocket
 
 _MAX_BODY = 100 * 1024 * 1024
-_INTERNAL_ERROR = (
-    b"HTTP/1.1 500 Internal Server Error\r\n"
-    b"Content-Type: text/plain\r\nContent-Length: 21\r\nConnection: close\r\n\r\n"
-    b"Internal Server Error"
-)
 
 
 def load_app(spec: str) -> Any:
-    """Import an ASGI app from ``"module:attribute"`` (default attr ``app``)."""
-    module_name, _, attr = spec.partition(":")
-    if not module_name:
-        raise ValueError(f"invalid --asgi spec {spec!r} (expected 'module:app')")
-    module = importlib.import_module(module_name)
-    app = getattr(module, attr or "app", None)
-    if app is None:
-        raise ValueError(f"--asgi: {module_name!r} has no attribute {attr or 'app'!r}")
-    if not callable(app):
-        raise ValueError(f"--asgi: {spec!r} is not callable")  # noqa: TRY004 (CLI value error)
-    return app
+    """Import an ASGI app from ``"module:attribute"`` (attr defaults to ``app``)."""
+    return _appspec.load_app(spec, default_attr="app", label="--asgi")
 
 
 class _Lifespan:
@@ -225,7 +210,7 @@ class _Exchange:
             )
             if not state.started:
                 with contextlib.suppress(OSError):
-                    writer.write(_INTERNAL_ERROR)
+                    writer.write(_http1.INTERNAL_ERROR)
             with contextlib.suppress(OSError):
                 await writer.drain()
             return False
@@ -303,9 +288,9 @@ class _ResponseState:
                 self.started = True
             data = event.get("body", b"")
             if data and self.method != "HEAD":
-                self._writer.write(b"%x\r\n%s\r\n" % (len(data), data) if self.chunked else data)
+                self._writer.write(_http1.chunk(data) if self.chunked else data)
             if not event.get("more_body", False) and self.chunked:
-                self._writer.write(b"0\r\n\r\n")
+                self._writer.write(_http1.CHUNK_TERMINATOR)
 
     def _write_headers(self) -> None:
         present = {name.lower() for name, _ in self.headers}

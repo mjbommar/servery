@@ -14,38 +14,19 @@ slow reference server.
 from __future__ import annotations
 
 import contextlib
-import importlib
 import io
 import ssl
 import sys
 import urllib.parse
 from typing import Any
 
-from servery import _log
+from servery import _appspec, _http1, _log
 from servery.handler import ServeryHandler, _ChunkedWriter
-
-_INTERNAL_ERROR = (
-    b"HTTP/1.1 500 Internal Server Error\r\n"
-    b"Content-Type: text/plain\r\nContent-Length: 21\r\nConnection: close\r\n\r\n"
-    b"Internal Server Error"
-)
 
 
 def load_app(spec: str) -> Any:
-    """Import a WSGI app from ``"package.module:attribute"`` (or ``"module"``).
-
-    Defaults the attribute to ``application`` when only a module is given.
-    """
-    module_name, _, attr = spec.partition(":")
-    if not module_name:
-        raise ValueError(f"invalid --wsgi spec {spec!r} (expected 'module:app')")
-    module = importlib.import_module(module_name)
-    app = getattr(module, attr or "application", None)
-    if app is None:
-        raise ValueError(f"--wsgi: {module_name!r} has no attribute {attr or 'application'!r}")
-    if not callable(app):
-        raise ValueError(f"--wsgi: {spec!r} is not callable")  # noqa: TRY004 (CLI value error)
-    return app
+    """Import a WSGI app from ``"module:attribute"`` (attr defaults to ``application``)."""
+    return _appspec.load_app(spec, default_attr="application", label="--wsgi")
 
 
 class _BodyReader:
@@ -215,7 +196,7 @@ class _Exchange:
             _log.logger.error('WSGI app error: "%s %s"', h.command, h.path, exc_info=True)
             if self._writer is None:
                 with contextlib.suppress(OSError):
-                    h.wfile.write(_INTERNAL_ERROR)
+                    h.wfile.write(_http1.INTERNAL_ERROR)
             h.close_connection = True
             return
         h.log_request(self._status.split(" ", 1)[0] if self._status else "-")

@@ -30,7 +30,7 @@ import urllib.parse
 from http import HTTPStatus
 from typing import TYPE_CHECKING, BinaryIO, ClassVar, cast, overload
 
-from servery import __version__, _log, archive, listing, ranges, security, upload
+from servery import __version__, _http1, _log, archive, listing, ranges, security, upload
 
 if TYPE_CHECKING:
     from _typeshed import SupportsRead, SupportsWrite
@@ -85,13 +85,12 @@ class _ChunkedWriter:
 
     def _flush(self) -> None:
         if self._buffer:
-            chunk = bytes(self._buffer)
-            self._wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+            self._wfile.write(_http1.chunk(bytes(self._buffer)))
             self._buffer.clear()
 
     def close(self) -> None:
         self._flush()
-        self._wfile.write(b"0\r\n\r\n")
+        self._wfile.write(_http1.CHUNK_TERMINATOR)
 
 
 class ServeryHandler(http.server.SimpleHTTPRequestHandler):
