@@ -37,6 +37,12 @@ async def streaming(scope: dict[str, Any], receive: Any, send: Any) -> None:
     await send({"type": "http.response.body", "body": b"part2", "more_body": False})
 
 
+async def crashing(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    # Raises out of the app without sending a response — server must 500 + log.
+    await receive()
+    raise RuntimeError("boom in the app")
+
+
 async def with_lifespan(scope: dict[str, Any], receive: Any, send: Any) -> None:
     if scope["type"] == "lifespan":
         while True:

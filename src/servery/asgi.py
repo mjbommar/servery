@@ -16,10 +16,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import logging
 from http import HTTPStatus
 from typing import Any
 
+from servery import _log
+
 _MAX_BODY = 100 * 1024 * 1024
+_INTERNAL_ERROR = (
+    b"HTTP/1.1 500 Internal Server Error\r\n"
+    b"Content-Type: text/plain\r\nContent-Length: 21\r\nConnection: close\r\n\r\n"
+    b"Internal Server Error"
+)
 
 
 def load_app(spec: str) -> Any:
@@ -45,6 +53,7 @@ class _Lifespan:
         self._startup = asyncio.Event()  # set on startup.complete OR app exit
         self._shutdown = asyncio.Event()
         self._startup_ok = False  # True only if the app sent startup.complete
+        self._error: BaseException | None = None
         self._task: asyncio.Task[Any] | None = None
 
     async def _receive(self) -> dict[str, Any]:
@@ -64,8 +73,10 @@ class _Lifespan:
         scope = {"type": "lifespan", "asgi": {"version": "3.0", "spec_version": "2.0"}}
 
         async def runner() -> None:
-            with contextlib.suppress(Exception):  # app may not support lifespan
+            try:
                 await self._app(scope, self._receive, self._send)
+            except Exception as exc:  # app may not support lifespan at all
+                self._error = exc
             self._startup.set()  # unblock startup() if the app exited early
             self._shutdown.set()
 
@@ -75,6 +86,10 @@ class _Lifespan:
         await asyncio.wait({self._task, waiter}, return_when=asyncio.FIRST_COMPLETED, timeout=5.0)
         waiter.cancel()
         self._startup.set()  # proceed regardless — lifespan is best-effort
+        if not self._startup_ok:
+            _log.logger.debug(
+                "ASGI lifespan not completed (unsupported or failed): %r", self._error
+            )
 
     async def shutdown(self) -> None:
         if self._startup_ok and self._task is not None and not self._task.done():
@@ -191,8 +206,25 @@ class _Exchange:
                 return {"type": "http.request", "body": body, "more_body": False}
             return {"type": "http.disconnect"}
 
-        await self._app(scope, receive, state.send)
+        try:
+            await self._app(scope, receive, state.send)
+        except Exception:
+            # The app raised out of its coroutine (it didn't handle its own error).
+            # Log with traceback; send a 500 if we haven't committed a response yet.
+            _log.logger.error(
+                'ASGI app error: %s "%s %s"', scope["client"][0], method, raw_path, exc_info=True
+            )
+            if not state.started:
+                with contextlib.suppress(OSError):
+                    writer.write(_INTERNAL_ERROR)
+            with contextlib.suppress(OSError):
+                await writer.drain()
+            return False
         await writer.drain()
+        if _log.logger.isEnabledFor(logging.INFO):
+            _log.logger.info(
+                '%s "%s %s %s" %s', scope["client"][0], method, raw_path, version, state.status
+            )
         return keep_alive and not state.close
 
 

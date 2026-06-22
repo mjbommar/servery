@@ -22,7 +22,9 @@ def configure_stderr(level: int = logging.INFO) -> None:
     if _stderr_handler is not None:
         return
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S"))
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")
+    )
     logger.addHandler(handler)
     logger.setLevel(level)
     _stderr_handler = handler
