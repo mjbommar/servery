@@ -287,6 +287,15 @@ class ContinuationFrame:
         return bool(self.flags & Flag.END_HEADERS)
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class UnknownFrame:
+    """An unknown/extension frame type — receivers MUST ignore it (RFC 9113 §5.5)."""
+
+    stream_id: int
+    flags: Flag
+    frame_type: int
+
+
 # The union of every parsed frame type.
 Frame = (
     DataFrame
@@ -299,6 +308,7 @@ Frame = (
     | GoAwayFrame
     | WindowUpdateFrame
     | ContinuationFrame
+    | UnknownFrame
 )
 
 
@@ -455,13 +465,17 @@ def parse_frame(header9: bytes, payload: bytes) -> Frame:
         if header.length != 4:
             raise FrameError(f"WINDOW_UPDATE frame length must be 4, got {header.length}")
         (raw,) = _U32.unpack(payload)
-        return WindowUpdateFrame(sid, flags, raw & _STREAM_ID_MASK)
+        increment = raw & _STREAM_ID_MASK
+        if increment == 0:  # a zero increment is a PROTOCOL_ERROR (RFC 9113 §6.9)
+            raise ProtocolError("WINDOW_UPDATE increment must not be 0")
+        return WindowUpdateFrame(sid, flags, increment)
 
     if header.type == FrameType.CONTINUATION:
         _require_stream(sid, "CONTINUATION")
         return ContinuationFrame(sid, flags, payload)
 
-    raise FrameError(f"unknown frame type {header.type}")
+    # RFC 9113 §5.5: unknown/extension frame types MUST be ignored, not errored.
+    return UnknownFrame(sid, flags, header.type)
 
 
 def _parse_headers(sid: int, flags: Flag, payload: bytes) -> HeadersFrame:
