@@ -4,6 +4,41 @@ All notable changes to servery are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [semantic versioning](https://semver.org/).
 
+## [1.0.2] — 2026-06-22
+
+A profiling-driven performance pass (cProfile + strace, benchmarked before/after
+each change with a new single-core `scripts/microbench.py`).
+
+### Performance
+
+- **Fast request-header parser**: the stdlib's email-based
+  `http.client.parse_headers` dominated per-request CPU (MIME/multipart work HTTP
+  never needs). Replaced with a line-based reader + a minimal case-insensitive
+  header map. Faithful `parse_request` (limits, versions, 0.9, expect-100, obs-fold
+  per RFC 9112 §5.2 preserved). Small-file serving **8,896 → 10,766 req/s (+21%)**
+  single-core; **~42k → ~52k req/s (+23%)** at 16-way concurrency.
+- **Listing render**: `time.localtime` + manual date formatting instead of
+  `strftime`, and dropped a redundant `html.escape` on the already-percent-encoded
+  href. 50-entry listing **2,486 → 2,843 req/s (+14%)** single-core.
+- **Fewer syscalls per file request**: send the body in one `sendfile` (was two);
+  skip the SPA `os.path.exists` stat when SPA is off (the default); drop a
+  `tell()` `lseek`. Per small-file GET: `sendfile` 2→1, `stat` 2.2→1.2,
+  `lseek` 3→2 (≈13→11 syscalls).
+- Cached the constant `Server` header; guard access logging on the log level so a
+  disabled (quiet) logger does no per-request formatting.
+
+Cumulative: small-file throughput **+24%** single-core. The large-file `sendfile`
+path was already ~2.5 GB/s. No API or behavior changes; 295+ tests still pass.
+
+### Added (tests)
+
+- `test_request_parsing.py`: the fast parser (case-insensitivity, first-wins,
+  obs-fold, no-colon, EOF-termination, bad version, HTTP/2.0-in-line, HTTP/0.9).
+- Listing: an XSS guard proving a hostile filename cannot break out of the href
+  now that it is no longer html-escaped, plus an mtime-format check.
+- `scripts/microbench.py` (single-core attribution) and a warmup in
+  `scripts/bench.py`.
+
 ## [1.0.1] — 2026-06-22
 
 Fixes surfaced by a large test-suite expansion (RFC reads + cross-checking
@@ -75,5 +110,6 @@ First stable release. A zero-dependency, pure-Python HTTP file server.
 - **Free-threading** support (3.13t/3.14t), full type hints (`ty`-checked), and a
   CI gate that enforces zero runtime dependencies in the core wheel.
 
+[1.0.2]: https://github.com/mjbommar/servery/releases/tag/v1.0.2
 [1.0.1]: https://github.com/mjbommar/servery/releases/tag/v1.0.1
 [1.0.0]: https://github.com/mjbommar/servery/releases/tag/v1.0.0

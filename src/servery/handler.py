@@ -20,13 +20,14 @@ import datetime
 import email.utils
 import http.server
 import io
+import logging
 import os
 import shutil
 import socket
 import ssl
 import urllib.parse
 from http import HTTPStatus
-from typing import TYPE_CHECKING, BinaryIO, cast, overload
+from typing import TYPE_CHECKING, BinaryIO, ClassVar, cast, overload
 
 from servery import __version__, _log, archive, listing, ranges, security, upload
 
@@ -101,6 +102,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     _body_remaining: int | None = None
     _body_offset: int = 0
     _generated_page: bool = False
+    _version_string_cache: ClassVar[str | None] = None  # the Server header is constant
     # Our parse_request() populates these (replacing the email-based parser).
     headers: _RequestHeaders
     command: str | None  # may be None on a malformed first line
@@ -553,9 +555,18 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def version_string(self) -> str:
+        # The Server header (server_version + sys_version) is constant; build once.
+        cached = ServeryHandler._version_string_cache
+        if cached is None:
+            cached = ServeryHandler._version_string_cache = super().version_string()
+        return cached
+
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (base signature)
-        # Route through the logging module instead of writing to stderr directly.
-        _log.logger.info("%s %s", self.address_string(), format % args)
+        # Route through the logging module. Guard on the level so we don't format
+        # the line (or call address_string) when logging is disabled (quiet mode).
+        if _log.logger.isEnabledFor(logging.INFO):
+            _log.logger.info("%s %s", self.address_string(), format % args)
 
 
 _MAX_HEADER_LINE = 65536  # bytes per line; matches http.client._MAXLINE

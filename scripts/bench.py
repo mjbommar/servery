@@ -32,6 +32,10 @@ def _bench(host: str, port: int, path: str, requests: int, concurrency: int) -> 
     def worker() -> None:
         nonlocal byte_total, errors
         conn = http.client.HTTPConnection(host, port, timeout=30)
+        # Warm up so one scenario's cache/memory state doesn't taint the next.
+        for _ in range(min(50, per_worker)):
+            conn.request("GET", path)
+            conn.getresponse().read()
         local_lat: list[float] = []
         local_bytes = 0
         local_err = 0
