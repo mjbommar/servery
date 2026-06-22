@@ -129,6 +129,8 @@ known-first-party = ["servery"]
 "src/servery/wsgi.py" = ["N802", "PTH"]
 # Same for the CGI handler's do_* dispatch methods + os-level path handling.
 "src/servery/cgi.py" = ["N802", "PTH"]
+# The extractor works at the os path level (realpath containment by design).
+"src/servery/_extract.py" = ["PTH"]
 
 [tool.ty.environment]
 python-version = "3.13"

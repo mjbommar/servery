@@ -33,10 +33,11 @@ class UploadConflictError(UploadError):
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class SavedFile:
-    """A file that was written to disk."""
+    """A file that was written to disk (``extracted`` > 0 if it was an archive)."""
 
     filename: str
     size: int
+    extracted: int = 0
 
 
 class _Sink(Protocol):
@@ -195,14 +196,37 @@ def _save_part(stream: _Stream, marker: bytes, dest_dir: str, name: str, *, over
     return written
 
 
+def _maybe_extract(name: str, dest_dir: str, written: int, *, overwrite: bool) -> SavedFile:
+    """If ``name`` is an archive, expand it into ``dest_dir`` and remove the archive."""
+    from servery import _extract
+
+    if not _extract.is_archive(name):
+        return SavedFile(name, written)
+    final = os.path.join(dest_dir, name)
+    try:
+        names = _extract.extract(final, dest_dir, allow_overwrite=overwrite)
+    except _extract.ExtractError as exc:
+        with contextlib.suppress(OSError):
+            os.unlink(final)
+        raise UploadError(str(exc)) from exc
+    with contextlib.suppress(OSError):
+        os.unlink(final)  # keep the contents, not the archive
+    return SavedFile(name, written, extracted=len(names))
+
+
 def save(
     reader: _ReadableStream,
     boundary: bytes,
     dest_dir: str,
     *,
     allow_overwrite: bool = False,
+    extract: bool = False,
 ) -> list[SavedFile]:
-    """Parse a multipart body and write its file parts into ``dest_dir``."""
+    """Parse a multipart body and write its file parts into ``dest_dir``.
+
+    With ``extract=True``, an uploaded archive (zip/tar) is securely expanded into
+    ``dest_dir`` (see :mod:`servery._extract`) and the archive itself removed.
+    """
     stream = _Stream(reader)
     delimiter = b"--" + boundary
     first = stream.readline().rstrip(b"\r\n")
@@ -221,7 +245,10 @@ def save(
             if name is None:
                 raise UploadError("unsafe upload filename")
             written = _save_part(stream, marker, dest_dir, name, overwrite=allow_overwrite)
-            saved.append(SavedFile(name, written))
+            if extract:
+                saved.append(_maybe_extract(name, dest_dir, written, overwrite=allow_overwrite))
+            else:
+                saved.append(SavedFile(name, written))
         else:
             stream.read_until(marker, _Discard())
         trailer = stream.readline()

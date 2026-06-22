@@ -33,6 +33,7 @@ class Config:
     upload: bool = False
     max_upload_size: int = 100 * 1024 * 1024
     allow_overwrite: bool = False
+    upload_extract: bool = False  # expand uploaded archives (requires upload)
     cors: bool = False
     spa: bool = False
     cache_max_age: int | None = None
@@ -92,6 +93,7 @@ class Config:
         upload: bool = False,
         max_upload_size: int = 100 * 1024 * 1024,
         allow_overwrite: bool = False,
+        upload_extract: bool = False,
         cors: bool = False,
         spa: bool = False,
         cache_max_age: int | None = None,
@@ -115,6 +117,8 @@ class Config:
             raise ValueError(f"choose only one dynamic handler: {' / '.join(dynamic)}")
         if dynamic and http2:
             raise ValueError(f"{dynamic[0]} is HTTP/1.1 only and cannot be combined with --http2")
+        if upload_extract and not upload:
+            raise ValueError("--upload-extract requires --upload")
         return cls(
             directory=Path(directory).resolve(),
             host=host,
@@ -129,6 +133,7 @@ class Config:
             upload=upload,
             max_upload_size=max_upload_size,
             allow_overwrite=allow_overwrite,
+            upload_extract=upload_extract,
             cors=cors,
             spa=spa,
             cache_max_age=cache_max_age,

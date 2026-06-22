@@ -17,21 +17,22 @@ from servery.server import serve
 # AND accept writes require --auth (enforced below) so "open writable public
 # server" can't be a one-flag accident. TLS-enabling profiles default to a
 # self-signed cert, which --tls-cert transparently upgrades to a real one.
+_ALL = "0.0.0.0"  # nosec B104 (profiles below intentionally expose to the network)
 PROFILES: dict[str, dict[str, object]] = {
     "local": {},  # the safe default: 127.0.0.1, read-only, cleartext
-    "share": {"host": "0.0.0.0", "tls_self_signed": True},
-    "inbox": {"host": "0.0.0.0", "tls_self_signed": True, "upload": True},
-    "public-readonly": {"host": "0.0.0.0", "tls_self_signed": True, "cache_max_age": 3600},
-    "public-readwrite": {"host": "0.0.0.0", "tls_self_signed": True, "upload": True},
+    "share": {"host": _ALL, "tls_self_signed": True},
+    "inbox": {"host": _ALL, "tls_self_signed": True, "upload": True},
+    "public-readonly": {"host": _ALL, "tls_self_signed": True, "cache_max_age": 3600},
+    "public-readwrite": {"host": _ALL, "tls_self_signed": True, "upload": True},
     "cdn": {
-        "host": "0.0.0.0",
+        "host": _ALL,
         "tls_self_signed": True,
         "cache_max_age": 31536000,
         "cors": True,
         "http2": True,
     },
     "dev": {"host": "127.0.0.1", "spa": True, "cors": True},
-    "app": {"host": "0.0.0.0", "tls_self_signed": True, "max_workers": os.cpu_count() or 4},
+    "app": {"host": _ALL, "tls_self_signed": True, "max_workers": os.cpu_count() or 4},
 }
 # Network-exposed + writable -> auth is mandatory.
 _PROFILE_REQUIRES_AUTH = frozenset({"inbox", "public-readwrite"})
@@ -114,6 +115,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-overwrite",
         action="store_true",
         help="allow uploads to overwrite existing files",
+    )
+    parser.add_argument(
+        "--upload-extract",
+        action="store_true",
+        help="expand uploaded archives (zip/tar) into the target dir, securely "
+        "(zip-slip/zip-bomb/symlink guarded); requires --upload",
     )
     parser.add_argument(
         "--cors",
@@ -249,6 +256,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         upload=args.upload,
         max_upload_size=args.max_upload_size,
         allow_overwrite=args.allow_overwrite,
+        upload_extract=args.upload_extract,
         cors=args.cors,
         spa=args.spa,
         cache_max_age=args.cache_max_age,

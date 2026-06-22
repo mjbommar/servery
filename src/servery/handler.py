@@ -355,7 +355,13 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
         reader = upload.BoundedReader(self.rfile, length)
         try:
-            upload.save(reader, boundary, dest_dir, allow_overwrite=config.allow_overwrite)
+            upload.save(
+                reader,
+                boundary,
+                dest_dir,
+                allow_overwrite=config.allow_overwrite,
+                extract=config.upload_extract,
+            )
         except upload.UploadConflictError:
             self.send_error(HTTPStatus.CONFLICT, "A file with that name already exists")
             return
