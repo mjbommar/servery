@@ -200,6 +200,8 @@ class WSGIHandler(ServeryHandler):
         super(ServeryHandler, self).handle()
 
     def _run_wsgi(self) -> None:
+        if not self._authorized():  # --auth gates the app, like file serving
+            return
         run(self, self._server.wsgi_app)
 
     def do_GET(self) -> None:

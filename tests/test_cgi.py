@@ -183,5 +183,18 @@ class CGITelemetryTest(unittest.TestCase):
         self.assertTrue(any("kaboom detail" in m for m in cap.messages()), cap.messages())
 
 
+@unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
+class CGIAuthTest(unittest.TestCase):
+    def test_auth_is_enforced(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        Path(tmp.name, "echo.py").write_text(_ECHO)
+        cfg = Config.create(".", host="127.0.0.1", port=0, quiet=True, cgi_dir=tmp.name, auth="u:p")
+        with serving(cfg) as (host, port), httpx.Client() as client:
+            self.assertEqual(client.get(f"http://{host}:{port}/echo.py").status_code, 401)
+            ok = client.get(f"http://{host}:{port}/echo.py", auth=("u", "p"))
+            self.assertEqual(ok.status_code, 200)
+
+
 if __name__ == "__main__":
     unittest.main()

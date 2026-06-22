@@ -185,5 +185,20 @@ class WSGITelemetryTest(unittest.TestCase):
         self.assertTrue(any("WSGI app error" in m for m in cap.messages()), cap.messages())
 
 
+@unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
+class WSGIAuthTest(unittest.TestCase):
+    def test_auth_is_enforced(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cfg = Config.create(
+            tmp.name, host="127.0.0.1", port=0, quiet=True, wsgi_app=_SPEC, auth="u:p"
+        )
+        with serving(cfg) as (host, port), httpx.Client() as client:
+            unauth = client.get(f"http://{host}:{port}/x")
+            self.assertEqual(unauth.status_code, 401)  # was silently bypassed
+            ok = client.get(f"http://{host}:{port}/x", auth=("u", "p"))
+            self.assertEqual(ok.status_code, 200)
+
+
 if __name__ == "__main__":
     unittest.main()

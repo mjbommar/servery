@@ -20,7 +20,7 @@ import logging
 from http import HTTPStatus
 from typing import Any
 
-from servery import _appspec, _http1, _log, _tls, _websocket
+from servery import _appspec, _http1, _log, _tls, _websocket, auth
 
 _MAX_BODY = 100 * 1024 * 1024
 
@@ -117,10 +117,17 @@ def _wants_keep_alive(version: str, headers: dict[bytes, bytes]) -> bool:
 class _Exchange:
     """One ASGI request/response over an asyncio stream pair."""
 
-    def __init__(self, app: Any, server_addr: tuple[str, int], scheme: str = "http") -> None:
+    def __init__(
+        self,
+        app: Any,
+        server_addr: tuple[str, int],
+        scheme: str = "http",
+        credential: auth.Credential | None = None,
+    ) -> None:
         self._app = app
         self._server_addr = server_addr
         self._scheme = scheme
+        self._credential = credential
 
     async def handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -160,6 +167,12 @@ class _Exchange:
             key, val = name.strip().lower(), value.strip()
             headers.append((key, val))
             header_map[key] = val
+        if self._credential is not None:  # --auth gates both HTTP and WebSocket
+            authz = header_map.get(b"authorization", b"").decode("latin-1")
+            if not self._credential.check_header(authz):
+                writer.write(_http1.UNAUTHORIZED)
+                await writer.drain()
+                return False
         if header_map.get(b"upgrade", b"").lower() == b"websocket":
             await self._serve_websocket(reader, writer, raw_path, headers, header_map)
             return False  # the WebSocket owns the connection until it closes
@@ -319,12 +332,13 @@ async def serve_forever(
     app = load_app(config.asgi_app)
     ssl_context = _tls.build_context(config, ["http/1.1"]) if config.uses_tls else None
     scheme = "https" if config.uses_tls else "http"
+    credential = auth.parse(config.auth)
     lifespan = _Lifespan(app)
     await lifespan.startup()
     server = await asyncio.start_server(
-        lambda r, w: _Exchange(app, server.sockets[0].getsockname()[:2], scheme).handle_connection(
-            r, w
-        ),
+        lambda r, w: _Exchange(
+            app, server.sockets[0].getsockname()[:2], scheme, credential
+        ).handle_connection(r, w),
         config.host,
         config.port,
         ssl=ssl_context,

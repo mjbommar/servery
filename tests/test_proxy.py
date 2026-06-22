@@ -102,6 +102,21 @@ class ProxyServerTest(unittest.TestCase):
         self.assertIn("xff=127.0.0.1", resp.text)  # X-Forwarded-For injected
         self.assertIn("proto=http", resp.text)
 
+    def test_auth_gates_proxied_routes(self):
+        cfg = Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            proxy=[f"/api=http://127.0.0.1:{self._port}"],
+            auth="u:p",
+        )
+        with serving(cfg) as (host, port):
+            self.assertEqual(httpx.get(f"http://{host}:{port}/api/x").status_code, 401)
+            ok = httpx.get(f"http://{host}:{port}/api/x", auth=("u", "p"))
+            self.assertEqual(ok.status_code, 200)
+            self.assertIn("upstream:", ok.text)
+
     def test_non_matching_request_served_locally(self):
         with serving(self.cfg) as (host, port):
             resp = httpx.get(f"http://{host}:{port}/local.txt")

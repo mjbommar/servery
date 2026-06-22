@@ -178,6 +178,8 @@ class CGIHandler(ServeryHandler):
         super(ServeryHandler, self).handle()  # HTTP/1.1 only; skip h2 dispatch
 
     def _run_cgi(self) -> None:
+        if not self._authorized():  # --auth gates the script, like file serving
+            return
         run(self)
 
     def do_GET(self) -> None:

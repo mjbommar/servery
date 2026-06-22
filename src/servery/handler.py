@@ -314,6 +314,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         target = _proxy.target_for(self.path, routes)
         if target is None:
             return False
+        if not self._authorized():  # --auth gates proxied routes too (401 already sent)
+            return True
         _proxy.forward(self, target)
         return True
 

@@ -24,10 +24,12 @@ except ImportError:  # pragma: no cover
 
 
 @contextlib.contextmanager
-def serving_asgi(spec: str, *, tls: bool = False) -> Iterator[tuple[str, int]]:
+def serving_asgi(
+    spec: str, *, tls: bool = False, auth: str | None = None
+) -> Iterator[tuple[str, int]]:
     """Run the ASGI server for ``spec`` in a background event loop; yield (host, port)."""
     config = Config.create(
-        ".", host="127.0.0.1", port=0, quiet=True, asgi_app=spec, tls_self_signed=tls
+        ".", host="127.0.0.1", port=0, quiet=True, asgi_app=spec, tls_self_signed=tls, auth=auth
     )
     holder: dict[str, Any] = {}
     ready = threading.Event()
@@ -206,6 +208,16 @@ class WebSocketWireTest(unittest.TestCase):
                 self.assertEqual(_ws_read_text(sock), "echo:again")
             finally:
                 sock.close()
+
+
+@unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
+class ASGIAuthTest(unittest.TestCase):
+    def test_auth_is_enforced(self):
+        with serving_asgi("tests._asgiapp:echo", auth="u:p") as (host, port):
+            with httpx.Client() as client:
+                self.assertEqual(client.get(f"http://{host}:{port}/x").status_code, 401)
+                ok = client.get(f"http://{host}:{port}/x", auth=("u", "p"))
+                self.assertEqual(ok.status_code, 200)
 
 
 @unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")

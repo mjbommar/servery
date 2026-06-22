@@ -19,6 +19,14 @@ INTERNAL_ERROR: bytes = (
 
 CHUNK_TERMINATOR: bytes = b"0\r\n\r\n"
 
+# A ready-to-send 401 challenge (used by the async servers, which can't call the
+# sync handler's _authorized()).
+UNAUTHORIZED: bytes = (
+    b"HTTP/1.1 401 Unauthorized\r\n"
+    b'WWW-Authenticate: Basic realm="servery"\r\n'
+    b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+)
+
 
 def chunk(data: bytes) -> bytes:
     """Encode one HTTP/1.1 chunked-transfer-encoding chunk."""

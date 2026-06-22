@@ -20,7 +20,7 @@ import mimetypes
 import os
 from typing import TYPE_CHECKING
 
-from servery import _log, listing, security
+from servery import _log, auth, listing, security
 
 if TYPE_CHECKING:
     from servery.config import Config
@@ -84,6 +84,7 @@ def serve_http3(config: Config) -> None:  # pragma: no cover - requires aioquic 
         raise Http3UnavailableError("HTTP/3 (QUIC) requires --tls-cert and --tls-key")
 
     root_real = os.path.realpath(config.directory)
+    credential = auth.parse(config.auth)
 
     class _Protocol(QuicConnectionProtocol):
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -104,6 +105,17 @@ def serve_http3(config: Config) -> None:  # pragma: no cover - requires aioquic 
             headers = self._requests.pop(stream_id, {})
             method = headers.get(b":method", b"").decode("latin-1")
             path = headers.get(b":path", b"/").decode("latin-1")
+            if credential is not None:  # --auth gates HTTP/3 too
+                authz = headers.get(b"authorization", b"").decode("latin-1")
+                if not credential.check_header(authz):
+                    self._http.send_headers(
+                        stream_id,
+                        [(b":status", b"401"), (b"www-authenticate", b'Basic realm="servery"')],
+                        end_stream=True,
+                    )
+                    self.transmit()
+                    _log.logger.info('HTTP/3 "%s %s" 401', method, path)
+                    return
             status, response_headers, body = build_response(config, root_real, method, path)
             _log.logger.info('HTTP/3 "%s %s" %s', method, path, status)
             send_body = body if method != "HEAD" else b""
