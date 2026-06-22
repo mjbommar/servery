@@ -43,6 +43,9 @@ _RESERVED_BIT: int = 0x80000000
 # struct formats (network byte order).
 _U32 = struct.Struct("!I")
 _SETTING_STRUCT = struct.Struct("!H I")  # 16-bit id + 32-bit value.
+# The 9-octet frame header packed in one shot: 24-bit length + 8-bit type fold
+# into a single 32-bit field, then 8-bit flags, then the 32-bit stream id.
+_HEADER9 = struct.Struct("!IBI")
 
 
 class FrameType(enum.IntEnum):
@@ -314,11 +317,10 @@ def build_header9(length: int, frame_type: int, flags: int, stream_id: int) -> b
         raise FrameError(f"frame length {length} out of 24-bit range")
     if not 0 <= stream_id <= _STREAM_ID_MASK:
         raise FrameError(f"stream id {stream_id} out of 31-bit range")
-    # Length is 24 bits: pack a 4-byte int and drop the leading octet.
-    return (
-        struct.pack("!I", length)[1:]
-        + bytes((frame_type & 0xFF, flags & 0xFF))
-        + _U32.pack(stream_id & _STREAM_ID_MASK)
+    # One pack instead of two packs + a bytes() + two concatenations: fold the
+    # 24-bit length and 8-bit type into the leading 32-bit field.
+    return _HEADER9.pack(
+        (length << 8) | (frame_type & 0xFF), flags & 0xFF, stream_id & _STREAM_ID_MASK
     )
 
 
