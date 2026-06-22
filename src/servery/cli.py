@@ -183,6 +183,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="serve an ASGI application (opt-in, experimental; supports TLS), e.g. myapp:app",
     )
     parser.add_argument(
+        "--proxy",
+        action="append",
+        metavar="PREFIX=URL",
+        help="reverse-proxy requests under PREFIX to an upstream (repeatable), "
+        "e.g. /api=http://localhost:8001",
+    )
+    parser.add_argument(
         "--http3",
         action="store_true",
         help="serve HTTP/3 over QUIC (requires TLS and the 'servery[http3]' extra)",
@@ -267,6 +274,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         wsgi_app=args.wsgi,
         cgi_dir=args.cgi,
         asgi_app=args.asgi,
+        proxy=args.proxy,
     )
 
 

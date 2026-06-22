@@ -44,6 +44,7 @@ class Config:
     wsgi_app: str | None = None  # "module:callable" — opt-in dynamic handler
     cgi_dir: str | None = None  # cgi-bin directory — opt-in dynamic handler
     asgi_app: str | None = None  # "module:callable" — opt-in async dynamic handler
+    proxy_routes: tuple[tuple[str, str], ...] = ()  # (path-prefix, upstream-url) pairs
 
     @property
     def cache_control(self) -> str:
@@ -104,8 +105,10 @@ class Config:
         wsgi_app: str | None = None,
         cgi_dir: str | None = None,
         asgi_app: str | None = None,
+        proxy: list[str] | None = None,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
+        proxy_routes = _parse_proxy_routes(proxy or [])
         if tls_self_signed and tls_cert is not None:
             raise ValueError("--tls-self-signed cannot be combined with --tls-cert")
         dynamic = [
@@ -144,4 +147,20 @@ class Config:
             wsgi_app=wsgi_app,
             cgi_dir=cgi_dir,
             asgi_app=asgi_app,
+            proxy_routes=proxy_routes,
         )
+
+
+def _parse_proxy_routes(specs: list[str]) -> tuple[tuple[str, str], ...]:
+    """Parse ``["/api=http://host:port", ...]`` into validated (prefix, url) pairs."""
+    routes: list[tuple[str, str]] = []
+    for spec in specs:
+        prefix, sep, upstream = spec.partition("=")
+        if not sep or not prefix.startswith("/"):
+            raise ValueError(f"--proxy {spec!r}: expected '/prefix=http://upstream'")
+        if not upstream.startswith(("http://", "https://")):
+            raise ValueError(f"--proxy {spec!r}: upstream must be an http(s) URL")
+        routes.append((prefix, upstream))
+    # Longest prefix first, so /api/v2 wins over /api.
+    routes.sort(key=lambda route: len(route[0]), reverse=True)
+    return tuple(routes)

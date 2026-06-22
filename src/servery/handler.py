@@ -305,7 +305,26 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self.close_connection = True
         return
 
+    def _maybe_proxy(self) -> bool:
+        """Forward the request to an upstream if a ``--proxy`` route matches."""
+        routes = self._server.config.proxy_routes
+        if not routes:
+            return False
+        from servery import _proxy
+
+        target = _proxy.target_for(self.path, routes)
+        if target is None:
+            return False
+        _proxy.forward(self, target)
+        return True
+
+    def _proxy_or_unsupported(self) -> None:
+        if not self._maybe_proxy():
+            self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command})")
+
     def do_GET(self) -> None:
+        if self._maybe_proxy():
+            return
         f = self.send_head()
         if f is None:
             return
@@ -314,9 +333,27 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         finally:
             f.close()
 
+    def do_HEAD(self) -> None:
+        if self._maybe_proxy():
+            return
+        f = self.send_head()
+        if f is not None:
+            f.close()
+
+    def do_PUT(self) -> None:
+        self._proxy_or_unsupported()
+
+    def do_DELETE(self) -> None:
+        self._proxy_or_unsupported()
+
+    def do_PATCH(self) -> None:
+        self._proxy_or_unsupported()
+
     # --- upload (v0.6) ---------------------------------------------------
 
     def do_POST(self) -> None:
+        if self._maybe_proxy():
+            return
         self._generated_page = False
         if not self._authorized():
             return
@@ -595,6 +632,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         super().send_error(code, message, explain)
 
     def do_OPTIONS(self) -> None:
+        if self._maybe_proxy():
+            return
         self._generated_page = False
         # Preflight must succeed without auth, or the real request never happens.
         self.send_response(HTTPStatus.NO_CONTENT)
