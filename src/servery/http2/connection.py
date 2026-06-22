@@ -209,7 +209,12 @@ class H2Connection:
             if not display.endswith("/"):
                 return 301, [(b"location", (display + "/").encode("latin-1"))], b""
             try:
-                body = listing.render(fs_path, display, show_hidden=self.config.show_hidden)
+                body = listing.render(
+                    fs_path,
+                    display,
+                    show_hidden=self.config.show_hidden,
+                    per_page=listing.DEFAULT_PAGE_SIZE,
+                )
             except OSError:
                 return self._error(404)
             if self.config.security_headers:

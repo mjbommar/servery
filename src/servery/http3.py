@@ -62,13 +62,16 @@ def build_response(
         if not display.endswith("/"):
             return 301, [(b"location", (display + "/").encode("latin-1"))], b""
         try:
-            body = listing.render(fs_path, display, show_hidden=config.show_hidden)
+            body = listing.render(
+                fs_path, display, show_hidden=config.show_hidden, per_page=listing.DEFAULT_PAGE_SIZE
+            )
         except OSError:
             return 404, [(b"content-type", b"text/plain")], b"404"
         if config.security_headers:
             headers.append((b"content-security-policy", _CSP.encode("latin-1")))
             headers.append((b"referrer-policy", b"no-referrer"))
         headers.append((b"content-type", b"text/html; charset=utf-8"))
+        headers.append((b"content-length", str(len(body)).encode("ascii")))
         return 200, headers, body
     try:
         with open(fs_path, "rb") as handle:  # noqa: PTH123 (os-level by design)
@@ -77,6 +80,7 @@ def build_response(
         return 404, [(b"content-type", b"text/plain")], b"404"
     ctype = mimetypes.guess_file_type(fs_path)[0] or "application/octet-stream"
     headers.append((b"content-type", ctype.encode("latin-1")))
+    headers.append((b"content-length", str(len(body)).encode("ascii")))
     return 200, headers, body
 
 

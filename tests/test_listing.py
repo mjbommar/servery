@@ -226,5 +226,21 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("onclick", body.lower())
 
 
+class ScanCapTest(unittest.TestCase):
+    def test_scan_is_bounded(self):
+        # A huge directory must not be fully materialized (RAM/CPU DoS guard).
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for i in range(10):
+            Path(tmp.name, f"f{i}.txt").write_text("x")
+        original = listing._MAX_SCAN_ENTRIES
+        listing._MAX_SCAN_ENTRIES = 4
+        try:
+            entries = listing._scan(tmp.name, show_hidden=False)
+            self.assertEqual(len(entries), 4)
+        finally:
+            listing._MAX_SCAN_ENTRIES = original
+
+
 if __name__ == "__main__":
     unittest.main()

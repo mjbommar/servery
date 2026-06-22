@@ -28,7 +28,13 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Any
 
+from servery import _log
+
 _UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+
+# Bound the per-request scan so a directory with millions of entries can't OOM/peg
+# the server (the full list is sorted, faceted, and metric'd before pagination).
+_MAX_SCAN_ENTRIES: int = 100_000
 
 # Canonical sort name -> Apache column code, and the reverse.
 _SORT_TO_CODE = {"name": "N", "size": "S", "date": "M"}
@@ -309,6 +315,11 @@ def _scan(fs_dir: str, *, show_hidden: bool) -> list[EntryInfo]:
                     mtime=mtime,
                 )
             )
+            if len(entries) >= _MAX_SCAN_ENTRIES:  # stop before unbounded RAM/CPU
+                _log.logger.warning(
+                    "directory listing truncated at %d entries: %s", _MAX_SCAN_ENTRIES, fs_dir
+                )
+                break
     return entries
 
 

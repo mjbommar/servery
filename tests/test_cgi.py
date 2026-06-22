@@ -135,6 +135,18 @@ class CGIServerTest(unittest.TestCase):
             )
             self.assertEqual(status_of(resp), 404)
 
+    def test_invalid_content_length_is_400_not_reset(self):
+        # A non-numeric Content-Length must be a clean 400, not a thread crash /
+        # connection reset out of int().
+        with serving(self.cfg) as (host, port):
+            resp = raw_exchange(
+                host,
+                port,
+                b"POST /echo.py HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n"
+                b"Connection: close\r\n\r\n",
+            )
+            self.assertEqual(status_of(resp), 400)
+
 
 class CGITimeoutTest(unittest.TestCase):
     def setUp(self):
