@@ -135,6 +135,9 @@ class H2Connection:
             return
         for ident, value in frame.settings:
             if ident == frames.SettingsParameter.INITIAL_WINDOW_SIZE:
+                if value > 0x7FFFFFFF:  # exceeds the flow-control max (RFC 9113 §6.5.2)
+                    self._goaway(ErrorCode.FLOW_CONTROL_ERROR)
+                    return
                 self.peer_window = value
         self.sock.sendall(frames.serialize(frames.settings_ack()))
 

@@ -387,7 +387,7 @@ class ParseFrameMiscTest(unittest.TestCase):
         # RFC 9113 §5.5: an unknown/extension frame type must be ignored, not error.
         h9 = build_header9(0, 0xEE, 0, 0)
         frame = parse_frame(h9, b"")
-        self.assertIsInstance(frame, frames.UnknownFrame)
+        assert isinstance(frame, frames.UnknownFrame)  # narrows for the type checker
         self.assertEqual(frame.frame_type, 0xEE)
 
     def test_zero_window_update_is_protocol_error(self):

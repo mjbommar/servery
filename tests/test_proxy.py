@@ -74,6 +74,14 @@ class ConfigTest(unittest.TestCase):
         cfg = Config.create(".", proxy=["/api=http://a", "/api/v2=http://b"])
         self.assertEqual(cfg.proxy_routes[0][0], "/api/v2")  # sorted longest-first
 
+    def test_proxy_incompatible_with_dynamic_handlers(self):
+        # The proxy only dispatches on the HTTP/1.1 file handler; combining it with
+        # a mode that replaces that handler must error, not silently drop the proxy.
+        with self.assertRaises(ValueError):
+            Config.create(".", proxy=["/api=http://x"], wsgi_app="m:a")
+        with self.assertRaises(ValueError):
+            Config.create(".", proxy=["/api=http://x"], http2=True)
+
 
 @unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
 class ProxyServerTest(unittest.TestCase):

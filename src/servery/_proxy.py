@@ -47,7 +47,11 @@ def forward(handler: ServeryHandler, target: str) -> None:
     """Forward the current request to ``target`` and stream the response back."""
     config = handler._server.config
     parsed = urllib.parse.urlsplit(target)
-    length = max(0, int(handler.headers.get("content-length") or 0))  # never read(-1)
+    try:
+        length = max(0, int(handler.headers.get("content-length") or 0))  # never read(-1)
+    except ValueError:
+        handler.send_error(400, "Invalid Content-Length")
+        return
     if length > config.max_upload_size:
         handler.send_error(413, "Request body too large to proxy")
         return

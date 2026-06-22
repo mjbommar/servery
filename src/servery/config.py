@@ -130,6 +130,11 @@ class Config:
             raise ValueError(f"choose only one dynamic handler: {' / '.join(dynamic)}")
         if dynamic and http2:
             raise ValueError(f"{dynamic[0]} is HTTP/1.1 only and cannot be combined with --http2")
+        if proxy_routes and (dynamic or http2):
+            # The proxy only dispatches on the HTTP/1.1 file handler; reject combos
+            # where it would be silently ignored rather than pretend it works.
+            other = dynamic[0] if dynamic else "--http2"
+            raise ValueError(f"--proxy cannot be combined with {other}")
         if upload_extract and not upload:
             raise ValueError("--upload-extract requires --upload")
         return cls(

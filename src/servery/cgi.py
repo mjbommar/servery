@@ -199,3 +199,6 @@ class CGIHandler(ServeryHandler):
 
     def do_PATCH(self) -> None:
         self._run_cgi()
+
+    def do_OPTIONS(self) -> None:  # don't inherit the file handler's unauth preflight
+        self._run_cgi()

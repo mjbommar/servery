@@ -192,8 +192,29 @@ class CGIAuthTest(unittest.TestCase):
         cfg = Config.create(".", host="127.0.0.1", port=0, quiet=True, cgi_dir=tmp.name, auth="u:p")
         with serving(cfg) as (host, port), httpx.Client() as client:
             self.assertEqual(client.get(f"http://{host}:{port}/echo.py").status_code, 401)
+            # OPTIONS must also require auth on a dynamic handler (not the unauth
+            # file-server CORS preflight).
+            self.assertEqual(client.options(f"http://{host}:{port}/echo.py").status_code, 401)
             ok = client.get(f"http://{host}:{port}/echo.py", auth=("u", "p"))
             self.assertEqual(ok.status_code, 200)
+
+    def test_401_closes_connection_to_avoid_body_desync(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        Path(tmp.name, "echo.py").write_text(_ECHO)
+        cfg = Config.create(".", host="127.0.0.1", port=0, quiet=True, cgi_dir=tmp.name, auth="u:p")
+        with serving(cfg) as (host, port):
+            # A rejected POST with a body that smuggles a second request line: the
+            # connection must close so the body isn't parsed as the next request.
+            resp = raw_exchange(
+                host,
+                port,
+                b"POST /echo.py HTTP/1.1\r\nHost: x\r\nContent-Length: 30\r\n\r\n"
+                b"GET /echo.py HTTP/1.1\r\nHost: x\r\n",
+            )
+            self.assertEqual(status_of(resp), 401)
+            self.assertIn(b"connection: close", resp.lower())
+            self.assertEqual(resp.count(b"HTTP/1.1 "), 1)  # the smuggled GET was NOT served
 
 
 if __name__ == "__main__":

@@ -525,9 +525,13 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         header = self.headers.get("Authorization")
         if header is not None and credential.check_header(header):
             return True
+        # Close the connection: a rejected request may carry an unread body
+        # (e.g. a POST) which would otherwise be mis-parsed as the next request.
+        self.close_connection = True
         self.send_response(HTTPStatus.UNAUTHORIZED)
         self.send_header("WWW-Authenticate", _WWW_AUTHENTICATE)
         self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
         self.end_headers()
         return False
 
