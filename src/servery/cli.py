@@ -135,6 +135,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--tls-key", metavar="PATH", help="TLS private key (PEM)")
     parser.add_argument(
+        "--tls-self-signed",
+        action="store_true",
+        help="enable HTTPS with an ad-hoc self-signed certificate generated at "
+        "startup (zero-dependency; clients see an untrusted-cert warning)",
+    )
+    parser.add_argument(
         "--tls-password-file",
         metavar="PATH",
         help="file containing the TLS private-key passphrase",
@@ -162,6 +168,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         tls_cert=args.tls_cert,
         tls_key=args.tls_key,
         tls_password=tls_password,
+        tls_self_signed=args.tls_self_signed,
         auth=args.auth,
         upload=args.upload,
         max_upload_size=args.max_upload_size,

@@ -28,6 +28,7 @@ class Config:
     tls_cert: str | None = None
     tls_key: str | None = None
     tls_password: str | None = None
+    tls_self_signed: bool = False
     auth: str | None = None
     upload: bool = False
     max_upload_size: int = 100 * 1024 * 1024
@@ -54,8 +55,8 @@ class Config:
 
     @property
     def uses_tls(self) -> bool:
-        """True when HTTPS is configured (a certificate was provided)."""
-        return self.tls_cert is not None
+        """True when HTTPS is configured (a provided or self-signed certificate)."""
+        return self.tls_cert is not None or self.tls_self_signed
 
     def startup_warnings(self) -> list[str]:
         """Return human-readable warnings about an unsafe configuration."""
@@ -64,6 +65,11 @@ class Config:
             warnings.append(f"bound to {self.host} — reachable from the network")
         if self.auth is not None and not self.uses_tls:
             warnings.append("Basic auth is enabled without TLS — credentials travel in cleartext")
+        if self.tls_self_signed:
+            warnings.append(
+                "using a self-signed certificate — clients will see an "
+                "'untrusted certificate' warning (fine for a dev box or LAN)"
+            )
         return warnings
 
     @classmethod
@@ -78,6 +84,7 @@ class Config:
         tls_cert: str | None = None,
         tls_key: str | None = None,
         tls_password: str | None = None,
+        tls_self_signed: bool = False,
         auth: str | None = None,
         upload: bool = False,
         max_upload_size: int = 100 * 1024 * 1024,
@@ -91,6 +98,8 @@ class Config:
         http2: bool = False,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
+        if tls_self_signed and tls_cert is not None:
+            raise ValueError("--tls-self-signed cannot be combined with --tls-cert")
         return cls(
             directory=Path(directory).resolve(),
             host=host,
@@ -100,6 +109,7 @@ class Config:
             tls_cert=tls_cert,
             tls_key=tls_key,
             tls_password=tls_password,
+            tls_self_signed=tls_self_signed,
             auth=auth,
             upload=upload,
             max_upload_size=max_upload_size,

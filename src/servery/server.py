@@ -8,13 +8,17 @@ root real-path is computed once so the per-request containment check is cheap.
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import os
+import shutil
 import socket
 import ssl
 import sys
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 from servery import _log, auth
@@ -75,15 +79,43 @@ class ServeryHTTPServer(ThreadingHTTPServer):
 
     def server_activate(self) -> None:
         super().server_activate()
-        cert = self.config.tls_cert
-        if cert is not None:
-            # create_default_context already enforces a sane minimum (TLS 1.2+)
-            # and a secure cipher set; we only advertise HTTP/1.1 over ALPN.
-            context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-            context.load_cert_chain(cert, self.config.tls_key, self.config.tls_password)
-            protocols = ["h2", "http/1.1"] if self.config.http2 else ["http/1.1"]
-            context.set_alpn_protocols(protocols)
-            self.socket = context.wrap_socket(self.socket, server_side=True)
+        config = self.config
+        if not config.uses_tls:
+            return
+        # create_default_context already enforces a sane minimum (TLS 1.2+) and a
+        # secure cipher set; we only advertise HTTP/1.1 (+ h2) over ALPN.
+        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        if config.tls_cert is not None:
+            context.load_cert_chain(config.tls_cert, config.tls_key, config.tls_password)
+        else:
+            self._load_self_signed(context)
+        protocols = ["h2", "http/1.1"] if config.http2 else ["http/1.1"]
+        context.set_alpn_protocols(protocols)
+        self.socket = context.wrap_socket(self.socket, server_side=True)
+
+    def _load_self_signed(self, context: ssl.SSLContext) -> None:
+        """Generate an ad-hoc self-signed cert and load it into ``context``.
+
+        The cert/key are written to a private temp dir (0600), loaded by OpenSSL,
+        then removed — nothing persists on disk past startup.
+        """
+        from servery import _certgen
+
+        hosts = ["localhost", "127.0.0.1", "::1"]
+        host = self.config.host
+        if host and host not in hosts and not _is_wildcard_host(host):
+            hosts.append(host)
+        cert_pem, key_pem = _certgen.generate(hosts)
+        tmp = Path(tempfile.mkdtemp(prefix="servery-tls-"))
+        try:
+            cert_path, key_path = tmp / "cert.pem", tmp / "key.pem"
+            for path, data in ((cert_path, cert_pem), (key_path, key_pem)):
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="ascii") as handle:
+                    handle.write(data)
+            context.load_cert_chain(cert_path, key_path)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def finish_request(self, request: Any, client_address: Any) -> None:
         ServeryHandler(
@@ -92,6 +124,14 @@ class ServeryHTTPServer(ThreadingHTTPServer):
             self,
             directory=os.fspath(self.config.directory),
         )
+
+
+def _is_wildcard_host(host: str) -> bool:
+    """True for a bind-all address (0.0.0.0 / ::) — not a real SAN entry."""
+    try:
+        return ipaddress.ip_address(host).is_unspecified
+    except ValueError:
+        return False
 
 
 def make_server(config: Config) -> ServeryHTTPServer:
