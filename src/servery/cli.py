@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -10,6 +11,30 @@ from pathlib import Path
 from servery._version import __version__
 from servery.config import Config
 from servery.server import serve
+
+# Launch presets: a profile sets defaults (keyed by argparse dest); any flag the
+# user passes explicitly still wins. Profiles that expose the box to the network
+# AND accept writes require --auth (enforced below) so "open writable public
+# server" can't be a one-flag accident. TLS-enabling profiles default to a
+# self-signed cert, which --tls-cert transparently upgrades to a real one.
+PROFILES: dict[str, dict[str, object]] = {
+    "local": {},  # the safe default: 127.0.0.1, read-only, cleartext
+    "share": {"host": "0.0.0.0", "tls_self_signed": True},
+    "inbox": {"host": "0.0.0.0", "tls_self_signed": True, "upload": True},
+    "public-readonly": {"host": "0.0.0.0", "tls_self_signed": True, "cache_max_age": 3600},
+    "public-readwrite": {"host": "0.0.0.0", "tls_self_signed": True, "upload": True},
+    "cdn": {
+        "host": "0.0.0.0",
+        "tls_self_signed": True,
+        "cache_max_age": 31536000,
+        "cors": True,
+        "http2": True,
+    },
+    "dev": {"host": "127.0.0.1", "spa": True, "cors": True},
+    "app": {"host": "0.0.0.0", "tls_self_signed": True, "max_workers": os.cpu_count() or 4},
+}
+# Network-exposed + writable -> auth is mandatory.
+_PROFILE_REQUIRES_AUTH = frozenset({"inbox", "public-readwrite"})
 
 TLS_HELP = (
     "For quick HTTPS with no setup, use a generated ad-hoc cert:\n\n"
@@ -34,6 +59,13 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=".",
         help="directory to serve (default: current directory)",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=sorted(PROFILES),
+        metavar="NAME",
+        help="apply a preset bundle of flags (any explicit flag still overrides); "
+        f"one of: {', '.join(sorted(PROFILES))}",
     )
     parser.add_argument(
         "-p",
@@ -174,6 +206,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse argv, applying any ``--profile`` as a defaults layer (explicit flags win).
+
+    Two-pass: parse once to learn the profile, push its values as parser defaults,
+    then re-parse so argparse resolves precedence natively (a flag equal to the
+    stock default is still distinguishable from "unset").
+    """
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.profile:
+        parser.set_defaults(**PROFILES[args.profile])
+        args = parser.parse_args(argv)
+        # A real --tls-cert supersedes the profile's self-signed default.
+        if args.tls_cert is not None:
+            args.tls_self_signed = False
+        if args.profile in _PROFILE_REQUIRES_AUTH and not args.auth:
+            msg = (
+                f"--profile {args.profile} exposes writes to the network and "
+                "requires --auth USER:PASS"
+            )
+            raise ValueError(msg)
+    return args
+
+
 def config_from_args(args: argparse.Namespace) -> Config:
     """Convert parsed arguments into a :class:`Config`."""
     tls_password = None
@@ -213,7 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(TLS_HELP)
         return 0
     try:
-        config = config_from_args(args)
+        config = config_from_args(parse_args(argv))
         if args.http3:
             from servery.http3 import Http3UnavailableError, serve_http3
 
