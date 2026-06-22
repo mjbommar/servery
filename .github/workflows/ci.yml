@@ -38,7 +38,9 @@ jobs:
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           enable-cache: true
-      - run: uvx ty check src tests
+      # httpx is a dev-only interop dependency used in tests; give ty access to
+      # it (in its isolated env) so it resolves and type-checks that code.
+      - run: uvx --with "httpx[http2]" ty check src tests
 
   security:
     name: SAST (bandit)
