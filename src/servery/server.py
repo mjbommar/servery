@@ -33,6 +33,7 @@ class ServeryHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     wsgi_app: Any = None
+    cgi_root: str = ""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -54,6 +55,13 @@ class ServeryHTTPServer(ThreadingHTTPServer):
 
             self.wsgi_app = wsgi.load_app(config.wsgi_app)
             self._handler_cls = wsgi.WSGIHandler
+        elif config.cgi_dir:
+            from servery import cgi
+
+            self.cgi_root = os.path.realpath(config.cgi_dir)
+            if not Path(self.cgi_root).is_dir():
+                raise ValueError(f"--cgi: {config.cgi_dir!r} is not a directory")
+            self._handler_cls = cgi.CGIHandler
         super().__init__((config.host, config.port), self._handler_cls)
 
     def process_request(self, request: Any, client_address: Any) -> None:

@@ -23,6 +23,13 @@ All notable changes to servery are documented here. The format follows
   materialized bodies; chunked for streaming) rather than the HTTP/1.0 `wsgiref`
   server; PEP 3333 compliance is gated by `wsgiref.validate` in the tests.
   ~20k req/s single-core. HTTP/1.1 only (rejected alongside `--http2`).
+- **`--cgi DIR`** (opt-in, off by default — *executes code*): run CGI/1.1
+  (RFC 3875) scripts from a cgi-bin directory — phase D2 of `docs/DYNAMIC.md`.
+  Pure-stdlib `subprocess` (`shell=False`, clean minimal env, hard timeout,
+  bounded body, realpath containment). Security mitigations are built in and
+  tested: **httpoxy** (`Proxy`→`HTTP_PROXY` never set), no `Authorization`
+  forwarding (RFC 3875 §9.2), `..` traversal cannot escape the cgi dir. Inherent
+  process-per-request cost (~spawn-bound).
 - **`--tls-self-signed`**: zero-dependency HTTPS with an ad-hoc certificate
   generated at startup (pure-stdlib RSA-2048 via `servery._certgen` — no
   `cryptography`, no `openssl` binary, no `ctypes`; works on a bare Windows/Linux

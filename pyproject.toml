@@ -127,6 +127,8 @@ known-first-party = ["servery"]
 # The WSGI handler's do_GET/do_PUT/... must keep the HTTP-method casing the
 # stdlib request dispatcher requires (N802), and resolves paths at the os level.
 "src/servery/wsgi.py" = ["N802", "PTH"]
+# Same for the CGI handler's do_* dispatch methods + os-level path handling.
+"src/servery/cgi.py" = ["N802", "PTH"]
 
 [tool.ty.environment]
 python-version = "3.13"

@@ -132,6 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="serve a WSGI application (opt-in) instead of files, e.g. myapp:application",
     )
     parser.add_argument(
+        "--cgi",
+        metavar="DIR",
+        help="execute CGI scripts (opt-in) from DIR as a cgi-bin; runs code, off by default",
+    )
+    parser.add_argument(
         "--http3",
         action="store_true",
         help="serve HTTP/3 over QUIC (requires TLS and the 'servery[http3]' extra)",
@@ -189,6 +194,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         max_workers=args.max_workers,
         http2=args.http2,
         wsgi_app=args.wsgi,
+        cgi_dir=args.cgi,
     )
 
 
