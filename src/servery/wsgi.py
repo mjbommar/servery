@@ -130,6 +130,7 @@ class _Exchange:
 
     def _build_head(self, *, body_len: int | None = None) -> tuple[bytes, _http1.Framing]:
         h = self._handler
+        config = h._server.config
         return _http1.build_head(
             version=h.protocol_version,
             status=self._status or "",
@@ -139,6 +140,11 @@ class _Exchange:
             server=h.version_string(),
             date=h.date_time_string(),
             body_len=body_len,
+            extra=_http1.policy_headers(
+                security_headers=config.security_headers,
+                cors=config.cors,
+                tls=isinstance(h.connection, ssl.SSLSocket),
+            ),
         )
 
     def _send_materialized(self, body: bytes) -> None:

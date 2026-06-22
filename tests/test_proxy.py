@@ -125,6 +125,20 @@ class ProxyServerTest(unittest.TestCase):
             self.assertEqual(ok.status_code, 200)
             self.assertIn("upstream:", ok.text)
 
+    def test_security_and_cors_headers_on_proxied_response(self):
+        cfg = Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            proxy=[f"/api=http://127.0.0.1:{self._port}"],
+            cors=True,
+        )
+        with serving(cfg) as (host, port):
+            r = httpx.get(f"http://{host}:{port}/api/x")
+            self.assertEqual(r.headers.get("x-content-type-options"), "nosniff")
+            self.assertEqual(r.headers.get("access-control-allow-origin"), "*")
+
     def test_non_matching_request_served_locally(self):
         with serving(self.cfg) as (host, port):
             resp = httpx.get(f"http://{host}:{port}/local.txt")

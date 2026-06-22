@@ -18,9 +18,11 @@ from __future__ import annotations
 import contextlib
 import mimetypes
 import os
+import ssl
 from typing import TYPE_CHECKING
 
 from servery import _log, listing, security
+from servery.handler import _CSP
 from servery.http2 import frames, hpack
 from servery.http2.frames import ErrorCode, Flag, FrameType
 
@@ -197,6 +199,11 @@ class H2Connection:
         headers: _HeaderList = []
         if self.config.security_headers:
             headers.append((b"x-content-type-options", b"nosniff"))
+            if isinstance(self.handler.connection, ssl.SSLSocket):  # h2 may also be h2c cleartext
+                headers.append((b"strict-transport-security", b"max-age=63072000"))
+        if self.config.cors:
+            headers.append((b"access-control-allow-origin", b"*"))
+        headers.append((b"cache-control", self.config.cache_control.encode("latin-1")))
 
         if os.path.isdir(fs_path):
             if not display.endswith("/"):
@@ -206,7 +213,10 @@ class H2Connection:
             except OSError:
                 return self._error(404)
             if self.config.security_headers:
-                headers.append((b"content-security-policy", b"default-src 'none'"))
+                # The full CSP (style-src etc.) — "default-src 'none'" alone blocked
+                # the listing's own inline styles, rendering it unstyled.
+                headers.append((b"content-security-policy", _CSP.encode("latin-1")))
+                headers.append((b"referrer-policy", b"no-referrer"))
             headers.append((b"content-type", b"text/html; charset=utf-8"))
             headers.append((b"content-length", str(len(body)).encode("ascii")))
             return 200, headers, body

@@ -198,6 +198,20 @@ class WSGITelemetryTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
+class WSGIHeadersTest(unittest.TestCase):
+    def test_security_and_cors_headers_added(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cfg = Config.create(
+            tmp.name, host="127.0.0.1", port=0, quiet=True, wsgi_app=_SPEC, cors=True
+        )
+        with serving(cfg) as (host, port), httpx.Client() as client:
+            r = client.get(f"http://{host}:{port}/x")
+            self.assertEqual(r.headers.get("x-content-type-options"), "nosniff")
+            self.assertEqual(r.headers.get("access-control-allow-origin"), "*")
+
+
+@unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
 class WSGIAuthTest(unittest.TestCase):
     def test_auth_is_enforced(self):
         tmp = tempfile.TemporaryDirectory()

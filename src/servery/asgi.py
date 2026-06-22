@@ -124,12 +124,14 @@ class _Exchange:
         scheme: str = "http",
         credential: auth.Credential | None = None,
         timeout: float = 30.0,
+        policy: list[tuple[bytes, bytes]] | None = None,
     ) -> None:
         self._app = app
         self._server_addr = server_addr
         self._scheme = scheme
         self._credential = credential
         self._timeout = timeout
+        self._policy = policy or []
 
     async def handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -212,7 +214,7 @@ class _Exchange:
             "server": list(self._server_addr),
             "client": list(writer.get_extra_info("peername", ("", 0))[:2]),
         }
-        state = _ResponseState(writer, method, keep_alive)
+        state = _ResponseState(writer, method, keep_alive, self._policy)
         body_sent = False
 
         async def receive() -> dict[str, Any]:
@@ -288,9 +290,15 @@ class _Exchange:
 
 
 class _ResponseState:
-    __slots__ = ("_writer", "chunked", "close", "headers", "method", "started", "status")
+    __slots__ = ("_policy", "_writer", "chunked", "close", "headers", "method", "started", "status")
 
-    def __init__(self, writer: asyncio.StreamWriter, method: str, keep_alive: bool) -> None:
+    def __init__(
+        self,
+        writer: asyncio.StreamWriter,
+        method: str,
+        keep_alive: bool,
+        policy: list[tuple[bytes, bytes]] | None = None,
+    ) -> None:
         self._writer = writer
         self.method = method
         self.close = not keep_alive
@@ -298,6 +306,7 @@ class _ResponseState:
         self.headers: list[tuple[bytes, bytes]] = []
         self.started = False
         self.chunked = False
+        self._policy = policy or []
 
     async def send(self, event: dict[str, Any]) -> None:
         kind = event["type"]
@@ -322,6 +331,9 @@ class _ResponseState:
             reason = ""
         lines = [f"HTTP/1.1 {self.status} {reason}".encode("latin-1")]
         lines += [name + b": " + value for name, value in self.headers]
+        for name, value in self._policy:  # servery security/CORS headers, if app didn't set one
+            if name.lower() not in present:
+                lines.append(name + b": " + value)
         if b"content-length" in present:
             pass
         elif not self.close and self.method != "HEAD":
@@ -345,11 +357,17 @@ async def serve_forever(
     ssl_context = _tls.build_context(config, ["http/1.1"]) if config.uses_tls else None
     scheme = "https" if config.uses_tls else "http"
     credential = auth.parse(config.auth)
+    policy = [
+        (name.encode("latin-1"), value.encode("latin-1"))
+        for name, value in _http1.policy_headers(
+            security_headers=config.security_headers, cors=config.cors, tls=config.uses_tls
+        )
+    ]
     lifespan = _Lifespan(app)
     await lifespan.startup()
     server = await asyncio.start_server(
         lambda r, w: _Exchange(
-            app, server.sockets[0].getsockname()[:2], scheme, credential, config.timeout
+            app, server.sockets[0].getsockname()[:2], scheme, credential, config.timeout, policy
         ).handle_connection(r, w),
         config.host,
         config.port,

@@ -97,6 +97,7 @@ def _relay(
     headers: list[tuple[str, str]],
     response: http.client.HTTPResponse,
 ) -> None:
+    config = handler._server.config
     head, framing = _http1.build_head(
         version=handler.protocol_version,
         status=f"{status} {reason}",
@@ -105,6 +106,11 @@ def _relay(
         keep_alive=not handler.close_connection,
         server=handler.version_string(),
         date=handler.date_time_string(),
+        extra=_http1.policy_headers(
+            security_headers=config.security_headers,
+            cors=config.cors,
+            tls=isinstance(handler.connection, ssl.SSLSocket),
+        ),
     )
     # No upstream Content-Length (it was chunked, which we stripped) -> chunk it
     # ourselves to keep the client connection alive, rather than forcing a close.

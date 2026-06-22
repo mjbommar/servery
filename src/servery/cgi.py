@@ -24,6 +24,7 @@ Security model (RFC 3875 §9 + the well-known CGI CVEs):
 from __future__ import annotations
 
 import os
+import ssl
 import subprocess  # nosec B404 (executing CGI scripts is the whole point of --cgi)
 import sys
 from pathlib import Path
@@ -156,6 +157,7 @@ def _relay(handler: ServeryHandler, output: bytes) -> None:
             out_headers.append((name, value))
         else:
             out_headers.append((name, value))
+    config = handler._server.config
     blob, _ = _http1.build_head(
         version=handler.protocol_version,
         status=status,
@@ -166,6 +168,11 @@ def _relay(handler: ServeryHandler, output: bytes) -> None:
         date=handler.date_time_string(),
         default_content_type="text/plain",
         body_len=len(body),
+        extra=_http1.policy_headers(
+            security_headers=config.security_headers,
+            cors=config.cors,
+            tls=isinstance(handler.connection, ssl.SSLSocket),
+        ),
     )
     handler.wfile.write(blob if handler.command == "HEAD" else blob + body)
     handler.log_request(status.split(" ", 1)[0])

@@ -33,6 +33,23 @@ def chunk(data: bytes) -> bytes:
     return b"%x\r\n%s\r\n" % (len(data), data)
 
 
+def policy_headers(*, security_headers: bool, cors: bool, tls: bool) -> list[tuple[str, str]]:
+    """Transport-level headers servery adds to proxied / app (WSGI/CGI/ASGI) responses.
+
+    The cross-cutting ones only — NOT CSP/Referrer-Policy, which are tuned for
+    servery's own generated HTML; imposing them on an arbitrary app would break
+    the app's own pages.
+    """
+    out: list[tuple[str, str]] = []
+    if security_headers:
+        out.append(("X-Content-Type-Options", "nosniff"))
+        if tls:
+            out.append(("Strict-Transport-Security", "max-age=63072000"))
+    if cors:
+        out.append(("Access-Control-Allow-Origin", "*"))
+    return out
+
+
 class Framing(enum.Enum):
     """How the caller must write/delimit the response body after :func:`build_head`."""
 
@@ -52,6 +69,7 @@ def build_head(
     date: str | None = None,
     default_content_type: str | None = None,
     body_len: int | None = None,
+    extra: list[tuple[str, str]] | None = None,
 ) -> tuple[bytes, Framing]:
     """Build an encoded HTTP/1.1 response head and report how to frame the body.
 
@@ -66,6 +84,10 @@ def build_head(
     present = {name.lower() for name, _ in headers}
     lines = [f"{version} {status}"]
     lines += [f"{name}: {value}" for name, value in headers]
+    for name, value in extra or ():  # servery policy headers — only if the app didn't set one
+        if name.lower() not in present:
+            lines.append(f"{name}: {value}")
+            present.add(name.lower())
     if server is not None and "server" not in present:
         lines.append(f"Server: {server}")
     if date is not None and "date" not in present:

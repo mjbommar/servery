@@ -41,7 +41,10 @@ _COPY_BUFSIZE = 64 * 1024
 _WWW_AUTHENTICATE = 'Basic realm="servery", charset="UTF-8"'
 # CSP for servery-GENERATED pages (listing / error): no scripts, inline styles
 # only, self forms. Served files are NOT given a CSP (it would break real sites).
-_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'"
+_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
+    "form-action 'self'; frame-ancestors 'self'"
+)
 
 
 def _copy_n(source: SupportsRead[bytes], dest: SupportsWrite[bytes], count: int) -> None:

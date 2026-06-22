@@ -21,6 +21,7 @@ import os
 from typing import TYPE_CHECKING
 
 from servery import _log, auth, listing, security
+from servery.handler import _CSP
 
 if TYPE_CHECKING:
     from servery.config import Config
@@ -36,7 +37,14 @@ class Http3UnavailableError(RuntimeError):
 def build_response(
     config: Config, root_real: str, method: str, url_path: str
 ) -> tuple[int, _HeaderList, bytes]:
-    """Resolve a GET/HEAD request to (status, response headers, body)."""
+    """Resolve a GET/HEAD request to (status, response headers, body).
+
+    This is a deliberately reduced backend versus the HTTP/1.1 handler: it enforces
+    auth (in ``_reply``), path-safety, the security headers, CORS, and cache-control,
+    but does NOT yet implement Range/206, conditional/304, SPA fallback, index-file
+    lookup, ``?download``/``?archive``, or streaming (it buffers the whole file).
+    HTTP/3 is an opt-in experimental extra; the full-featured path is HTTP/1.1.
+    """
     if method not in {"GET", "HEAD"}:
         return 405, [(b"allow", b"GET, HEAD")], b"405"
     fs_path = security.safe_join(root_real, url_path)
@@ -46,6 +54,10 @@ def build_response(
     headers: _HeaderList = []
     if config.security_headers:
         headers.append((b"x-content-type-options", b"nosniff"))
+        headers.append((b"strict-transport-security", b"max-age=63072000"))  # HTTP/3 is always TLS
+    if config.cors:
+        headers.append((b"access-control-allow-origin", b"*"))
+    headers.append((b"cache-control", config.cache_control.encode("latin-1")))
     if os.path.isdir(fs_path):  # noqa: PTH112 (os-level by design)
         if not display.endswith("/"):
             return 301, [(b"location", (display + "/").encode("latin-1"))], b""
@@ -53,6 +65,9 @@ def build_response(
             body = listing.render(fs_path, display, show_hidden=config.show_hidden)
         except OSError:
             return 404, [(b"content-type", b"text/plain")], b"404"
+        if config.security_headers:
+            headers.append((b"content-security-policy", _CSP.encode("latin-1")))
+            headers.append((b"referrer-policy", b"no-referrer"))
         headers.append((b"content-type", b"text/html; charset=utf-8"))
         return 200, headers, body
     try:
