@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import ssl
 from http import HTTPStatus
 from typing import Any
 
@@ -130,11 +129,9 @@ class _Exchange:
             while await self._handle_one(reader, writer):
                 pass
         except (
-            ConnectionError,
+            *_tls.CLIENT_TRANSPORT_ERRORS,  # dropped conn / failed TLS handshake / timeout
             asyncio.IncompleteReadError,
             asyncio.LimitOverrunError,
-            TimeoutError,
-            ssl.SSLError,  # failed TLS handshake from a scanning/old client
         ):
             pass
         finally:
@@ -259,7 +256,7 @@ class _Exchange:
         _log.logger.info('%s "WEBSOCKET %s"', client[0], raw_path)
         try:
             await _websocket.serve(reader, writer, scope, self._app, key)
-        except (ConnectionError, asyncio.IncompleteReadError, ssl.SSLError):
+        except (*_tls.CLIENT_TRANSPORT_ERRORS, asyncio.IncompleteReadError):
             pass
         except Exception:
             _log.logger.error('WebSocket app error: "%s"', raw_path, exc_info=True)

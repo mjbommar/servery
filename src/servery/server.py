@@ -10,7 +10,6 @@ from __future__ import annotations
 import contextlib
 import os
 import socket
-import ssl
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -90,7 +89,7 @@ class ServeryHTTPServer(ThreadingHTTPServer):
         # (still visible at DEBUG). Anything else is a real bug: route it through
         # our logger (with traceback) rather than socketserver's raw stderr print.
         exc = sys.exc_info()[1]
-        if isinstance(exc, (ssl.SSLError, ConnectionError, TimeoutError)):
+        if isinstance(exc, _tls.CLIENT_TRANSPORT_ERRORS):
             _log.logger.debug("client transport error from %s: %r", client_address, exc)
             return
         _log.logger.error("unhandled error serving %s", client_address, exc_info=True)

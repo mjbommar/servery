@@ -20,6 +20,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from servery.config import Config
 
+# Client-side transport errors that are noise, not server faults: a failed TLS
+# handshake from a scanner, a dropped connection, an idle timeout. Both servers
+# swallow these (logging at DEBUG) instead of surfacing a traceback.
+CLIENT_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
+    ssl.SSLError,
+    ConnectionError,
+    TimeoutError,
+)
+
 
 def is_wildcard_host(host: str) -> bool:
     """True for a bind-all address (0.0.0.0 / ::) — not a real SAN entry."""
