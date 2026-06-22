@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import email.utils
+import http.cookies
 import http.server
 import io
 import logging
@@ -379,6 +380,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             last_modified = self.date_time_string(stat.st_mtime)
             ctype = self.guess_type(path)
             cache_control = self._server.config.cache_control
+            # ?download=1 forces a save dialog instead of inline rendering.
+            download = "download" in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            disposition = _content_disposition(os.path.basename(path)) if download else None
 
             if self._is_not_modified(etag, stat.st_mtime):
                 self.send_response(HTTPStatus.NOT_MODIFIED)
@@ -411,6 +415,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Accept-Ranges", "bytes")
                 self.send_header("ETag", etag)
                 self.send_header("Last-Modified", last_modified)
+                if disposition is not None:
+                    self.send_header("Content-Disposition", disposition)
                 self.end_headers()
                 f.seek(requested.start)
                 self._body_remaining = requested.length
@@ -424,6 +430,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("ETag", etag)
             self.send_header("Last-Modified", last_modified)
+            if disposition is not None:
+                self.send_header("Content-Disposition", disposition)
             self.end_headers()
             # Pass the exact length so socket.sendfile sends it in one syscall
             # (count=None makes it loop to EOF + fstat for the size).
@@ -504,6 +512,16 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         sort = listing.code_to_sort(params.get("C", ["N"])[0])
         order = "desc" if params.get("O", ["A"])[0] == "D" else "asc"
         query = params.get("q", [""])[0]
+        ext = params.get("ext", [""])[0]
+        try:
+            page = max(1, int(params.get("page", ["1"])[0]))
+        except ValueError:
+            page = 1
+        # Theme: an explicit ?theme= wins and is persisted in a cookie; otherwise
+        # fall back to the cookie, then "auto". No JavaScript involved.
+        theme_param = params.get("theme", [None])[0]
+        set_theme_cookie = theme_param in {"auto", "light", "dark"}
+        theme = theme_param if set_theme_cookie else self._theme_cookie()
         display = urllib.parse.unquote(parts.path, errors="surrogatepass")
         try:
             body = listing.render(
@@ -513,6 +531,10 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 sort=sort,
                 order=order,
                 query=query,
+                ext=ext,
+                page=page,
+                per_page=listing.DEFAULT_PAGE_SIZE,
+                theme=theme,
                 upload=self._server.config.upload,
             )
         except OSError:
@@ -521,8 +543,28 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if set_theme_cookie:
+            # Lax + one-year; the value is one of three literals so it is safe.
+            self.send_header(
+                "Set-Cookie",
+                f"servery_theme={theme}; Path=/; Max-Age=31536000; SameSite=Lax",
+            )
         self.end_headers()
         return io.BytesIO(body)
+
+    def _theme_cookie(self) -> str:
+        """Return the persisted theme from the request cookie, or "auto"."""
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return "auto"
+        try:
+            jar = http.cookies.SimpleCookie(raw)
+        except http.cookies.CookieError:
+            return "auto"
+        morsel = jar.get("servery_theme")
+        if morsel is not None and morsel.value in {"auto", "light", "dark"}:
+            return morsel.value
+        return "auto"
 
     # --- universal response shaping -------------------------------------
 

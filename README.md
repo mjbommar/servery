@@ -23,7 +23,10 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
 ## Features
 
 - **Rich directory listings** — sizes, modified times, directories first, fully escaped; sortable
-  columns (`?C=&O=`, Apache convention) and a `?q=` filter, all server-side with no JavaScript.
+  columns (`?C=&O=`, Apache convention), a `?q=` name filter, a `?ext=` file-type facet, a
+  breadcrumb trail, per-type icons, relative timestamps, inline size bars, an aggregate metrics
+  strip, a pure-SVG modification timeline, per-file download (`?download=1`), pagination, and a
+  cookie-backed light/dark/auto theme — all server-side with **no JavaScript**.
 - **Correct downloads** — RFC 9110 `Range`/`206` (resumable), strong `ETag`s, the full
   conditional-request ladder (`If-None-Match`/`If-Modified-Since`/`If-Range` → `304`/`412`),
   and zero-copy `sendfile`.

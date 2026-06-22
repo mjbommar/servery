@@ -255,6 +255,45 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertIn("hello.txt", body)
 
+    def test_download_query_forces_attachment(self):
+        conn = self._conn()
+        conn.request("GET", "/hello.txt?download=1")
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body, b"hi there")
+        self.assertIn("attachment", resp.getheader("Content-Disposition", ""))
+        self.assertIn("hello.txt", resp.getheader("Content-Disposition", ""))
+
+    def test_no_download_header_without_query(self):
+        conn = self._conn()
+        conn.request("GET", "/hello.txt")
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertIsNone(resp.getheader("Content-Disposition"))
+
+    def test_theme_param_sets_cookie_and_attribute(self):
+        conn = self._conn()
+        conn.request("GET", "/?theme=dark")
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8")
+        cookie = resp.getheader("Set-Cookie", "")
+        conn.close()
+        self.assertIn("servery_theme=dark", cookie)
+        self.assertIn('data-theme="dark"', body)
+
+    def test_theme_cookie_is_honored(self):
+        conn = self._conn()
+        conn.request("GET", "/", headers={"Cookie": "servery_theme=light"})
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8")
+        conn.close()
+        self.assertIn('data-theme="light"', body)
+        # No explicit param this time, so nothing is re-set.
+        self.assertIsNone(resp.getheader("Set-Cookie"))
+
     def test_index_html_is_served(self):
         site = self.dir / "site"
         site.mkdir()

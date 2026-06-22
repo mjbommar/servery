@@ -19,6 +19,34 @@ class HumanSizeTest(unittest.TestCase):
         self.assertEqual(listing._human_size(1048576), "1.0 MiB")
 
 
+class HelperTest(unittest.TestCase):
+    def test_relative_time_tiers(self):
+        now = 1_000_000_000.0
+        rt = listing._relative_time
+        self.assertEqual(rt(now, now), "just now")
+        self.assertEqual(rt(now, now + 5), "just now")  # clamps negative deltas
+        self.assertEqual(rt(now - 120, now), "2m ago")
+        self.assertEqual(rt(now - 7200, now), "2h ago")
+        self.assertEqual(rt(now - 3 * 86400, now), "3d ago")
+        self.assertEqual(rt(now - 21 * 86400, now), "3w ago")
+        self.assertEqual(rt(now - 120 * 86400, now), "4mo ago")
+        self.assertEqual(rt(now - 800 * 86400, now), "2y ago")
+
+    def test_extension(self):
+        self.assertEqual(listing._extension("photo.JPG"), "jpg")
+        self.assertEqual(listing._extension("archive.tar.gz"), "gz")
+        self.assertEqual(listing._extension("Makefile"), "")
+        self.assertEqual(listing._extension(".bashrc"), "")
+
+    def test_category(self):
+        def info(name, is_dir=False):
+            return listing.EntryInfo(name, is_dir, False, 0, 0.0)
+
+        self.assertEqual(listing._category(info("x", is_dir=True)), "dir")
+        self.assertEqual(listing._category(info("a.png")), "image")
+        self.assertEqual(listing._category(info("a.unknownext")), "binary")
+
+
 class RenderTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -104,6 +132,85 @@ class RenderTest(unittest.TestCase):
     def test_missing_directory_raises(self):
         with self.assertRaises(OSError):
             listing.render(str(self.dir / "nope"), "/nope/", show_hidden=False)
+
+    def test_breadcrumb_links_each_segment(self):
+        body = listing.render(str(self.dir), "/foo/bar/", show_hidden=False).decode("utf-8")
+        # Intermediate segment is a link; the current dir is plain text.
+        self.assertIn('<a href="/foo/">foo</a>', body)
+        self.assertIn('<span class="here">bar</span>', body)
+
+    def test_file_type_icon_present(self):
+        body = listing.render(str(self.dir), "/", show_hidden=False).decode("utf-8")
+        self.assertIn('class="icon"', body)
+
+    def test_relative_time_with_exact_title(self):
+        body = listing.render(str(self.dir), "/", show_hidden=False).decode("utf-8")
+        # Visible label is relative; the exact timestamp lives in the title.
+        self.assertRegex(body, r'title="\d{4}-\d{2}-\d{2} \d{2}:\d{2}"')
+        self.assertRegex(body, r"\d+[a-z]+ ago|just now")
+
+    def test_per_file_download_link(self):
+        body = listing.render(str(self.dir), "/", show_hidden=False).decode("utf-8")
+        self.assertIn("alpha.txt?download=1", body)
+        self.assertIn("download ", body)  # the HTML download attribute
+
+    def test_extension_facets_and_filter(self):
+        (self.dir / "a.py").write_text("x")
+        (self.dir / "b.py").write_text("y")
+        body = listing.render(str(self.dir), "/", show_hidden=False).decode("utf-8")
+        self.assertIn("ext=py", body)  # a facet chip exists
+        # Filtering by ext keeps matches + directories, drops non-matches.
+        filtered = listing.render(str(self.dir), "/", show_hidden=False, ext="py").decode("utf-8")
+        self.assertIn("a.py", filtered)
+        self.assertNotIn("alpha.txt", filtered)
+        self.assertIn("subdir/", filtered)  # dirs survive a type filter
+
+    def test_metrics_strip_has_totals(self):
+        body = listing.render(str(self.dir), "/", show_hidden=False).decode("utf-8")
+        self.assertIn('class="metrics"', body)
+        self.assertIn("file(s)", body)
+        self.assertIn("total", body)
+
+    def test_timeline_svg_rendered(self):
+        for i in range(5):
+            (self.dir / f"f{i}.bin").write_bytes(b"x" * i)
+        body = listing.render(str(self.dir), "/", show_hidden=False).decode("utf-8")
+        self.assertIn('class="timeline"', body)
+        self.assertIn("<svg", body)
+        self.assertIn("<rect", body)
+
+    def test_pagination_splits_pages(self):
+        for i in range(25):
+            (self.dir / f"item{i:02d}.dat").write_text("x")
+        page1 = listing.render(str(self.dir), "/", show_hidden=False, per_page=10, page=1).decode(
+            "utf-8"
+        )
+        self.assertIn('class="pager"', page1)
+        self.assertIn("page=2", page1)
+        page3 = listing.render(str(self.dir), "/", show_hidden=False, per_page=10, page=3).decode(
+            "utf-8"
+        )
+        # Page 3 shows the tail and offers no "next".
+        self.assertIn("item24.dat", page3)
+        self.assertNotIn("item00.dat", page3)
+
+    def test_theme_attribute_and_links(self):
+        body = listing.render(str(self.dir), "/", show_hidden=False, theme="dark").decode("utf-8")
+        self.assertIn('data-theme="dark"', body)
+        self.assertIn("theme=light", body)  # the toggle offers other themes
+
+    def test_empty_filter_state(self):
+        body = listing.render(str(self.dir), "/", show_hidden=False, query="zzz-no-match").decode(
+            "utf-8"
+        )
+        self.assertIn("No items match", body)
+        self.assertIn("Clear filters", body)
+
+    def test_no_javascript_in_output(self):
+        body = listing.render(str(self.dir), "/", show_hidden=False, upload=True).decode("utf-8")
+        self.assertNotIn("<script", body.lower())
+        self.assertNotIn("javascript:", body.lower())
+        self.assertNotIn("onclick", body.lower())
 
 
 if __name__ == "__main__":

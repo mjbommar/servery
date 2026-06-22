@@ -4,6 +4,44 @@ All notable changes to servery are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [semantic versioning](https://semver.org/).
 
+## [1.1.0] — 2026-06-22
+
+### Added
+
+- **Directory-listing UI/UX pass** (still zero-dependency, server-side, **no
+  JavaScript**, and safe under the existing strict CSP):
+  - Clickable **breadcrumb** trail in the heading.
+  - Per-type **file icons** and **relative timestamps** ("3h ago", exact time on
+    hover).
+  - Inline **size bars** and an aggregate **metrics strip** (file/dir counts,
+    total size, largest, newest).
+  - **`?ext=` file-type facet** chips alongside the existing `?q=` filter.
+  - Pure-**SVG modification timeline** histogram.
+  - **Per-file download** affordance (`?download=1` forces
+    `Content-Disposition: attachment`).
+  - **Pagination** for large directories (`?page=`, 1000 rows/page).
+  - Cookie-backed **light/dark/auto theme** toggle (`?theme=`).
+  - Friendly **empty / no-match** states, sticky table header, `aria-sort`, and
+    visible focus styles.
+
+### Performance
+
+A second profiling-driven pass (cProfile / strace / timeit, benchmarked
+before/after each change):
+
+- **HTTP/2 HPACK**: Huffman coding is now opt-in on the encoder (raw literals by
+  default — for a file server the CPU it costs outweighs the few header bytes it
+  saves). Also fixed an O(n²) bit accumulator in `huffman_encode`. **+20%** h2
+  throughput.
+- **HTTP/2 framing**: pack the 9-octet frame header in a single `struct` call
+  (was two packs + concatenations, ~4 allocations), byte-for-byte identical.
+  **+9%** h2; combined h2 throughput **+31%** (~11.6k → ~15k req/s, 1-core).
+- **Path containment**: `security.is_contained` uses a separator-anchored prefix
+  test on POSIX (≈15× faster than `os.path.commonpath`, exact-match verified;
+  Windows keeps `commonpath`). Runs on every request. **+3%** small-file.
+- **Listing render**: quote each entry name once (not twice) and cache file-type
+  extension lookups. **+5–6%** render.
+
 ## [1.0.2] — 2026-06-22
 
 A profiling-driven performance pass (cProfile + strace, benchmarked before/after
@@ -110,6 +148,7 @@ First stable release. A zero-dependency, pure-Python HTTP file server.
 - **Free-threading** support (3.13t/3.14t), full type hints (`ty`-checked), and a
   CI gate that enforces zero runtime dependencies in the core wheel.
 
+[1.1.0]: https://github.com/mjbommar/servery/releases/tag/v1.1.0
 [1.0.2]: https://github.com/mjbommar/servery/releases/tag/v1.0.2
 [1.0.1]: https://github.com/mjbommar/servery/releases/tag/v1.0.1
 [1.0.0]: https://github.com/mjbommar/servery/releases/tag/v1.0.0
