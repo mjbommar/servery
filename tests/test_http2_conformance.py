@@ -135,6 +135,35 @@ class Http2ConformanceTest(unittest.TestCase):
             finally:
                 client.close()
 
+    def test_malformed_request_without_method_is_reset(self):
+        # Missing :method is malformed (RFC 9113 §8.3.1) -> RST_STREAM, never 200.
+        with serving(self.cfg) as (host, port):
+            client = _H2Client(host, port)
+            try:
+                block = client.encoder.encode(
+                    [(b":path", b"/f.txt"), (b":scheme", b"http"), (b":authority", b"x")]
+                )
+                flags = Flag.END_HEADERS | Flag.END_STREAM
+                client.request(
+                    1, raw=frames.build_header9(len(block), FrameType.HEADERS, flags, 1) + block
+                )
+                got_reset = False
+                client.sock.settimeout(5)
+                for _ in range(10):
+                    data = client.sock.recv(65536)
+                    if not data:
+                        break
+                    client.reader.feed(data)
+                    if any(
+                        isinstance(f, frames.RstStreamFrame) and f.stream_id == 1
+                        for f in client.reader
+                    ):
+                        got_reset = True
+                        break
+                self.assertTrue(got_reset)
+            finally:
+                client.close()
+
 
 def _make_cert(directory: Path) -> tuple[str, str] | None:
     cert = directory / "cert.pem"
