@@ -2,8 +2,14 @@
 
 servery is a **file server**. This document plans an *optional, opt-in* capability
 to also run dynamic handlers — CGI scripts, WSGI apps, ASGI apps — **using only
-the standard library**, on Python 3.14+. It is a roadmap and design record, not a
-shipped feature.
+the standard library**, on Python 3.14+.
+
+> **Status (shipped, [Unreleased]):** all three phases are implemented and tested.
+> **D1 `--wsgi`** (`servery/wsgi.py`, lean HTTP/1.1 engine, `wsgiref.validate`-gated,
+> ~20k req/s). **D2 `--cgi`** (`servery/cgi.py`, RFC 3875 + the full security suite).
+> **D3 `--asgi`** (`servery/asgi.py`, asyncio "mini-uvicorn", lifespan, ~19k req/s,
+> verified against Starlette). Each is off by default; HTTP/1.1 only. The design
+> notes below are kept as the record and for future work (ASGI TLS/WebSocket).
 
 ## 0. The boundary (read first)
 
