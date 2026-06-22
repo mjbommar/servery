@@ -155,19 +155,21 @@ class _Exchange:
 
     async def _handle_one(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
         try:
-            request_line = await reader.readuntil(b"\r\n")
-        except (asyncio.IncompleteReadError, ConnectionError):
-            return False
+            # Read the whole request head (request line + headers) in one shot:
+            # one readuntil/await beats one await + one buffer scan per header line.
+            head = await reader.readuntil(b"\r\n\r\n")
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError):
+            return False  # clean keep-alive close, EOF, or an over-long head -> close
+        request_line, _, rest = head.partition(b"\r\n")
         fields = request_line.decode("latin-1").split()
         if len(fields) != 3:
             return False  # empty keep-alive probe or malformed line -> close
         method, raw_path, version = fields
         headers: list[tuple[bytes, bytes]] = []
         header_map: dict[bytes, bytes] = {}
-        while True:
-            line = await reader.readuntil(b"\r\n")
-            if line == b"\r\n":
-                break
+        for line in rest.split(b"\r\n"):
+            if not line:
+                continue  # the trailing CRLFCRLF leaves empty fields
             name, _, value = line.partition(b":")
             key, val = name.strip().lower(), value.strip()
             headers.append((key, val))
