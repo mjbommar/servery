@@ -4,6 +4,7 @@ import contextlib
 import email.utils
 import http.client
 import io
+import logging
 import os
 import ssl
 import subprocess
@@ -15,6 +16,7 @@ from pathlib import Path
 
 from servery.config import Config
 from servery.server import make_server, server_url
+from tests._harness import capturing_logs
 
 
 def _multipart_body(boundary: str, filename: str, content: bytes) -> bytes:
@@ -648,6 +650,39 @@ class TlsServerTest(unittest.TestCase):
 
     def test_server_url_is_https(self):
         self.assertTrue(server_url(self.httpd).startswith("https://"))
+
+
+class HandleErrorTest(unittest.TestCase):
+    """ServeryHTTPServer.handle_error routes through our logger by severity."""
+
+    def _server(self):
+        return make_server(Config.create(".", host="127.0.0.1", port=0, quiet=True))
+
+    def test_client_transport_error_is_debug_only(self):
+        srv = self._server()
+        try:
+            with capturing_logs(logging.DEBUG) as cap:
+                try:
+                    raise ConnectionResetError("peer reset")  # noqa: TRY301 (set exc_info)
+                except ConnectionResetError:
+                    srv.handle_error(None, ("1.2.3.4", 5))
+            self.assertFalse(any(r.levelno >= logging.WARNING for r in cap.records), cap.messages())
+            self.assertTrue(any("transport error" in m for m in cap.messages()), cap.messages())
+        finally:
+            srv.server_close()
+
+    def test_unexpected_error_logged_at_error(self):
+        srv = self._server()
+        try:
+            with capturing_logs(logging.ERROR) as cap:
+                try:
+                    raise ValueError("unexpected bug")  # noqa: TRY301 (set exc_info)
+                except ValueError:
+                    srv.handle_error(None, ("1.2.3.4", 5))
+            self.assertTrue(any(r.levelno == logging.ERROR for r in cap.records))
+            self.assertTrue(any("unhandled error" in m for m in cap.messages()), cap.messages())
+        finally:
+            srv.server_close()
 
 
 if __name__ == "__main__":

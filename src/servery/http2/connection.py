@@ -20,7 +20,7 @@ import mimetypes
 import os
 from typing import TYPE_CHECKING
 
-from servery import listing, security
+from servery import _log, listing, security
 from servery.http2 import frames, hpack
 from servery.http2.frames import ErrorCode, Flag, FrameType
 
@@ -76,7 +76,8 @@ class H2Connection:
                     self._handle_frame(frame)
                     if not self.running:
                         break
-        except (OSError, frames.FrameError, hpack.HpackError):
+        except (OSError, frames.FrameError, hpack.HpackError) as exc:
+            _log.logger.debug("HTTP/2 connection error: %r", exc)
             self._goaway(ErrorCode.PROTOCOL_ERROR)
 
     def _read_exact(self, count: int) -> bytes:
@@ -292,6 +293,7 @@ class H2Connection:
         self.sock.sendall(frames.serialize(frames.RstStreamFrame(stream_id, Flag(0), error)))
 
     def _goaway(self, error: int) -> None:
+        _log.logger.debug("HTTP/2 GOAWAY error=%s", error)
         with contextlib.suppress(OSError):
             self.sock.sendall(frames.serialize(frames.GoAwayFrame(0, Flag(0), 0, error, b"")))
         self.running = False

@@ -21,7 +21,7 @@ import os
 import urllib.parse
 from typing import TYPE_CHECKING
 
-from servery import listing, security
+from servery import _log, listing, security
 
 if TYPE_CHECKING:
     from servery.config import Config
@@ -115,6 +115,7 @@ def serve_http3(config: Config) -> None:  # pragma: no cover - requires aioquic 
             method = headers.get(b":method", b"").decode("latin-1")
             path = headers.get(b":path", b"/").decode("latin-1")
             status, response_headers, body = build_response(config, root_real, method, path)
+            _log.logger.info('HTTP/3 "%s %s" %s', method, path, status)
             send_body = body if method != "HEAD" else b""
             self._http.send_headers(
                 stream_id,
@@ -133,4 +134,5 @@ def serve_http3(config: Config) -> None:  # pragma: no cover - requires aioquic 
         )
         await asyncio.Future()
 
+    _log.logger.info("servery: serving HTTP/3 (QUIC) on %s:%s", config.host, config.port)
     asyncio.run(_run())

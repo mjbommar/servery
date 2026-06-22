@@ -85,11 +85,14 @@ class ServeryHTTPServer(ThreadingHTTPServer):
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         # A failed TLS handshake or a dropped connection is a client-side problem,
-        # not a server fault — don't spew a traceback for every old/scanning peer.
+        # not a server fault — don't spew a traceback for every old/scanning peer
+        # (still visible at DEBUG). Anything else is a real bug: route it through
+        # our logger (with traceback) rather than socketserver's raw stderr print.
         exc = sys.exc_info()[1]
         if isinstance(exc, (ssl.SSLError, ConnectionError, TimeoutError)):
+            _log.logger.debug("client transport error from %s: %r", client_address, exc)
             return
-        super().handle_error(request, client_address)
+        _log.logger.error("unhandled error serving %s", client_address, exc_info=True)
 
     def server_close(self) -> None:
         super().server_close()
