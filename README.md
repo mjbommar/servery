@@ -91,6 +91,7 @@ public-internet server.
 | [docs/BEST-PRACTICES.md](docs/BEST-PRACTICES.md) | 2026 stdlib-only implementation best practices |
 | [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | Testable requirements and the CLI surface |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | How it was built, milestone by milestone |
+| [docs/DYNAMIC.md](docs/DYNAMIC.md) | Phased roadmap for opt-in CGI / WSGI / ASGI (stdlib-only) |
 | [docs/REFERENCES.md](docs/REFERENCES.md) | Prior art and stdlib feasibility map |
 
 ## Development
