@@ -297,10 +297,11 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 archive.stream_zip(path, base_name, writer)
             writer.close()
-        except OSError:  # pragma: no cover - client hung up, or a file changed mid-walk
+        except OSError as exc:  # pragma: no cover - client hung up, or file changed mid-walk
             # The chunked body is partly sent and unrecoverable; close the
             # connection so the client gets a definite end-of-message rather than
             # a truncated, terminator-less body.
+            _log.logger.debug("archive stream aborted: %r", exc)
             self.close_connection = True
         return
 

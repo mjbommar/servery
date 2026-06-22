@@ -6,6 +6,28 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+### Observability
+
+- **Unified logging / telemetry / error handling across every transport**
+  (HTTP/1.1, /2, /3, CGI, WSGI, ASGI). The stderr log format now carries a level
+  (`%(levelname)s`) so access lines (INFO) and problems (WARNING/ERROR) are
+  distinguishable and filterable. A consistent vocabulary: **INFO** = access log,
+  **WARNING/ERROR** = a handled-but-notable failure, **DEBUG** = swallowed client
+  noise. Concretely:
+  - **ASGI** gained an access log and, crucially, no longer drops app exceptions
+    silently — an unhandled app error is logged with a traceback and returns a
+    500 (was an unhandled-task traceback with no response). Lifespan that doesn't
+    complete is DEBUG-logged.
+  - **WSGI** app errors now return a 500 + ERROR log (were propagating to the
+    server with no response).
+  - **CGI** failures surface the cause: timeouts (WARNING), exec failures (ERROR),
+    and non-zero exits now log the **script's own stderr** (previously discarded).
+  - **server.handle_error** DEBUG-logs swallowed client transport errors and
+    routes genuinely unexpected errors through the logger (with traceback)
+    instead of socketserver's raw stderr.
+  - **HTTP/2** logs connection errors + GOAWAYs at DEBUG; **HTTP/3** has a per-
+    request access log and a startup banner.
+
 ### Security
 
 - **Hardened the TLS cipher suite** to forward-secret **AEAD only** (TLS 1.2
