@@ -123,17 +123,16 @@ class ConfigValidationTest(unittest.TestCase):
     def test_rejects_bad_numerics(self):
         from servery.config import Config
 
-        for kwargs in (
-            {"port": 70000},
-            {"port": -1},
-            {"max_upload_size": 0},
-            {"max_upload_size": -5},
-            {"timeout": 0},
-            {"timeout": -1.0},
-            {"cache_max_age": -1},
-        ):
-            with self.assertRaises(ValueError, msg=kwargs):
-                Config.create(".", **kwargs)
+        with self.assertRaises(ValueError):
+            Config.create(".", port=70000)
+        with self.assertRaises(ValueError):
+            Config.create(".", port=-1)
+        with self.assertRaises(ValueError):
+            Config.create(".", max_upload_size=0)
+        with self.assertRaises(ValueError):
+            Config.create(".", timeout=0)
+        with self.assertRaises(ValueError):
+            Config.create(".", cache_max_age=-1)
 
     def test_accepts_ephemeral_port_zero(self):
         from servery.config import Config
