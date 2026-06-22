@@ -11,8 +11,9 @@ All notable changes to servery are documented here. The format follows
 - **Directory-listing UI/UX pass** (still zero-dependency, server-side, **no
   JavaScript**, and safe under the existing strict CSP):
   - Clickable **breadcrumb** trail in the heading.
-  - Per-type **file icons** and **relative timestamps** ("3h ago", exact time on
-    hover).
+  - Per-type **file icons** (extension-based, with a stdlib `mimetypes` fallback
+    for long-tail extensions — a pure lookup, no file content is read) and
+    **relative timestamps** ("3h ago", exact time on hover).
   - Inline **size bars** and an aggregate **metrics strip** (file/dir counts,
     total size, largest, newest).
   - **`?ext=` file-type facet** chips alongside the existing `?q=` filter.

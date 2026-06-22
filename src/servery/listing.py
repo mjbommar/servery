@@ -21,6 +21,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import html
+import mimetypes
 import os
 import time
 import urllib.parse
@@ -214,10 +215,65 @@ _CATEGORY_ICON = {
 }
 
 
+# mimetypes top-level -> category, for the long-tail extensions the hand-curated
+# table doesn't list. Pure extension lookups, no file content is ever read.
+_MIME_TOPLEVEL_CATEGORY = {"image": "image", "audio": "audio", "video": "video", "text": "text"}
+
+# application/* subtypes worth a specific icon, matched as a substring so the
+# verbose OOXML / vendor types ("…wordprocessingml.document") resolve too.
+_MIME_APP_CATEGORY = (
+    ("pdf", "pdf"),
+    ("zip", "archive"),
+    ("tar", "archive"),
+    ("gzip", "archive"),
+    ("compress", "archive"),
+    ("x-7z", "archive"),
+    ("x-rar", "archive"),
+    ("x-bzip", "archive"),
+    ("word", "doc"),
+    ("opendocument.text", "doc"),
+    ("powerpoint", "doc"),
+    ("presentation", "doc"),
+    ("excel", "sheet"),
+    ("spreadsheet", "sheet"),
+    ("json", "code"),
+    ("xml", "code"),
+    ("javascript", "code"),
+    ("x-sh", "code"),
+)
+
+
+@functools.lru_cache(maxsize=4096)
+def _ext_to_category(ext: str) -> str:
+    """Map a file extension to a coarse icon/facet category.
+
+    The hand-curated table wins; for the long tail we fall back to the stdlib
+    ``mimetypes`` extension database. Both are pure string lookups — never any
+    file content is read — and the (small) result is cached per extension.
+    """
+    if not ext:
+        return "binary"
+    known = _EXT_CATEGORY.get(ext)
+    if known:
+        return known
+    guessed, _ = mimetypes.guess_type("_." + ext)
+    if not guessed:
+        return "binary"
+    top, _, sub = guessed.partition("/")
+    mapped = _MIME_TOPLEVEL_CATEGORY.get(top)
+    if mapped:
+        return mapped
+    if top == "application":
+        for needle, category in _MIME_APP_CATEGORY:
+            if needle in sub:
+                return category
+    return "binary"
+
+
 def _category(entry: EntryInfo) -> str:
     if entry.is_dir:
         return "dir"
-    return _EXT_CATEGORY.get(_extension(entry.name), "binary")
+    return _ext_to_category(_extension(entry.name))
 
 
 def _scan(fs_dir: str, *, show_hidden: bool) -> list[EntryInfo]:

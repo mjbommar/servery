@@ -46,6 +46,17 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(listing._category(info("a.png")), "image")
         self.assertEqual(listing._category(info("a.unknownext")), "binary")
 
+    def test_category_mimetypes_fallback(self):
+        # Extensions not in the hand-curated table fall back to mimetypes — still
+        # a pure extension lookup, no file content read.
+        self.assertEqual(listing._ext_to_category("docx"), "doc")  # curated
+        self.assertEqual(listing._ext_to_category("tiff"), "image")  # curated
+        # mimetypes-only (absent from _EXT_CATEGORY):
+        self.assertEqual(listing._ext_to_category("mpeg"), "video")
+        self.assertEqual(listing._ext_to_category("aiff"), "audio")
+        self.assertEqual(listing._ext_to_category(""), "binary")
+        self.assertNotIn("mpeg", listing._EXT_CATEGORY)  # guard: truly a fallback
+
 
 class RenderTest(unittest.TestCase):
     def setUp(self):
@@ -81,12 +92,14 @@ class RenderTest(unittest.TestCase):
         )
         self.assertIn('href="../"', sub_body)
 
+    @unittest.skipIf(os.name == "nt", "< > & are illegal in Windows filenames")
     def test_html_escaping(self):
         (self.dir / "a&b<c>.txt").write_text("x")
         body = listing.render(str(self.dir), "/", show_hidden=False).decode("utf-8")
         self.assertIn("a&amp;b&lt;c&gt;", body)
         self.assertNotIn("a&b<c>.txt", body)
 
+    @unittest.skipIf(os.name == "nt", '" is illegal in Windows filenames')
     def test_href_is_percent_encoded_not_raw(self):
         # The href no longer goes through html.escape; quote() must encode every
         # attribute-breaking / XSS character so a hostile name can't escape.

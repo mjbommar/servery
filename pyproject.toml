@@ -46,17 +46,24 @@ http3 = ["aioquic>=1.0"]
 servery = "servery.cli:main"
 
 [dependency-groups]
-# Development / CI tooling only. Isolated from runtime; never published.
-dev = [
-  "ruff>=0.6",
-  "bandit[toml]>=1.7",
+# What the test SUITE needs at run time — kept lean so the free-threaded
+# (3.13t/3.14t) CI jobs install cleanly. The publish tooling below pulls cffi
+# (via twine -> keyring -> cryptography), which has no free-threaded build, so
+# the test jobs use `--only-group test` to avoid it.
+test = [
   "coverage>=7.5",
-  "build>=1.2",
-  "twine>=5.0",
-  "pre-commit>=3.7",
   # Interop-only: an independent client to cross-check the server (HTTP/1.1 + 2).
   # Never a runtime dependency; interop tests skip when it is absent.
   "httpx[http2]>=0.27",
+]
+# Development / CI tooling only. Isolated from runtime; never published.
+dev = [
+  {include-group = "test"},
+  "ruff>=0.6",
+  "bandit[toml]>=1.7",
+  "build>=1.2",
+  "twine>=5.0",
+  "pre-commit>=3.7",
 ]
 # Note: ty (the type checker) is run via `uvx ty` — it is preview-versioned and
 # fast-moving, so we pull the latest ephemerally rather than pinning it here.
