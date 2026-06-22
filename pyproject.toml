@@ -103,7 +103,7 @@ known-first-party = ["servery"]
 # The handler deliberately works at the os.path level: its security model uses an
 # empty-string sentinel for escaped paths, and Path("") resolves to the cwd. It
 # also mirrors the stdlib send_head "close-on-error then re-raise" idiom.
-"src/servery/handler.py" = ["PTH", "TRY300"]
+"src/servery/handler.py" = ["PTH", "TRY300", "TRY301"]
 # The upload module manipulates paths at the os level for filename sanitization
 # (basename) and atomic os.replace; pathlib does not improve safety here.
 "src/servery/upload.py" = ["PTH"]

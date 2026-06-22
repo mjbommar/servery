@@ -26,7 +26,7 @@ import socket
 import ssl
 import urllib.parse
 from http import HTTPStatus
-from typing import TYPE_CHECKING, BinaryIO, cast
+from typing import TYPE_CHECKING, BinaryIO, cast, overload
 
 from servery import __version__, _log, archive, listing, ranges, security, upload
 
@@ -100,6 +100,10 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     index_pages = ("index.html", "index.htm")
     _body_remaining: int | None = None
     _generated_page: bool = False
+    # Our parse_request() populates these (replacing the email-based parser).
+    headers: _RequestHeaders
+    command: str | None  # may be None on a malformed first line
+    raw_requestline: bytes
 
     @property
     def _server(self) -> ServeryHTTPServer:
@@ -131,6 +135,92 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             return cast("io.BufferedReader", self.rfile).peek(24).startswith(b"PRI * HTTP/2.0")
         except (OSError, ValueError):  # pragma: no cover - peek unsupported/closed
             return False
+
+    # --- request parsing -------------------------------------------------
+
+    def parse_request(self) -> bool:
+        """Parse the request line and headers.
+
+        Faithful to the stdlib, but headers go through a fast line-based reader
+        instead of ``http.client.parse_headers`` — the email module spends most
+        of a small request's CPU doing MIME work that HTTP never needs.
+        """
+        self.command = None  # set in case of error on the first line
+        self.request_version = version = self.default_request_version
+        self.close_connection = True
+        requestline = str(self.raw_requestline, "iso-8859-1").rstrip("\r\n")
+        self.requestline = requestline
+        words = requestline.split()
+        if not words:
+            return False
+
+        if len(words) >= 3:  # the version is present
+            version = words[-1]
+            if not self._accept_http_version(version):
+                return False
+            self.request_version = version
+
+        if not 2 <= len(words) <= 3:
+            self.send_error(HTTPStatus.BAD_REQUEST, f"Bad request syntax ({requestline!r})")
+            return False
+        command, path = words[:2]
+        if len(words) == 2:
+            self.close_connection = True
+            if command != "GET":
+                self.send_error(HTTPStatus.BAD_REQUEST, f"Bad HTTP/0.9 request type ({command!r})")
+                return False
+            self.command, self.path, self.headers = command, path, _RequestHeaders([])
+            return True
+        self.command, self.path = command, path
+
+        # gh-87389: collapse a leading "//" so a client can't read the path as an
+        # absolute "//authority" URI (open-redirect protection).
+        if self.path.startswith("//"):
+            self.path = "/" + self.path.lstrip("/")
+
+        try:
+            self.headers = _read_request_headers(self.rfile)
+        except _HeaderError as err:
+            self.send_error(HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE, str(err))
+            return False
+
+        conntype = self.headers.get("Connection", "")
+        if conntype.lower() == "close":
+            self.close_connection = True
+        elif conntype.lower() == "keep-alive" and self.protocol_version >= "HTTP/1.1":
+            self.close_connection = False
+        expect = self.headers.get("Expect", "")
+        if (
+            expect.lower() == "100-continue"
+            and self.protocol_version >= "HTTP/1.1"
+            and self.request_version >= "HTTP/1.1"
+        ):
+            return self.handle_expect_100()
+        return True
+
+    def _accept_http_version(self, version: str) -> bool:
+        """Validate the request version; send an error and return False if bad."""
+        try:
+            if not version.startswith("HTTP/"):
+                raise ValueError
+            base = version.split("/", 1)[1]
+            parts = base.split(".")
+            if (
+                len(parts) != 2
+                or any(not p.isdigit() for p in parts)
+                or any(len(p) > 10 for p in parts)
+            ):
+                raise ValueError
+            number = (int(parts[0]), int(parts[1]))
+        except (ValueError, IndexError):
+            self.send_error(HTTPStatus.BAD_REQUEST, f"Bad request version ({version!r})")
+            return False
+        if number >= (1, 1) and self.protocol_version >= "HTTP/1.1":
+            self.close_connection = False
+        if number >= (2, 0):
+            self.send_error(HTTPStatus.HTTP_VERSION_NOT_SUPPORTED, f"Invalid HTTP version ({base})")
+            return False
+        return True
 
     # --- path safety -----------------------------------------------------
 
@@ -459,6 +549,76 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (base signature)
         # Route through the logging module instead of writing to stderr directly.
         _log.logger.info("%s %s", self.address_string(), format % args)
+
+
+_MAX_HEADER_LINE = 65536  # bytes per line; matches http.client._MAXLINE
+_MAX_HEADER_COUNT = 100  # matches http.client._MAXHEADERS
+
+
+class _HeaderError(Exception):
+    """An over-long header line or too many headers (-> 431)."""
+
+
+class _RequestHeaders:
+    """Minimal case-insensitive request-header map (first occurrence wins).
+
+    A fast stand-in for ``email.message.Message``: the handler only ever calls
+    ``.get()``, and email's MIME parsing is most of a small request's CPU.
+    """
+
+    __slots__ = ("_map", "_pairs")
+
+    def __init__(self, pairs: list[tuple[str, str]]) -> None:
+        self._pairs = pairs
+        mapping: dict[str, str] = {}
+        for name, value in pairs:
+            key = name.lower()
+            if key not in mapping:  # first wins, matching email.Message.get
+                mapping[key] = value
+        self._map = mapping
+
+    @overload
+    def get(self, name: str) -> str | None: ...
+    @overload
+    def get(self, name: str, default: str) -> str: ...
+    def get(self, name: str, default: str | None = None) -> str | None:
+        return self._map.get(name.lower(), default)
+
+    def __getitem__(self, name: str) -> str | None:  # email.Message returns None, not KeyError
+        return self._map.get(name.lower())
+
+    def __contains__(self, name: object) -> bool:
+        return isinstance(name, str) and name.lower() in self._map
+
+    def items(self) -> list[tuple[str, str]]:
+        return list(self._pairs)
+
+
+def _read_request_headers(rfile: io.BufferedIOBase) -> _RequestHeaders:
+    """Read the header block as ``(name, value)`` pairs (RFC 9112 §5).
+
+    Enforces the same line/count limits as ``http.client``. ``obs-fold``
+    continuations are folded into a single space (RFC 9112 §5.2).
+    """
+    pairs: list[tuple[str, str]] = []
+    while True:
+        line = rfile.readline(_MAX_HEADER_LINE + 1)
+        if len(line) > _MAX_HEADER_LINE:
+            raise _HeaderError("Header line too long")
+        if line in (b"\r\n", b"\n", b""):
+            break
+        if line[:1] in (b" ", b"\t"):  # obs-fold continuation
+            if pairs:
+                name, value = pairs[-1]
+                pairs[-1] = (name, f"{value} {line.strip().decode('latin-1')}")
+            continue
+        if len(pairs) >= _MAX_HEADER_COUNT:
+            raise _HeaderError("Too many headers")
+        name, sep, value = line.partition(b":")
+        if not sep:
+            continue  # a line without a colon is not a header field; ignore it
+        pairs.append((name.decode("latin-1").strip(), value.strip().decode("latin-1")))
+    return _RequestHeaders(pairs)
 
 
 def _make_etag(stat: os.stat_result) -> str:
