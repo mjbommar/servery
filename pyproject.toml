@@ -4,7 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "servery"
-version = "1.1.0"
+# Version is single-sourced from src/servery/_version.py (see [tool.hatch.version]).
+dynamic = ["version"]
 description = "Zero-dependency, batteries-included pure-Python HTTP file server."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -22,6 +23,7 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: Free Threading",
   "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
   "Typing :: Typed",
 ]
@@ -36,6 +38,7 @@ dependencies = []
 Homepage = "https://github.com/mjbommar/servery"
 Repository = "https://github.com/mjbommar/servery"
 Issues = "https://github.com/mjbommar/servery/issues"
+Changelog = "https://github.com/mjbommar/servery/blob/main/CHANGELOG.md"
 
 # Optional protocol tier. The CORE stays zero-dependency; HTTP/3 (QUIC) needs
 # crypto the stdlib lacks, so it is opt-in via the reference QUIC stack.
@@ -67,6 +70,9 @@ dev = [
 ]
 # Note: ty (the type checker) is run via `uvx ty` — it is preview-versioned and
 # fast-moving, so we pull the latest ephemerally rather than pinning it here.
+
+[tool.hatch.version]
+path = "src/servery/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/servery"]
