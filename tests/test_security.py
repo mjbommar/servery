@@ -73,7 +73,7 @@ class ContainmentTest(unittest.TestCase):
         # traversal can never escape the root
         self.assertEqual(
             security.safe_join(self.root_real, "/../../../etc/passwd"),
-            os.path.join(self.root_real, "etc", "passwd"),  # contained, just doesn't exist
+            str(Path(self.root_real, "etc", "passwd")),  # contained, just doesn't exist
         )
 
 
