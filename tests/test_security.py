@@ -37,6 +37,13 @@ class ContainmentTest(unittest.TestCase):
         # commonpath raises ValueError for a relative/absolute mix -> fail closed.
         self.assertFalse(security.is_contained("relative-root", "/etc/passwd"))
 
+    @unittest.skipUnless(os.name == "posix", "POSIX filesystem-root semantics")
+    def test_filesystem_root_contains_everything(self):
+        # Serving "/" (root_real == os.sep): the separator-strip must still match
+        # every absolute descendant (and the root itself).
+        self.assertTrue(security.is_contained("/", "/etc/passwd"))
+        self.assertTrue(security.is_contained("/", "/"))
+
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
     def test_symlink_escape_is_rejected(self):
         link = self.root / "escape"
