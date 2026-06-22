@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import unittest
 from pathlib import Path
 
 from servery import wsgi
 from servery.config import Config
-from tests._harness import body_of, raw_exchange, serving, status_of
+from tests._harness import body_of, capturing_logs, raw_exchange, serving, status_of
 
 try:
     import httpx
@@ -159,6 +160,29 @@ class MaterializedTest(unittest.TestCase):
                 b"content-length: 17", resp.split(b"\r\n\r\n", 1)[0].lower()
             )  # HEAD body len
             self.assertEqual(body_of(resp), b"")
+
+
+class WSGITelemetryTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cfg = Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            wsgi_app="tests._wsgiapp:crashing",
+        )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_app_error_returns_500_and_is_logged(self):
+        with capturing_logs(logging.ERROR) as cap, serving(self.cfg) as (host, port):
+            resp = raw_exchange(
+                host, port, b"GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            )
+        self.assertEqual(status_of(resp), 500)
+        self.assertTrue(any("WSGI app error" in m for m in cap.messages()), cap.messages())
 
 
 if __name__ == "__main__":

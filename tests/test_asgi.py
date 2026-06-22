@@ -7,45 +7,13 @@ import contextlib
 import logging
 import socket
 import threading
-import time
 import unittest
 from collections.abc import Iterator
 from typing import Any
 
-from servery import _log, asgi
+from servery import asgi
 from servery.config import Config
-
-
-class _Capture(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__()
-        self.records: list[logging.LogRecord] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.records.append(record)
-
-
-@contextlib.contextmanager
-def capturing_logs(level: int = logging.DEBUG) -> Iterator[_Capture]:
-    cap = _Capture()
-    previous = _log.logger.level
-    _log.logger.addHandler(cap)
-    _log.logger.setLevel(level)
-    try:
-        yield cap
-    finally:
-        _log.logger.removeHandler(cap)
-        _log.logger.setLevel(previous)
-
-
-def _wait_for(predicate: Any, timeout: float = 2.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.02)
-    return False
-
+from tests._harness import capturing_logs, wait_for
 
 try:
     import httpx
@@ -185,7 +153,7 @@ class ASGITelemetryTest(unittest.TestCase):
                 resp = client.get(f"http://{host}:{port}/x")
             self.assertEqual(resp.status_code, 500)
             self.assertTrue(
-                _wait_for(lambda: any(r.levelno == logging.ERROR for r in cap.records)),
+                wait_for(lambda: any(r.levelno == logging.ERROR for r in cap.records)),
                 "expected an ERROR log for the app crash",
             )
             self.assertTrue(any("ASGI app error" in r.getMessage() for r in cap.records))
@@ -201,7 +169,7 @@ class ASGITelemetryTest(unittest.TestCase):
             with httpx.Client() as client:
                 client.get(f"http://{host}:{port}/hello?q=1")
             self.assertTrue(
-                _wait_for(lambda: any('"GET /hello?q=1' in r.getMessage() for r in cap.records)),
+                wait_for(lambda: any('"GET /hello?q=1' in r.getMessage() for r in cap.records)),
                 "expected an INFO access-log line",
             )
 

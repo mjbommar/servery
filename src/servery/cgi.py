@@ -29,7 +29,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-from servery import security
+from servery import _log, security
 from servery.handler import ServeryHandler
 
 # RFC 3875 §9.2 + httpoxy: request headers that must never become CGI meta-vars.
@@ -116,14 +116,22 @@ def run(handler: ServeryHandler) -> None:
             check=False,
         )
     except subprocess.TimeoutExpired:
+        _log.logger.warning("CGI script %s timed out after %ss", script, _TIMEOUT)
         handler.send_error(504, "CGI script timed out")
         return
-    except OSError:
+    except OSError as exc:
+        _log.logger.error("CGI script %s could not be executed: %s", script, exc)
         handler.send_error(502, "CGI script could not be executed")
         return
-    if proc.returncode != 0 and not proc.stdout:
-        handler.send_error(502, "CGI script error")
-        return
+    if proc.returncode != 0:
+        # Surface the script's own diagnostics — the usual reason a CGI 500s.
+        stderr = proc.stderr.decode("utf-8", "replace").strip()
+        _log.logger.warning(
+            "CGI script %s exited %s%s", script, proc.returncode, f": {stderr}" if stderr else ""
+        )
+        if not proc.stdout:
+            handler.send_error(502, "CGI script error")
+            return
     _relay(handler, proc.stdout)
 
 

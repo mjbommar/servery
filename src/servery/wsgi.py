@@ -13,6 +13,7 @@ slow reference server.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import io
 import ssl
@@ -20,7 +21,14 @@ import sys
 import urllib.parse
 from typing import Any
 
+from servery import _log
 from servery.handler import ServeryHandler, _ChunkedWriter
+
+_INTERNAL_ERROR = (
+    b"HTTP/1.1 500 Internal Server Error\r\n"
+    b"Content-Type: text/plain\r\nContent-Length: 21\r\nConnection: close\r\n\r\n"
+    b"Internal Server Error"
+)
 
 
 def load_app(spec: str) -> Any:
@@ -139,9 +147,9 @@ class _Exchange:
 
     def _header_lines(self) -> tuple[list[str], set[str]]:
         h = self._handler
-        assert self._status is not None
+        status = self._status or ""  # always set by start_response before we get here
         present = {name.lower() for name, _ in self._headers}
-        lines = [f"{h.protocol_version} {self._status}"]
+        lines = [f"{h.protocol_version} {status}"]
         lines += [f"{name}: {value}" for name, value in self._headers]
         if "server" not in present:
             lines.append(f"Server: {h.version_string()}")
@@ -183,23 +191,34 @@ class _Exchange:
             self._writer.write(data)
 
     def run(self) -> None:
-        result = self._app(build_environ(self._handler), self._start_response)
+        h = self._handler
         try:
-            if isinstance(result, (list, tuple)):
-                self._send_materialized(b"".join(result))
-            else:  # a generator / streaming iterable
-                for data in result:
-                    if data:
-                        self._write(data)
-                if self._writer is None:
-                    self._write(b"")  # commit headers for an empty body
-                if self._chunked:
-                    self._writer.close()
-        finally:
-            close = getattr(result, "close", None)
-            if close is not None:
-                close()
-        self._handler.log_request(self._status.split(" ", 1)[0] if self._status else "-")
+            result = self._app(build_environ(h), self._start_response)
+            try:
+                if isinstance(result, (list, tuple)):
+                    self._send_materialized(b"".join(result))
+                else:  # a generator / streaming iterable
+                    for data in result:
+                        if data:
+                            self._write(data)
+                    if self._writer is None:
+                        self._write(b"")  # commit headers for an empty body
+                    if self._chunked:
+                        self._writer.close()
+            finally:
+                close = getattr(result, "close", None)
+                if close is not None:
+                    close()
+        except Exception:
+            # The app (or its iterator) raised. Log with traceback; send a 500 if
+            # nothing was committed yet, otherwise just close the connection.
+            _log.logger.error('WSGI app error: "%s %s"', h.command, h.path, exc_info=True)
+            if self._writer is None:
+                with contextlib.suppress(OSError):
+                    h.wfile.write(_INTERNAL_ERROR)
+            h.close_connection = True
+            return
+        h.log_request(self._status.split(" ", 1)[0] if self._status else "-")
 
 
 class WSGIHandler(ServeryHandler):

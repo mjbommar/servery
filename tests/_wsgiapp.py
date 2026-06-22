@@ -29,6 +29,11 @@ def _streaming(environ: dict[str, Any], start_response: Any) -> list[bytes]:
     return [b"chunk1", b"chunk2", b"chunk3"]
 
 
+def crashing(environ: dict[str, Any], start_response: Any) -> list[bytes]:
+    # Raises before committing a response -> the engine must 500 + log.
+    raise RuntimeError("wsgi boom")
+
+
 def plain_list(environ: dict[str, Any], start_response: Any) -> list[bytes]:
     # Raw (un-wrapped) app returning a materialized list WITHOUT Content-Length;
     # exercises the engine's coalesced one-write + Content-Length fast path.

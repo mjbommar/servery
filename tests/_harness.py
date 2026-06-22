@@ -6,12 +6,53 @@ Not collected by ``unittest discover`` (no ``test_`` prefix).
 from __future__ import annotations
 
 import contextlib
+import logging
 import socket
 import threading
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 
+from servery import _log
 from servery.config import Config
 from servery.server import make_server
+
+
+class LogCapture(logging.Handler):
+    """Collect servery log records for assertions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+    def messages(self) -> list[str]:
+        return [r.getMessage() for r in self.records]
+
+
+@contextlib.contextmanager
+def capturing_logs(level: int = logging.DEBUG) -> Iterator[LogCapture]:
+    """Attach a capturing handler to servery's logger for the duration."""
+    cap = LogCapture()
+    previous = _log.logger.level
+    _log.logger.addHandler(cap)
+    _log.logger.setLevel(level)
+    try:
+        yield cap
+    finally:
+        _log.logger.removeHandler(cap)
+        _log.logger.setLevel(previous)
+
+
+def wait_for(predicate: Callable[[], object], timeout: float = 2.0) -> bool:
+    """Poll ``predicate`` until true or ``timeout`` elapses (for cross-thread logs)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
 
 
 @contextlib.contextmanager
