@@ -1,0 +1,52 @@
+name: Publish to PyPI
+
+# Publishes on a version tag (vX.Y.Z), or manually via the Actions tab. Uses
+# PyPI Trusted Publishing (OIDC): no API token is ever stored — the publish job
+# mints a short-lived token scoped to this repo + the `pypi` environment.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & verify distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      # No build cache in the publish path: a poisoned cache could taint the
+      # released artifacts (zizmor cache-poisoning). Releases build clean.
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          enable-cache: false
+      - run: uv build
+      - name: Enforce zero runtime dependencies
+        run: uv run python scripts/check_zero_deps.py
+      - name: Validate distribution metadata
+        run: uvx twine check dist/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI (Trusted Publishing)
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/servery
+    permissions:
+      id-token: write # OIDC token for Trusted Publishing — the only privilege needed
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d # v1.14.0
