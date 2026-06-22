@@ -4,6 +4,28 @@ All notable changes to servery are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [semantic versioning](https://semver.org/).
 
+## [1.1.1] — 2026-06-22
+
+First release published to PyPI.
+
+### Fixed
+
+- **Directory listing on touch devices**: the per-file download button was
+  hover-only (invisible/untappable on phones); it is now shown via
+  `@media (hover: none)`, which also enlarges the facet chips, theme toggle, and
+  pager to finger-sized tap targets. Long filenames get `overflow-wrap` so they
+  can't force horizontal scroll on a narrow screen.
+
+### Changed
+
+- **Publishing**: releases go to PyPI via GitHub Actions **Trusted Publishing**
+  (OIDC) — no API token is stored anywhere.
+- **Packaging**: the version is single-sourced from `servery/_version.py`; added
+  the `Changelog` project URL and the `Programming Language :: Python :: Free
+  Threading` classifier.
+- **CI/dev**: bumped `actions/checkout` (v7), `astral-sh/setup-uv`,
+  `gitleaks-action`, and the `bandit` floor (`>=1.9.4`).
+
 ## [1.1.0] — 2026-06-22
 
 ### Added
@@ -149,6 +171,7 @@ First stable release. A zero-dependency, pure-Python HTTP file server.
 - **Free-threading** support (3.13t/3.14t), full type hints (`ty`-checked), and a
   CI gate that enforces zero runtime dependencies in the core wheel.
 
+[1.1.1]: https://github.com/mjbommar/servery/releases/tag/v1.1.1
 [1.1.0]: https://github.com/mjbommar/servery/releases/tag/v1.1.0
 [1.0.2]: https://github.com/mjbommar/servery/releases/tag/v1.0.2
 [1.0.1]: https://github.com/mjbommar/servery/releases/tag/v1.0.1
