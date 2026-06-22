@@ -184,6 +184,17 @@ def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (C
     """Run the server until interrupted. Blocks the calling thread."""
     if not config.quiet:
         _log.configure_stderr()
+    if config.asgi_app:  # ASGI runs its own asyncio event loop, not the threading server
+        from servery import asgi
+
+        if not config.quiet:
+            print(
+                f"servery: serving ASGI app {config.asgi_app} at "
+                f"http://{config.host}:{config.port}/ (experimental)",
+                file=sys.stderr,
+            )
+        asgi.run(config)
+        return
     with make_server(config) as httpd:
         if not config.quiet:
             print(f"servery: serving {config.directory} at {server_url(httpd)}", file=sys.stderr)

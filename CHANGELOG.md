@@ -30,6 +30,13 @@ All notable changes to servery are documented here. The format follows
   tested: **httpoxy** (`Proxy`→`HTTP_PROXY` never set), no `Authorization`
   forwarding (RFC 3875 §9.2), `..` traversal cannot escape the cgi dir. Inherent
   process-per-request cost (~spawn-bound).
+- **`--asgi module:app`** (opt-in, experimental, HTTP only): host an ASGI 3.0
+  application — phase D3 of `docs/DYNAMIC.md`. A small self-contained asyncio
+  HTTP/1.1 server ("mini-uvicorn" in pure stdlib): the HTTP scope with keep-alive
+  + Content-Length/chunked framing, plus the lifespan protocol (degrades
+  gracefully if the app doesn't support it). ~19k req/s single-core; verified to
+  run a real **Starlette** app (request + full startup/shutdown lifespan).
+  HTTP/1.1 only; TLS not yet supported (rejected alongside `--http2`/TLS).
 - **`--tls-self-signed`**: zero-dependency HTTPS with an ad-hoc certificate
   generated at startup (pure-stdlib RSA-2048 via `servery._certgen` — no
   `cryptography`, no `openssl` binary, no `ctypes`; works on a bare Windows/Linux

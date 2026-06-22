@@ -42,6 +42,7 @@ class Config:
     http2: bool = False
     wsgi_app: str | None = None  # "module:callable" — opt-in dynamic handler
     cgi_dir: str | None = None  # cgi-bin directory — opt-in dynamic handler
+    asgi_app: str | None = None  # "module:callable" — opt-in async dynamic handler
 
     @property
     def cache_control(self) -> str:
@@ -100,15 +101,22 @@ class Config:
         http2: bool = False,
         wsgi_app: str | None = None,
         cgi_dir: str | None = None,
+        asgi_app: str | None = None,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
         if tls_self_signed and tls_cert is not None:
             raise ValueError("--tls-self-signed cannot be combined with --tls-cert")
-        dynamic = [name for name, value in (("--wsgi", wsgi_app), ("--cgi", cgi_dir)) if value]
+        dynamic = [
+            name
+            for name, value in (("--wsgi", wsgi_app), ("--cgi", cgi_dir), ("--asgi", asgi_app))
+            if value
+        ]
         if len(dynamic) > 1:
             raise ValueError(f"choose only one dynamic handler: {' / '.join(dynamic)}")
         if dynamic and http2:
             raise ValueError(f"{dynamic[0]} is HTTP/1.1 only and cannot be combined with --http2")
+        if asgi_app and (tls_cert is not None or tls_self_signed):
+            raise ValueError("--asgi does not support TLS yet (HTTP only)")
         return cls(
             directory=Path(directory).resolve(),
             host=host,
@@ -132,4 +140,5 @@ class Config:
             http2=http2,
             wsgi_app=wsgi_app,
             cgi_dir=cgi_dir,
+            asgi_app=asgi_app,
         )
