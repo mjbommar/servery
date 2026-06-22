@@ -12,9 +12,9 @@ user-controlled value, so it is safe under a strict Content-Security-Policy.
 from __future__ import annotations
 
 import dataclasses
-import datetime
 import html
 import os
+import time
 import urllib.parse
 from collections.abc import Callable
 from typing import Any
@@ -54,8 +54,10 @@ def _human_size(num: int) -> str:
 
 
 def _format_mtime(ts: float) -> str:
-    # Local time, for human display only.
-    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    # Local time, human display only. time.localtime + manual formatting avoids
+    # both strftime's format-string parsing and a datetime allocation per entry.
+    tm = time.localtime(ts)
+    return f"{tm.tm_year:04d}-{tm.tm_mon:02d}-{tm.tm_mday:02d} {tm.tm_hour:02d}:{tm.tm_min:02d}"
 
 
 def _scan(fs_dir: str, *, show_hidden: bool) -> list[EntryInfo]:
@@ -133,6 +135,9 @@ def _sort_link(label: str, code: str, sort: str, order: str, query: str) -> str:
 
 def _row(entry: EntryInfo) -> str:
     display = entry.name + "/" if entry.is_dir else entry.name
+    # quote() percent-encodes every HTML-special character (< > & " '), so the
+    # resulting href is already safe to drop into the attribute — escaping it
+    # again is a no-op (and html.escape was a hot spot in the listing path).
     href = urllib.parse.quote(entry.name + ("/" if entry.is_dir else ""), errors="surrogatepass")
     name_cell = html.escape(display)
     if entry.is_symlink:
@@ -140,7 +145,7 @@ def _row(entry: EntryInfo) -> str:
     size_cell = "—" if entry.size is None else _human_size(entry.size)
     mtime_cell = "" if entry.mtime is None else _format_mtime(entry.mtime)
     return (
-        f'<tr><td class="name"><a href="{html.escape(href, quote=True)}">{name_cell}</a></td>'
+        f'<tr><td class="name"><a href="{href}">{name_cell}</a></td>'
         f'<td class="size">{size_cell}</td><td class="mtime">{mtime_cell}</td></tr>'
     )
 

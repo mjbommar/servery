@@ -59,6 +59,18 @@ class RenderTest(unittest.TestCase):
         self.assertIn("a&amp;b&lt;c&gt;", body)
         self.assertNotIn("a&b<c>.txt", body)
 
+    def test_href_is_percent_encoded_not_raw(self):
+        # The href no longer goes through html.escape; quote() must encode every
+        # attribute-breaking / XSS character so a hostile name can't escape.
+        (self.dir / 'x" onmouseover=alert(1).txt').write_text("x")
+        body = listing.render(str(self.dir), "/", show_hidden=False).decode("utf-8")
+        self.assertNotIn('" onmouseover=', body)  # the raw attribute breakout
+        self.assertIn("%22%20onmouseover", body)  # encoded instead
+
+    def test_mtime_format(self):
+        body = listing.render(str(self.dir), "/", show_hidden=False).decode("utf-8")
+        self.assertRegex(body, r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
+
     def test_sortable_headers_present(self):
         body = listing.render(str(self.dir), "/", show_hidden=False).decode("utf-8")
         self.assertIn("C=N", body)
