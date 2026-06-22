@@ -26,7 +26,6 @@ from __future__ import annotations
 import os
 import subprocess  # nosec B404 (executing CGI scripts is the whole point of --cgi)
 import sys
-import urllib.parse
 from pathlib import Path
 
 from servery import _log, security
@@ -44,8 +43,7 @@ def resolve_script(cgi_root: str, url_path: str) -> tuple[str, str] | None:
     Returns the longest leading path that is a contained, regular file, with the
     remainder as the (un-encoded) PATH_INFO. ``None`` if no script matches.
     """
-    decoded = urllib.parse.unquote(url_path.split("?", 1)[0], errors="surrogatepass")
-    parts = [p for p in decoded.split("/") if p and p not in (".", "..")]
+    parts = security.safe_segments(url_path)
     for i in range(len(parts), 0, -1):
         candidate = os.path.join(cgi_root, *parts[:i])
         if os.path.isfile(candidate) and security.is_contained(cgi_root, candidate):

@@ -59,6 +59,23 @@ class ContainmentTest(unittest.TestCase):
         self.assertEqual(security.contained_path(self.root, str(target)), str(target))
         self.assertIsNone(security.contained_path(self.root, "/etc/passwd"))
 
+    def test_safe_segments_strips_traversal_query_fragment(self):
+        self.assertEqual(security.safe_segments("/a/b/c.txt?x=1#f"), ["a", "b", "c.txt"])
+        self.assertEqual(security.safe_segments("/../../etc/passwd"), ["etc", "passwd"])
+        self.assertEqual(security.safe_segments("/a/./b/"), ["a", "b"])
+        self.assertEqual(security.safe_segments("/a%2Fb"), ["a", "b"])  # %2F decodes then splits
+
+    def test_safe_join_contains_and_rejects(self):
+        target = self.root / "sub" / "f.txt"
+        target.parent.mkdir()
+        target.write_text("z")
+        self.assertEqual(security.safe_join(self.root_real, "/sub/f.txt"), str(target))
+        # traversal can never escape the root
+        self.assertEqual(
+            security.safe_join(self.root_real, "/../../../etc/passwd"),
+            os.path.join(self.root_real, "etc", "passwd"),  # contained, just doesn't exist
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

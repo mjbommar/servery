@@ -13,9 +13,26 @@ absent, so callers return 404 (never 403) and never leak whether a path exists.
 from __future__ import annotations
 
 import os
+import urllib.parse
 from pathlib import Path
 
 _POSIX = os.name == "posix"
+
+
+def safe_segments(url_path: str) -> list[str]:
+    """Decode a URL path into safe filesystem segments.
+
+    Drops the query/fragment, percent-decodes, and removes empty, ``.`` and ``..``
+    segments — so a join under any root can never traverse above it.
+    """
+    path = url_path.split("?", 1)[0].split("#", 1)[0]
+    return [seg for seg in urllib.parse.unquote(path).split("/") if seg and seg not in (".", "..")]
+
+
+def safe_join(root_real: str, url_path: str) -> str | None:
+    """Resolve ``url_path`` to a contained filesystem path under ``root_real``, else ``None``."""
+    candidate = os.path.join(root_real, *safe_segments(url_path))  # noqa: PTH118 (os-level by design)
+    return candidate if is_contained(root_real, candidate) else None
 
 
 def is_contained(root_real: str, candidate: str) -> bool:

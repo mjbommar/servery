@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import mimetypes
 import os
-import urllib.parse
 from typing import TYPE_CHECKING
 
 from servery import _log, listing, security
@@ -34,22 +33,13 @@ class Http3UnavailableError(RuntimeError):
     """The optional aioquic dependency is not installed."""
 
 
-def safe_fs_path(directory: str, root_real: str, url_path: str) -> str | None:
-    """Map a URL path to a contained filesystem path, or None if it escapes."""
-    path = url_path.split("?", 1)[0].split("#", 1)[0]
-    path = urllib.parse.unquote(path)
-    parts = [part for part in path.split("/") if part and part not in {".", ".."}]
-    candidate = os.path.join(directory, *parts)  # noqa: PTH118 (os-level by design)
-    return candidate if security.is_contained(root_real, candidate) else None
-
-
 def build_response(
     config: Config, root_real: str, method: str, url_path: str
 ) -> tuple[int, _HeaderList, bytes]:
     """Resolve a GET/HEAD request to (status, response headers, body)."""
     if method not in {"GET", "HEAD"}:
         return 405, [(b"allow", b"GET, HEAD")], b"405"
-    fs_path = safe_fs_path(str(config.directory), root_real, url_path)
+    fs_path = security.safe_join(root_real, url_path)
     if fs_path is None:
         return 404, [(b"content-type", b"text/plain")], b"404"
     display = url_path.split("?", 1)[0].split("#", 1)[0]
