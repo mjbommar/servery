@@ -57,6 +57,26 @@ A measured pass over the async/parallel paths (server out-of-process, async
 
 ### Added
 
+- **`--profile NAME`**: launch presets that bundle common flags (a defaults layer
+  — explicit flags still win). `share`/`inbox`/`public-readonly`/`public-readwrite`
+  /`cdn`/`dev`/`app`/`local`. Network-exposed + writable profiles (`inbox`,
+  `public-readwrite`) *require* `--auth`, so an open writable public server can't
+  be a one-flag accident; TLS profiles default to self-signed (a `--tls-cert`
+  upgrades to a real cert).
+- **ASGI over TLS** and **ASGI WebSockets**: `--asgi` is no longer HTTP-only.
+  HTTPS works via the shared cert machinery (`servery/_tls.py`, now used by both
+  servers). WebSockets are implemented from RFC 6455 in pure stdlib
+  (`servery/_websocket.py` — handshake, masked frames, fragmentation, ping/pong/
+  close); a real **Starlette WebSocket endpoint** runs unmodified (and over `wss`).
+- **`--upload-extract`** (requires `--upload`): securely expand an uploaded
+  zip/tar into the target dir. Hardened against the classic archive CVEs —
+  zip-slip/traversal (realpath containment), symlink/hardlink/device entries
+  (skipped, never created), and zip bombs (uncompressed-size + entry-count caps
+  enforced on bytes written). `servery/_extract.py`.
+- **`--proxy PREFIX=UPSTREAM`** (repeatable): reverse-proxy matching requests to a
+  backend and stream the response back — serve static files and proxy `/api` from
+  one process. Strips hop-by-hop headers, injects `X-Forwarded-For/-Proto/-Host`,
+  bounds the proxied body, 502 on upstream failure. `servery/_proxy.py`.
 - **`--wsgi module:app`** (opt-in, off by default): host a WSGI (PEP 3333)
   application instead of files — phase D1 of `docs/DYNAMIC.md`. A lean,
   zero-dependency HTTP/1.1 engine (keep-alive; one write + `Content-Length` for
@@ -78,8 +98,8 @@ A measured pass over the async/parallel paths (server out-of-process, async
   run a real **Starlette** app (request + full startup/shutdown lifespan), and a
   full **FastAPI** app over HTTP — pydantic validation (422), streaming responses,
   redirects, exception→500, chunked request bodies, `/docs` and `/openapi.json`
-  (12/12 feature checks). HTTP/1.1 only; TLS not yet supported (rejected alongside
-  `--http2`/TLS). WebSocket is not implemented.
+  (12/12 feature checks). Now also supports **TLS/HTTPS** (shared cert machinery)
+  and **WebSockets** (see below). HTTP/1.1, single event loop.
 - **`--tls-self-signed`**: zero-dependency HTTPS with an ad-hoc certificate
   generated at startup (pure-stdlib RSA-2048 via `servery._certgen` — no
   `cryptography`, no `openssl` binary, no `ctypes`; works on a bare Windows/Linux
