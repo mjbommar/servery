@@ -196,15 +196,21 @@ def _save_part(stream: _Stream, marker: bytes, dest_dir: str, name: str, *, over
     return written
 
 
-def _maybe_extract(name: str, dest_dir: str, written: int, *, overwrite: bool) -> SavedFile:
+def _maybe_extract(
+    name: str, dest_dir: str, written: int, *, overwrite: bool, max_upload_size: int
+) -> SavedFile:
     """If ``name`` is an archive, expand it into ``dest_dir`` and remove the archive."""
     from servery import _extract
 
     if not _extract.is_archive(name):
         return SavedFile(name, written)
     final = os.path.join(dest_dir, name)
+    # Bound expansion proportionally to the (compressed) upload so a tiny archive
+    # can't explode (zip bomb), with the upload limit as a floor for legitimate
+    # compression and the absolute MAX_TOTAL as the ceiling.
+    cap = min(_extract.MAX_TOTAL, max(max_upload_size, 100 * written))
     try:
-        names = _extract.extract(final, dest_dir, allow_overwrite=overwrite)
+        names = _extract.extract(final, dest_dir, allow_overwrite=overwrite, max_total=cap)
     except _extract.ExtractError as exc:
         with contextlib.suppress(OSError):
             os.unlink(final)
@@ -221,11 +227,13 @@ def save(
     *,
     allow_overwrite: bool = False,
     extract: bool = False,
+    max_upload_size: int = 100 * 1024 * 1024,
 ) -> list[SavedFile]:
     """Parse a multipart body and write its file parts into ``dest_dir``.
 
     With ``extract=True``, an uploaded archive (zip/tar) is securely expanded into
-    ``dest_dir`` (see :mod:`servery._extract`) and the archive itself removed.
+    ``dest_dir`` (see :mod:`servery._extract`) and the archive itself removed;
+    ``max_upload_size`` floors the bomb-guard cap on the expanded size.
     """
     stream = _Stream(reader)
     delimiter = b"--" + boundary
@@ -246,7 +254,15 @@ def save(
                 raise UploadError("unsafe upload filename")
             written = _save_part(stream, marker, dest_dir, name, overwrite=allow_overwrite)
             if extract:
-                saved.append(_maybe_extract(name, dest_dir, written, overwrite=allow_overwrite))
+                saved.append(
+                    _maybe_extract(
+                        name,
+                        dest_dir,
+                        written,
+                        overwrite=allow_overwrite,
+                        max_upload_size=max_upload_size,
+                    )
+                )
             else:
                 saved.append(SavedFile(name, written))
         else:

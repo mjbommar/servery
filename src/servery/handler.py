@@ -397,6 +397,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 dest_dir,
                 allow_overwrite=config.allow_overwrite,
                 extract=config.upload_extract,
+                max_upload_size=config.max_upload_size,
             )
         except upload.UploadConflictError:
             self.send_error(HTTPStatus.CONFLICT, "A file with that name already exists")
@@ -440,7 +441,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 range_header = None
             requested = ranges.parse(range_header, size)
 
-            if isinstance(requested, ranges._Unsatisfiable):
+            if requested is ranges.UNSATISFIABLE:
                 self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
                 self.send_header("Content-Range", f"bytes */{size}")
                 self.send_header("Content-Length", "0")

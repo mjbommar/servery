@@ -23,7 +23,7 @@ from typing import IO
 from servery import security
 
 _CHUNK = 64 * 1024
-_MAX_TOTAL: int = 1024**3  # 1 GiB uncompressed, total
+MAX_TOTAL: int = 1024**3  # 1 GiB uncompressed, total (absolute ceiling)
 _MAX_ENTRIES: int = 10_000
 
 _ARCHIVE_SUFFIXES = (
@@ -55,7 +55,7 @@ def _resolve(dest_real: str, dest_dir: str, name: str) -> str:
     return target
 
 
-def _write(src: IO[bytes], target: str, total: int) -> int:
+def _write(src: IO[bytes], target: str, total: int, max_total: int) -> int:
     """Stream ``src`` to ``target``; return the running uncompressed total."""
     os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, "wb") as dst:
@@ -64,23 +64,31 @@ def _write(src: IO[bytes], target: str, total: int) -> int:
             if not chunk:
                 break
             total += len(chunk)
-            if total > _MAX_TOTAL:
+            if total > max_total:
                 raise ExtractError("archive expands beyond the size limit (possible zip bomb)")
             dst.write(chunk)
     return total
 
 
-def extract(archive_path: str, dest_dir: str, *, allow_overwrite: bool = False) -> list[str]:
+def extract(
+    archive_path: str, dest_dir: str, *, allow_overwrite: bool = False, max_total: int = MAX_TOTAL
+) -> list[str]:
     """Securely extract ``archive_path`` into ``dest_dir``; return extracted names."""
     dest_real = os.path.realpath(dest_dir)
     if zipfile.is_zipfile(archive_path):
-        return _extract_zip(archive_path, dest_dir, dest_real, overwrite=allow_overwrite)
+        return _extract_zip(
+            archive_path, dest_dir, dest_real, overwrite=allow_overwrite, max_total=max_total
+        )
     if tarfile.is_tarfile(archive_path):
-        return _extract_tar(archive_path, dest_dir, dest_real, overwrite=allow_overwrite)
+        return _extract_tar(
+            archive_path, dest_dir, dest_real, overwrite=allow_overwrite, max_total=max_total
+        )
     raise ExtractError("not a supported archive (zip or tar)")
 
 
-def _extract_zip(path: str, dest_dir: str, dest_real: str, *, overwrite: bool) -> list[str]:
+def _extract_zip(
+    path: str, dest_dir: str, dest_real: str, *, overwrite: bool, max_total: int
+) -> list[str]:
     extracted: list[str] = []
     total = 0
     with zipfile.ZipFile(path) as zf:
@@ -95,12 +103,14 @@ def _extract_zip(path: str, dest_dir: str, dest_real: str, *, overwrite: bool) -
             if not overwrite and os.path.exists(target):
                 raise ExtractError(f"refusing to overwrite {info.filename!r}")
             with zf.open(info) as src:  # open() below never creates a symlink
-                total = _write(src, target, total)
+                total = _write(src, target, total, max_total)
             extracted.append(info.filename)
     return extracted
 
 
-def _extract_tar(path: str, dest_dir: str, dest_real: str, *, overwrite: bool) -> list[str]:
+def _extract_tar(
+    path: str, dest_dir: str, dest_real: str, *, overwrite: bool, max_total: int
+) -> list[str]:
     extracted: list[str] = []
     total = 0
     with tarfile.open(path) as tf:  # members validated below; no extractall
@@ -121,6 +131,6 @@ def _extract_tar(path: str, dest_dir: str, dest_real: str, *, overwrite: bool) -
             src = tf.extractfile(member)
             if src is None:
                 continue
-            total = _write(src, target, total)
+            total = _write(src, target, total, max_total)
             extracted.append(member.name)
     return extracted

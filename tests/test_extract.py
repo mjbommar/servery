@@ -61,14 +61,15 @@ class ExtractZipTest(unittest.TestCase):
             _extract.extract(archive, self.dest)
 
     def test_zip_bomb_size_cap(self):
+        # The expanded-size cap is a parameter (no global monkeypatching).
         archive = self._write_archive(_zip_bytes({"big.txt": b"x" * 5000}))
-        original = _extract._MAX_TOTAL
-        _extract._MAX_TOTAL = 1000  # type: ignore[misc]
-        try:
-            with self.assertRaises(_extract.ExtractError):
-                _extract.extract(archive, self.dest)
-        finally:
-            _extract._MAX_TOTAL = original  # type: ignore[misc]
+        with self.assertRaises(_extract.ExtractError):
+            _extract.extract(archive, self.dest, max_total=1000)
+        # And succeeds under a generous cap (overwriting the partial from above).
+        self.assertEqual(
+            _extract.extract(archive, self.dest, max_total=10_000, allow_overwrite=True),
+            ["big.txt"],
+        )
 
 
 class ExtractTarTest(unittest.TestCase):
