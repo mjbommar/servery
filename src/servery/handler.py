@@ -328,7 +328,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("ETag", etag)
             self.send_header("Last-Modified", last_modified)
             self.end_headers()
-            self._body_remaining = None
+            # Pass the exact length so socket.sendfile sends it in one syscall
+            # (count=None makes it loop to EOF + fstat for the size).
+            self._body_remaining = size
             return f
         except BaseException:
             f.close()
