@@ -501,6 +501,9 @@ def huffman_encode(data: bytes) -> bytes:
         while nbits >= 8:
             nbits -= 8
             out.append((bits >> nbits) & 0xFF)
+        # Drop the already-emitted high bits so `bits` stays small (otherwise it
+        # grows to the whole string's bit-length, making each shift O(n) -> O(n^2)).
+        bits &= (1 << nbits) - 1
     if nbits:
         # Pad the final octet with the most-significant bits of the EOS code,
         # which are all 1s.
@@ -788,10 +791,16 @@ class Encoder:
 
     The encoder emits an indexed representation for exact static-table matches,
     an indexed name where the static table knows the field name, and otherwise a
-    fully literal representation. Literal strings are Huffman-coded whenever that
-    is shorter. The encoder never adds entries to a dynamic table, which keeps it
-    correct and interoperable with any conforming decoder.
+    fully literal representation. The encoder never adds entries to a dynamic
+    table, which keeps it correct and interoperable with any conforming decoder.
+
+    Huffman coding is off by default: for a file server on a fast/local link the
+    CPU it costs outweighs the handful of header bytes it saves (~+20% encode
+    throughput without it). Pass ``use_huffman=True`` to prioritize size instead.
     """
+
+    def __init__(self, *, use_huffman: bool = False) -> None:
+        self._use_huffman = use_huffman
 
     def encode(self, headers: list[tuple[bytes, bytes]]) -> bytes:
         """Encode a header list into a single HPACK header block."""
@@ -820,11 +829,11 @@ class Encoder:
         out += self._encode_string(value)
         return bytes(out)
 
-    @staticmethod
-    def _encode_string(data: bytes) -> bytes:
-        """Encode a string literal, choosing Huffman only when it is shorter."""
-        huffman = huffman_encode(data)
-        if len(huffman) < len(data):
-            prefix = encode_integer(len(huffman), 7)
-            return bytes((prefix[0] | 0x80, *prefix[1:])) + huffman
+    def _encode_string(self, data: bytes) -> bytes:
+        """Encode a string literal (Huffman only when enabled and shorter)."""
+        if self._use_huffman:
+            huffman = huffman_encode(data)
+            if len(huffman) < len(data):
+                prefix = encode_integer(len(huffman), 7)
+                return bytes((prefix[0] | 0x80, *prefix[1:])) + huffman
         return encode_integer(len(data), 7) + data

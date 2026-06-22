@@ -534,13 +534,16 @@ class EncoderTests(unittest.TestCase):
         block = encoder.encode(headers)
         self.assertEqual(decoder.decode(block), headers)
 
-    def test_encoder_uses_huffman_when_shorter(self) -> None:
-        encoder = Encoder()
-        decoder = Decoder()
-        # A long compressible value should round-trip and be shorter than raw.
+    def test_huffman_is_opt_in(self) -> None:
+        # Default encoder emits raw literals (faster); use_huffman=True compresses.
+        # Both must round-trip through a conforming decoder.
         value = b"www.example.com" * 4
-        block = encoder.encode([(b"x-host", value)])
-        self.assertEqual(decoder.decode(block), [(b"x-host", value)])
+        headers = [(b"x-host", value)]
+        raw = Encoder().encode(headers)
+        huff = Encoder(use_huffman=True).encode(headers)
+        self.assertLess(len(huff), len(raw))
+        self.assertEqual(Decoder().decode(raw), headers)
+        self.assertEqual(Decoder().decode(huff), headers)
 
     def test_static_table_shape(self) -> None:
         self.assertEqual(len(STATIC_TABLE), 61)
