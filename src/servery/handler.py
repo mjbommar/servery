@@ -117,6 +117,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     _vary_accept_encoding: bool = False  # emit Vary: Accept-Encoding (compressible resource)
     _access_status: int | str = "-"  # captured per response for the access log
     _access_size: int | str = "-"
+    _capture_len: bool = False  # set per response: is an access log configured?
     _version_string_cache: ClassVar[str | None] = None  # the Server header is constant
     # Our parse_request() populates these (replacing the email-based parser).
     headers: _RequestHeaders
@@ -794,10 +795,13 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     def send_response_only(self, code: int, message: str | None = None) -> None:
         self._access_status = code  # captured for the access log (size set in send_header)
         self._access_size = "-"
+        # Resolve "is an access log configured?" once per response, not per header.
+        self._capture_len = self._server.access_log is not None
         super().send_response_only(code, message)
 
     def send_header(self, keyword: str, value: str) -> None:
-        if keyword.lower() == "content-length":
+        # Only pay the per-header check when an access log will consume the size.
+        if self._capture_len and keyword.lower() == "content-length":
             self._access_size = value
         super().send_header(keyword, value)
 
