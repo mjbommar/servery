@@ -206,6 +206,14 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
     def _accept_http_version(self, version: str) -> bool:
         """Validate the request version; send an error and return False if bad."""
+        # Fast path for the only two versions a real HTTP/1.x client sends, so the
+        # hot path skips the split/isdigit/int parsing below.
+        if version == "HTTP/1.1":
+            if self.protocol_version >= "HTTP/1.1":
+                self.close_connection = False
+            return True
+        if version == "HTTP/1.0":
+            return True
         try:
             if not version.startswith("HTTP/"):
                 raise ValueError
@@ -432,8 +440,12 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             last_modified = self.date_time_string(stat.st_mtime)
             ctype = self.guess_type(path)
             cache_control = self._server.config.cache_control
-            # ?download=1 forces a save dialog instead of inline rendering.
-            download = "download" in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            # ?download=1 forces a save dialog instead of inline rendering. The
+            # substring pre-check skips urlsplit+parse_qs (the common case has no
+            # query at all); "download" not in the path => it can't be a query key.
+            download = "download" in self.path and "download" in urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query
+            )
             disposition = _content_disposition(os.path.basename(path)) if download else None
 
             if self._is_not_modified(etag, stat.st_mtime):
