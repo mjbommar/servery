@@ -16,12 +16,10 @@ plausible future work but a large separate effort.
 
 from __future__ import annotations
 
-import mimetypes
 import os
 from typing import TYPE_CHECKING
 
-from servery import _compress, _log, auth, listing, security
-from servery.handler import _CSP
+from servery import _log, _response, auth, security
 
 if TYPE_CHECKING:
     from servery.config import Config
@@ -34,24 +32,6 @@ class Http3UnavailableError(RuntimeError):
     """The optional aioquic dependency is not installed."""
 
 
-def _finalize(
-    config: Config, headers: _HeaderList, ctype: str, body: bytes, accept_encoding: str
-) -> tuple[int, _HeaderList, bytes]:
-    """Append content-type/length, gzip when accepted, Vary on compressibles."""
-    if _compress.compressible(ctype):
-        headers.append((b"vary", b"accept-encoding"))
-        if (
-            config.compress
-            and _compress.GZIP_MIN <= len(body) <= _compress.GZIP_MAX
-            and _compress.accepts_gzip(accept_encoding)
-        ):
-            body = _compress.gzip_bytes(body)
-            headers.append((b"content-encoding", b"gzip"))
-    headers.append((b"content-type", ctype.encode("latin-1")))
-    headers.append((b"content-length", str(len(body)).encode("ascii")))
-    return 200, headers, body
-
-
 def build_response(
     config: Config, root_real: str, method: str, url_path: str, accept_encoding: str = ""
 ) -> tuple[int, _HeaderList, bytes]:
@@ -62,40 +42,17 @@ def build_response(
     but does NOT yet implement Range/206, conditional/304, SPA fallback, index-file
     lookup, ``?download``/``?archive``, or streaming (it buffers the whole file).
     HTTP/3 is an opt-in experimental extra; the full-featured path is HTTP/1.1.
+
+    The dir-or-file body building + the content-coding/security headers are shared
+    with HTTP/2 via :mod:`servery._response`, so the decisions can't drift.
     """
     if method not in {"GET", "HEAD"}:
         return 405, [(b"allow", b"GET, HEAD")], b"405"
     fs_path = security.safe_join(root_real, url_path)
-    if fs_path is None:
-        return 404, [(b"content-type", b"text/plain")], b"404"
     display = url_path.split("?", 1)[0].split("#", 1)[0]
-    headers: _HeaderList = []
-    if config.security_headers:
-        headers.append((b"x-content-type-options", b"nosniff"))
-        headers.append((b"strict-transport-security", b"max-age=63072000"))  # HTTP/3 is always TLS
-    if config.cors:
-        headers.append((b"access-control-allow-origin", b"*"))
-    headers.append((b"cache-control", config.cache_control.encode("latin-1")))
-    if os.path.isdir(fs_path):  # noqa: PTH112 (os-level by design)
-        if not display.endswith("/"):
-            return 301, [(b"location", (display + "/").encode("latin-1"))], b""
-        try:
-            body = listing.render(
-                fs_path, display, show_hidden=config.show_hidden, per_page=listing.DEFAULT_PAGE_SIZE
-            )
-        except OSError:
-            return 404, [(b"content-type", b"text/plain")], b"404"
-        if config.security_headers:
-            headers.append((b"content-security-policy", _CSP.encode("latin-1")))
-            headers.append((b"referrer-policy", b"no-referrer"))
-        return _finalize(config, headers, "text/html; charset=utf-8", body, accept_encoding)
-    try:
-        with open(fs_path, "rb") as handle:  # noqa: PTH123 (os-level by design)
-            body = handle.read()
-    except OSError:
-        return 404, [(b"content-type", b"text/plain")], b"404"
-    ctype = mimetypes.guess_file_type(fs_path)[0] or "application/octet-stream"
-    return _finalize(config, headers, ctype, body, accept_encoding)
+    # safe_join returns None for an escaping path; build_static maps "" to a 404.
+    # HTTP/3 is always TLS, so HSTS always applies.
+    return _response.build_static(config, fs_path or "", display, accept_encoding, tls=True)
 
 
 def serve_http3(config: Config) -> None:  # pragma: no cover - requires aioquic + UDP

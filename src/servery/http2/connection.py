@@ -16,13 +16,10 @@ HTTP/2 path yet; the HTTP/1.1 handler remains the full-featured path.
 from __future__ import annotations
 
 import contextlib
-import mimetypes
-import os
 import ssl
 from typing import TYPE_CHECKING
 
-from servery import _compress, _log, listing
-from servery.handler import _CSP
+from servery import _log, _response
 from servery.http2 import frames, hpack
 from servery.http2.frames import ErrorCode, Flag, FrameType
 
@@ -194,68 +191,17 @@ class H2Connection:
         header = regular.get(b"authorization")
         return header is not None and credential.check_header(header.decode("latin-1"))
 
-    def _finalize(
-        self, headers: _HeaderList, ctype: str, body: bytes, accept_encoding: str
-    ) -> tuple[int, _HeaderList, bytes]:
-        """Append content-type/length, gzip when accepted, Vary on compressibles."""
-        if _compress.compressible(ctype):
-            headers.append((b"vary", b"accept-encoding"))
-            if (
-                self.config.compress
-                and _compress.GZIP_MIN <= len(body) <= _compress.GZIP_MAX
-                and _compress.accepts_gzip(accept_encoding)
-            ):
-                body = _compress.gzip_bytes(body)
-                headers.append((b"content-encoding", b"gzip"))
-        headers.append((b"content-type", ctype.encode("latin-1")))
-        headers.append((b"content-length", str(len(body)).encode("ascii")))
-        return 200, headers, body
-
     def _build_response(
         self, url_path: str, accept_encoding: str = ""
     ) -> tuple[int, _HeaderList, bytes]:
+        # translate_path() already ran the symlink-safe containment check and
+        # returned "" for anything escaping the root (build_static maps that to a
+        # 404) — re-checking would do a second realpath() on every file request.
         fs_path = self.handler.translate_path(url_path)
         display = url_path.split("?", 1)[0].split("#", 1)[0]
-        headers: _HeaderList = []
-        if self.config.security_headers:
-            headers.append((b"x-content-type-options", b"nosniff"))
-            if isinstance(self.handler.connection, ssl.SSLSocket):  # h2 may also be h2c cleartext
-                headers.append((b"strict-transport-security", b"max-age=63072000"))
-        if self.config.cors:
-            headers.append((b"access-control-allow-origin", b"*"))
-        headers.append((b"cache-control", self.config.cache_control.encode("latin-1")))
-
-        if os.path.isdir(fs_path):
-            if not display.endswith("/"):
-                return 301, [(b"location", (display + "/").encode("latin-1"))], b""
-            try:
-                body = listing.render(
-                    fs_path,
-                    display,
-                    show_hidden=self.config.show_hidden,
-                    per_page=listing.DEFAULT_PAGE_SIZE,
-                )
-            except OSError:
-                return self._error(404)
-            if self.config.security_headers:
-                # The full CSP (style-src etc.) — "default-src 'none'" alone blocked
-                # the listing's own inline styles, rendering it unstyled.
-                headers.append((b"content-security-policy", _CSP.encode("latin-1")))
-                headers.append((b"referrer-policy", b"no-referrer"))
-            return self._finalize(headers, "text/html; charset=utf-8", body, accept_encoding)
-
-        # translate_path() already ran the symlink-safe containment check and
-        # returned "" for anything escaping the root — re-checking here would do a
-        # second realpath() (the priciest non-I/O op) on every file request.
-        if not fs_path:
-            return self._error(404)
-        try:
-            with open(fs_path, "rb") as handle:
-                body = handle.read()
-        except OSError:
-            return self._error(404)
-        ctype = mimetypes.guess_file_type(fs_path)[0] or "application/octet-stream"
-        return self._finalize(headers, ctype, body, accept_encoding)
+        # h2 may be cleartext (h2c); only assert HSTS over a real TLS socket.
+        tls = isinstance(self.handler.connection, ssl.SSLSocket)
+        return _response.build_static(self.config, fs_path, display, accept_encoding, tls=tls)
 
     @staticmethod
     def _error(status: int) -> tuple[int, _HeaderList, bytes]:
