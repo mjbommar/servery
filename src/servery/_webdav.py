@@ -21,7 +21,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING
 
-from servery import security
+from servery import _response, security
 from servery._conditional import make_etag
 
 if TYPE_CHECKING:
@@ -91,7 +91,7 @@ def _prop_response(href: str, fs_path: str) -> ET.Element:
         ET.SubElement(resourcetype, _q("collection"))
     else:
         ET.SubElement(prop, _q("getcontentlength")).text = str(stat.st_size)
-        ET.SubElement(prop, _q("getcontenttype")).text = "application/octet-stream"
+        ET.SubElement(prop, _q("getcontenttype")).text = _response.guess_type(fs_path)
         ET.SubElement(prop, _q("getetag")).text = make_etag(stat)
     ET.SubElement(prop, _q("displayname")).text = os.path.basename(href.rstrip("/")) or "/"
     ET.SubElement(prop, _q("getlastmodified")).text = _http_date(stat.st_mtime)

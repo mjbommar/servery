@@ -60,6 +60,7 @@ class DavMethodTest(_DavCase):
         self.assertIn(b"hello.txt", body)
         self.assertIn(b"collection", body)  # the root resourcetype
         self.assertIn(b"getlastmodified", body)
+        self.assertIn(b"text/plain", body)  # real MIME type, not a hardcoded octet-stream
 
     def test_propfind_infinity_is_bounded(self):
         status, _, body = self._req("PROPFIND", "/", headers={"Depth": "infinity"})
