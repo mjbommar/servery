@@ -332,15 +332,8 @@ def generate(text: str, mask: int | None = None) -> list[list[int]]:
     _place_data(base_mod, fn, codewords)
 
     masks = [mask] if mask is not None else range(8)
-    best: list[list[int]] | None = None
-    best_score = -1
-    for m in masks:
-        solid = _render_mask(base_mod, fn, version, m)
-        score = _penalty(solid)
-        if best is None or score < best_score:
-            best, best_score = solid, score
-    assert best is not None
-    return best
+    candidates = [_render_mask(base_mod, fn, version, m) for m in masks]
+    return min(candidates, key=_penalty)  # lowest-penalty mask wins (or the forced one)
 
 
 def render(matrix: list[list[int]], quiet: int = 2) -> str:
