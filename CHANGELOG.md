@@ -6,6 +6,8 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-23
+
 ### Added
 
 - **HTTP/2 and HTTP/3 now send `ETag` + `Last-Modified` and honor conditional
@@ -60,6 +62,23 @@ All notable changes to servery are documented here. The format follows
   (jpeg/png/mp4/zip/woff2/…) is never touched, preserving the zero-copy `sendfile`
   fast path. Applied across HTTP/1.1, HTTP/2, and HTTP/3. Typical directory listing
   compresses ~18×.
+
+### Performance
+
+- Directory listings are ~15–20% faster across every transport (escape each entry
+  name once, cache the modified-time formatting by minute, `EntryInfo` as a
+  `NamedTuple`, and a fast-path for URL-quoting all-safe filenames).
+- HTTP/2 frame parsing avoids the slow `IntFlag` machinery on the hot path
+  (`frame_parse_data` ~−40%), and a single per-second–cached timestamp→HTTP-date
+  formatter is now shared by the handler, the buffered backends, and WebDAV.
+
+### Changed
+
+- The HTTP/2 and HTTP/3 backends now share a single response builder
+  (`servery._response`) and a single conditional/validator module
+  (`servery._conditional`) with the HTTP/1.1 handler, so the gzip decision, security
+  headers, `WWW-Authenticate` realm, and ETag/conditional semantics have one source
+  of truth and cannot drift between transports. No user-visible behavior change.
 
 ## [1.2.0] - 2026-06-23
 
@@ -392,6 +411,7 @@ First stable release. A zero-dependency, pure-Python HTTP file server.
 - **Free-threading** support (3.13t/3.14t), full type hints (`ty`-checked), and a
   CI gate that enforces zero runtime dependencies in the core wheel.
 
+[1.3.0]: https://github.com/mjbommar/servery/releases/tag/v1.3.0
 [1.2.0]: https://github.com/mjbommar/servery/releases/tag/v1.2.0
 [1.1.1]: https://github.com/mjbommar/servery/releases/tag/v1.1.1
 [1.1.0]: https://github.com/mjbommar/servery/releases/tag/v1.1.0
