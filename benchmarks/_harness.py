@@ -77,3 +77,49 @@ def client_get(
         return conn.getresponse().read()
 
     return conn, do
+
+
+def httpx_get(
+    url: str, *, http2: bool = False, http1: bool = True, verify: bool = True
+) -> tuple[object, Callable[[], bytes]]:
+    """Return a persistent httpx.Client and a closure doing one GET → body bytes.
+
+    Used for the TLS / HTTP-2 cases stdlib http.client can't speak. ``verify=False``
+    trusts servery's ad-hoc self-signed cert; ``http2=True, http1=False`` forces
+    h2c prior-knowledge on a cleartext URL.
+    """
+    import httpx
+
+    client = httpx.Client(http2=http2, http1=http1, verify=verify, timeout=30)
+
+    def do() -> bytes:
+        return client.get(url).content
+
+    return client, do
+
+
+@contextlib.contextmanager
+def upstream_server(body: bytes = b"upstream-ok") -> Iterator[int]:
+    """A minimal HTTP/1.1 upstream for the reverse-proxy benchmark; yield its port."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _Upstream(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            return  # silence per-request logging
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield int(srv.server_address[1])
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
