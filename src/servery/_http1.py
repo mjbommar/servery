@@ -8,7 +8,27 @@ implementations cannot drift (and bugs are fixed once).
 
 from __future__ import annotations
 
+import email.utils
 import enum
+import time
+
+# The Date header is emitted on every response but only changes once a second, so
+# format it at most once per second and share it across all connections and
+# protocols (the classic server trick). One-slot list of (second, formatted): the
+# element swap is atomic, so the free-threaded read/write needs no lock; a Date up
+# to ~1 s stale is within HTTP's tolerance.
+_DATE_CACHE: list[tuple[int, str]] = [(0, "")]
+
+
+def http_date() -> str:
+    """The current time as an RFC 7231 IMF-fixdate string, cached per second."""
+    now = int(time.time())
+    second, formatted = _DATE_CACHE[0]
+    if now != second:
+        formatted = email.utils.formatdate(now, usegmt=True)
+        _DATE_CACHE[0] = (now, formatted)
+    return formatted
+
 
 # A ready-to-send 500 used when an app errors before committing a response.
 INTERNAL_ERROR: bytes = (

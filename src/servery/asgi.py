@@ -20,9 +20,10 @@ import logging
 from http import HTTPStatus
 from typing import Any
 
-from servery import _appspec, _http1, _log, _tls, _websocket, auth
+from servery import __version__, _appspec, _http1, _log, _tls, _websocket, auth
 
 _MAX_BODY = 100 * 1024 * 1024
+_SERVER_HEADER = f"Server: servery/{__version__}".encode("latin-1")
 
 
 def load_app(spec: str) -> Any:
@@ -334,6 +335,10 @@ class _ResponseState:
         for name, value in self._policy:  # servery security/CORS headers, if app didn't set one
             if name.lower() not in present:
                 lines.append(name + b": " + value)
+        if b"date" not in present:  # origin servers MUST send Date (RFC 7231 §7.1.1.2)
+            lines.append(b"Date: " + _http1.http_date().encode("latin-1"))
+        if b"server" not in present:
+            lines.append(_SERVER_HEADER)
         if b"content-length" in present:
             pass
         elif not self.close and self.method != "HEAD":

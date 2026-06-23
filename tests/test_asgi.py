@@ -248,6 +248,19 @@ class WebSocketWireTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
+class ASGIHeadersTest(unittest.TestCase):
+    def test_date_and_server_headers_present(self):
+        # An origin server MUST send Date (RFC 7231 §7.1.1.2); add Server for parity
+        # with the threading handler. Both come from the shared per-second cache.
+        from servery import __version__
+
+        with serving_asgi("tests._asgiapp:echo") as (host, port), httpx.Client() as c:
+            r = c.get(f"http://{host}:{port}/x")
+            self.assertIn("date", r.headers)
+            self.assertEqual(r.headers.get("server"), f"servery/{__version__}")
+
+
+@unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
 class ASGIAuthTest(unittest.TestCase):
     def test_auth_is_enforced(self):
         with serving_asgi("tests._asgiapp:echo", auth="u:p") as (host, port), httpx.Client() as c:
