@@ -21,7 +21,7 @@ import os
 import ssl
 from typing import TYPE_CHECKING
 
-from servery import _log, listing
+from servery import _compress, _log, listing
 from servery.handler import _CSP
 from servery.http2 import frames, hpack
 from servery.http2.frames import ErrorCode, Flag, FrameType
@@ -183,7 +183,8 @@ class H2Connection:
             self._respond(stream_id, 405, [(b"allow", b"GET, HEAD")], b"")
             return
 
-        status, headers_out, body = self._build_response(path)
+        accept_encoding = regular.get(b"accept-encoding", b"").decode("latin-1")
+        status, headers_out, body = self._build_response(path, accept_encoding)
         self._respond(stream_id, status, headers_out, body if method == "GET" else None)
 
     def _authorized(self, regular: dict[bytes, bytes]) -> bool:
@@ -193,7 +194,26 @@ class H2Connection:
         header = regular.get(b"authorization")
         return header is not None and credential.check_header(header.decode("latin-1"))
 
-    def _build_response(self, url_path: str) -> tuple[int, _HeaderList, bytes]:
+    def _finalize(
+        self, headers: _HeaderList, ctype: str, body: bytes, accept_encoding: str
+    ) -> tuple[int, _HeaderList, bytes]:
+        """Append content-type/length, gzip when accepted, Vary on compressibles."""
+        if _compress.compressible(ctype):
+            headers.append((b"vary", b"accept-encoding"))
+            if (
+                self.config.compress
+                and _compress.GZIP_MIN <= len(body) <= _compress.GZIP_MAX
+                and _compress.accepts_gzip(accept_encoding)
+            ):
+                body = _compress.gzip_bytes(body)
+                headers.append((b"content-encoding", b"gzip"))
+        headers.append((b"content-type", ctype.encode("latin-1")))
+        headers.append((b"content-length", str(len(body)).encode("ascii")))
+        return 200, headers, body
+
+    def _build_response(
+        self, url_path: str, accept_encoding: str = ""
+    ) -> tuple[int, _HeaderList, bytes]:
         fs_path = self.handler.translate_path(url_path)
         display = url_path.split("?", 1)[0].split("#", 1)[0]
         headers: _HeaderList = []
@@ -222,9 +242,7 @@ class H2Connection:
                 # the listing's own inline styles, rendering it unstyled.
                 headers.append((b"content-security-policy", _CSP.encode("latin-1")))
                 headers.append((b"referrer-policy", b"no-referrer"))
-            headers.append((b"content-type", b"text/html; charset=utf-8"))
-            headers.append((b"content-length", str(len(body)).encode("ascii")))
-            return 200, headers, body
+            return self._finalize(headers, "text/html; charset=utf-8", body, accept_encoding)
 
         # translate_path() already ran the symlink-safe containment check and
         # returned "" for anything escaping the root — re-checking here would do a
@@ -237,9 +255,7 @@ class H2Connection:
         except OSError:
             return self._error(404)
         ctype = mimetypes.guess_file_type(fs_path)[0] or "application/octet-stream"
-        headers.append((b"content-type", ctype.encode("latin-1")))
-        headers.append((b"content-length", str(len(body)).encode("ascii")))
-        return 200, headers, body
+        return self._finalize(headers, ctype, body, accept_encoding)
 
     @staticmethod
     def _error(status: int) -> tuple[int, _HeaderList, bytes]:

@@ -147,6 +147,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable servery's default security response headers",
     )
     parser.add_argument(
+        "--no-compress",
+        action="store_false",
+        dest="compress",
+        help="disable on-the-fly gzip of text-like responses",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=30.0,
@@ -265,6 +271,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         allow_overwrite=args.allow_overwrite,
         upload_extract=args.upload_extract,
         cors=args.cors,
+        compress=args.compress,
         spa=args.spa,
         cache_max_age=args.cache_max_age,
         security_headers=args.security_headers,

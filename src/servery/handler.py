@@ -30,7 +30,7 @@ import urllib.parse
 from http import HTTPStatus
 from typing import TYPE_CHECKING, BinaryIO, ClassVar, cast, overload
 
-from servery import __version__, _http1, _log, archive, listing, ranges, security, upload
+from servery import __version__, _compress, _http1, _log, archive, listing, ranges, security, upload
 
 if TYPE_CHECKING:
     from _typeshed import SupportsRead, SupportsWrite
@@ -105,6 +105,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     _body_remaining: int | None = None
     _body_offset: int = 0
     _generated_page: bool = False
+    _vary_accept_encoding: bool = False  # emit Vary: Accept-Encoding (compressible resource)
     _version_string_cache: ClassVar[str | None] = None  # the Server header is constant
     # Our parse_request() populates these (replacing the email-based parser).
     headers: _RequestHeaders
@@ -259,6 +260,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         self._body_remaining = None
         self._body_offset = 0
         self._generated_page = False
+        self._vary_accept_encoding = False
         if not self._authorized():
             return None
         path = self.translate_path(self.path)
@@ -443,7 +445,6 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         try:
             stat = os.fstat(f.fileno())
             size = stat.st_size
-            etag = _make_etag(stat)
             last_modified = self.date_time_string(stat.st_mtime)
             ctype = self.guess_type(path)
             cache_control = self._server.config.cache_control
@@ -455,6 +456,26 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             )
             disposition = _content_disposition(os.path.basename(path)) if download else None
 
+            range_header = self.headers.get("Range")
+            # gzip and ranges are mutually exclusive: a Range over the *encoded*
+            # bytes is incoherent on the fly, so we only compress when no Range is
+            # asked for (RFC 9110 §14.1.2). Compressible resources always advertise
+            # Vary: Accept-Encoding so a shared cache can't mix codings (§12.5.5).
+            self._vary_accept_encoding = compressible = _compress.compressible(ctype)
+            use_gzip = (
+                compressible
+                and _compress.GZIP_MIN <= size <= _compress.GZIP_MAX
+                and not range_header
+                and self._server.config.compress
+                and _compress.accepts_gzip(self.headers.get("Accept-Encoding", ""))
+            )
+            # The gzip representation needs a distinct (still strong) ETag (§8.8.3.3);
+            # decide the coding BEFORE conditionals so a 304/If-None-Match echoes the
+            # tag for the representation the client would actually get.
+            etag = _make_etag(stat)
+            if use_gzip:
+                etag = etag[:-1] + '-gz"'
+
             if self._is_not_modified(etag, stat.st_mtime):
                 self.send_response(HTTPStatus.NOT_MODIFIED)
                 self.send_header("ETag", etag)
@@ -463,7 +484,22 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 f.close()
                 return None
 
-            range_header = self.headers.get("Range")
+            if use_gzip:
+                body = _compress.gzip_bytes(f.read())
+                f.close()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Cache-Control", cache_control)
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("ETag", etag)
+                self.send_header("Last-Modified", last_modified)
+                if disposition is not None:
+                    self.send_header("Content-Disposition", disposition)
+                self.end_headers()  # no Accept-Ranges: a gzipped body isn't byte-rangeable
+                self._body_remaining = len(body)
+                return io.BytesIO(body)
+
             if range_header and not self._if_range_ok(etag, stat.st_mtime):
                 range_header = None
             requested = ranges.parse(range_header, size)
@@ -615,8 +651,18 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         except OSError:
             self.send_error(HTTPStatus.NOT_FOUND, "No permission to list directory")
             return None
+        # The listing is generated HTML — always compressible (and Vary-keyed).
+        self._vary_accept_encoding = True
+        encoding = None
+        if self._server.config.compress and _compress.accepts_gzip(
+            self.headers.get("Accept-Encoding", "")
+        ):
+            body = _compress.gzip_bytes(body)
+            encoding = "gzip"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        if encoding is not None:
+            self.send_header("Content-Encoding", encoding)
         self.send_header("Content-Length", str(len(body)))
         if set_theme_cookie:
             # Lax + one-year; the value is one of three literals so it is safe.
@@ -656,6 +702,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Strict-Transport-Security", "max-age=63072000")
         if config.cors:
             self.send_header("Access-Control-Allow-Origin", "*")
+        if self._vary_accept_encoding:
+            self.send_header("Vary", "Accept-Encoding")
         super().end_headers()
 
     def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:

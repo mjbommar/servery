@@ -38,6 +38,7 @@ class Config:
     spa: bool = False
     cache_max_age: int | None = None
     security_headers: bool = True
+    compress: bool = True  # gzip text-like responses when the client accepts it
     timeout: float = 30.0
     max_workers: int | None = None
     http2: bool = False
@@ -99,6 +100,7 @@ class Config:
         spa: bool = False,
         cache_max_age: int | None = None,
         security_headers: bool = True,
+        compress: bool = True,
         timeout: float = 30.0,
         max_workers: int | None = None,
         http2: bool = False,
@@ -156,6 +158,7 @@ class Config:
             spa=spa,
             cache_max_age=cache_max_age,
             security_headers=security_headers,
+            compress=compress,
             timeout=timeout,
             max_workers=max_workers,
             http2=http2,

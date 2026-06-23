@@ -47,6 +47,25 @@ class Http3HelpersTest(unittest.TestCase):
         self.assertEqual(status, 301)
         self.assertIn((b"location", b"/sub/"), headers)
 
+    def test_gzip_when_accepted(self):
+        import gzip
+
+        (self.dir / "big.txt").write_text("z" * 4000)  # compressible, > 1 KiB
+        status, headers, body = http3.build_response(
+            self.config, self.root_real, "GET", "/big.txt", "gzip"
+        )
+        self.assertEqual(status, 200)
+        self.assertIn((b"content-encoding", b"gzip"), headers)
+        self.assertIn((b"vary", b"accept-encoding"), headers)
+        self.assertEqual(gzip.decompress(body), b"z" * 4000)
+        # Same file without gzip acceptance: identity, but still Vary-keyed.
+        _, headers2, body2 = http3.build_response(
+            self.config, self.root_real, "GET", "/big.txt", ""
+        )
+        self.assertNotIn((b"content-encoding", b"gzip"), headers2)
+        self.assertIn((b"vary", b"accept-encoding"), headers2)
+        self.assertEqual(body2, b"z" * 4000)
+
     def test_serve_requires_aioquic(self):
         # aioquic is an optional extra; without it, fail with a clear error.
         with self.assertRaises(http3.Http3UnavailableError):

@@ -54,6 +54,9 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
 - **Archive download** — stream any directory as `tar.gz` or `zip` (`?archive=tar.gz`).
 - **CORS, SPA fallback, cache control, security headers** — `--cors`, `--spa`, `--cache`,
   with `nosniff` everywhere and a scoped CSP on generated pages (off via `--no-security-headers`).
+- **On-the-fly gzip** — text-like responses (and the directory listing) are gzipped when the
+  client accepts it (RFC 9110: q-value negotiation, `Vary`, distinct ETag, ranges served
+  identity). Already-compressed media is left alone (keeps `sendfile`). Off via `--no-compress`.
 - **HTTP/2** — `--http2` enables a *pure-stdlib* HTTP/2 server (ALPN `h2` over TLS, or h2c
   prior-knowledge). The HPACK and frame codecs are implemented against the RFCs with no
   third-party package.

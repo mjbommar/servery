@@ -20,7 +20,7 @@ import mimetypes
 import os
 from typing import TYPE_CHECKING
 
-from servery import _log, auth, listing, security
+from servery import _compress, _log, auth, listing, security
 from servery.handler import _CSP
 
 if TYPE_CHECKING:
@@ -34,8 +34,26 @@ class Http3UnavailableError(RuntimeError):
     """The optional aioquic dependency is not installed."""
 
 
+def _finalize(
+    config: Config, headers: _HeaderList, ctype: str, body: bytes, accept_encoding: str
+) -> tuple[int, _HeaderList, bytes]:
+    """Append content-type/length, gzip when accepted, Vary on compressibles."""
+    if _compress.compressible(ctype):
+        headers.append((b"vary", b"accept-encoding"))
+        if (
+            config.compress
+            and _compress.GZIP_MIN <= len(body) <= _compress.GZIP_MAX
+            and _compress.accepts_gzip(accept_encoding)
+        ):
+            body = _compress.gzip_bytes(body)
+            headers.append((b"content-encoding", b"gzip"))
+    headers.append((b"content-type", ctype.encode("latin-1")))
+    headers.append((b"content-length", str(len(body)).encode("ascii")))
+    return 200, headers, body
+
+
 def build_response(
-    config: Config, root_real: str, method: str, url_path: str
+    config: Config, root_real: str, method: str, url_path: str, accept_encoding: str = ""
 ) -> tuple[int, _HeaderList, bytes]:
     """Resolve a GET/HEAD request to (status, response headers, body).
 
@@ -70,18 +88,14 @@ def build_response(
         if config.security_headers:
             headers.append((b"content-security-policy", _CSP.encode("latin-1")))
             headers.append((b"referrer-policy", b"no-referrer"))
-        headers.append((b"content-type", b"text/html; charset=utf-8"))
-        headers.append((b"content-length", str(len(body)).encode("ascii")))
-        return 200, headers, body
+        return _finalize(config, headers, "text/html; charset=utf-8", body, accept_encoding)
     try:
         with open(fs_path, "rb") as handle:  # noqa: PTH123 (os-level by design)
             body = handle.read()
     except OSError:
         return 404, [(b"content-type", b"text/plain")], b"404"
     ctype = mimetypes.guess_file_type(fs_path)[0] or "application/octet-stream"
-    headers.append((b"content-type", ctype.encode("latin-1")))
-    headers.append((b"content-length", str(len(body)).encode("ascii")))
-    return 200, headers, body
+    return _finalize(config, headers, ctype, body, accept_encoding)
 
 
 def serve_http3(config: Config) -> None:  # pragma: no cover - requires aioquic + UDP
@@ -135,7 +149,8 @@ def serve_http3(config: Config) -> None:  # pragma: no cover - requires aioquic 
                     self.transmit()
                     _log.logger.info('HTTP/3 "%s %s" 401', method, path)
                     return
-            status, response_headers, body = build_response(config, root_real, method, path)
+            accept = headers.get(b"accept-encoding", b"").decode("latin-1")
+            status, response_headers, body = build_response(config, root_real, method, path, accept)
             _log.logger.info('HTTP/3 "%s %s" %s', method, path, status)
             send_body = body if method != "HEAD" else b""
             self._http.send_headers(

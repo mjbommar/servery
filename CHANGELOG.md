@@ -6,6 +6,19 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **On-the-fly gzip** of text-like responses (HTML/CSS/JS/JSON/SVG/XML + the
+  directory listing) when the client sends `Accept-Encoding: gzip` — on by default,
+  `--no-compress` to disable. RFC 9110-correct: `gzip` only (deflate is ambiguous),
+  q-value-aware negotiation, `Vary: Accept-Encoding` on every compressible response,
+  a distinct (`-gz`-suffixed) ETag for the encoded representation, and compression
+  is mutually exclusive with `Range` (a `Range` request is served identity, since a
+  byte range over gzipped bytes is incoherent). Already-compressed media
+  (jpeg/png/mp4/zip/woff2/…) is never touched, preserving the zero-copy `sendfile`
+  fast path. Applied across HTTP/1.1, HTTP/2, and HTTP/3. Typical directory listing
+  compresses ~18×.
+
 ## [1.2.0] - 2026-06-23
 
 ### Tooling
