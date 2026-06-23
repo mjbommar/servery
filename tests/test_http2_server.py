@@ -114,6 +114,18 @@ class Http2ServerTest(_H2ServerCase):
         status, _ = self._get("/does-not-exist")
         self.assertEqual(status, 404)
 
+    def test_path_traversal_is_blocked(self):
+        # Containment is enforced once (in translate_path, which returns "" for an
+        # escaping path); _build_response trusts that. A "../" escape must 404 and
+        # never leak a file outside the served root.
+        secret = self.dir.parent / "h2_secret.txt"
+        secret.write_text("SECRET")
+        self.addCleanup(secret.unlink)
+        for path in ("/../h2_secret.txt", "/%2e%2e/h2_secret.txt"):
+            status, body = self._get(path)
+            self.assertEqual(status, 404, path)
+            self.assertNotIn(b"SECRET", body)
+
     def test_large_file_spans_frames(self):
         status, body = self._get("/big.bin")
         self.assertEqual(status, 200)

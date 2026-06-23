@@ -21,7 +21,7 @@ import os
 import ssl
 from typing import TYPE_CHECKING
 
-from servery import _log, listing, security
+from servery import _log, listing
 from servery.handler import _CSP
 from servery.http2 import frames, hpack
 from servery.http2.frames import ErrorCode, Flag, FrameType
@@ -226,7 +226,10 @@ class H2Connection:
             headers.append((b"content-length", str(len(body)).encode("ascii")))
             return 200, headers, body
 
-        if not security.is_contained(self.handler._server.root_real, fs_path):
+        # translate_path() already ran the symlink-safe containment check and
+        # returned "" for anything escaping the root — re-checking here would do a
+        # second realpath() (the priciest non-I/O op) on every file request.
+        if not fs_path:
             return self._error(404)
         try:
             with open(fs_path, "rb") as handle:
