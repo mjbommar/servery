@@ -25,7 +25,7 @@ def primary_lan_ipv4(target: str = "203.0.113.1") -> tuple[str, str]:
         return "127.0.0.1", "offline"
     finally:
         sock.close()
-    if not ip or ip == "0.0.0.0":
+    if not ip or ip == "0.0.0.0":  # nosec B104 - comparing the result, not binding
         return "127.0.0.1", "offline"
     if ipaddress.ip_address(ip).is_loopback:
         return ip, "loopback"

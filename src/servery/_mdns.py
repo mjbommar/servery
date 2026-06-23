@@ -121,7 +121,7 @@ class _Responder:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         with contextlib.suppress(AttributeError, OSError):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        sock.bind(("", _PORT))  # nosec B104 - mDNS must listen on all interfaces for the group
+        sock.bind(("", _PORT))
         mreq = socket.inet_aton(_GROUP) + socket.inet_aton(self._ip)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
