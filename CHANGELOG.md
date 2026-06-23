@@ -35,6 +35,25 @@ A measured pass over the async/parallel paths (server out-of-process, async
   (c=128: 53k req/s, p99 6.2 ms); **`--max-workers` ≈ CPU cores** fixes it
   (57.5k req/s, **p99 0.40 ms — ~15× lower tail latency**) — now noted in `--help`.
 
+A second pass driven by per-transport profiling (cProfile of the server-side
+request handling; measured against the `benchmarks/` suite):
+
+- **HTTP/1.1 file serving, ≈ −10% server-side CPU** (small-file GET, 20k requests):
+  skip `urlsplit`+`parse_qs` on the common query-less request (it built a
+  `SplitResult` + dict per request just to check `?download`); fast-path the
+  request version (`HTTP/1.1`/`HTTP/1.0`) instead of split/isdigit/int parsing;
+  and **cache the `Date` header per second** across all connections (it was
+  reformatted via `datetime` → RFC 7231 on every response). The Date cache and the
+  version fast-path benefit WSGI/CGI/proxy too.
+- **HTTP/2, −9.8% server-side CPU** (40k requests): `_build_response` ran the
+  symlink-safe containment `realpath()` (the priciest non-I/O op) **twice** per
+  request — `translate_path()` already does it and returns `""` on escape, so the
+  second `is_contained()` was pure redundancy (realpath 2→1, lstat 6→3 per
+  request). Added an explicit h2 path-traversal test so containment can't regress.
+- **ASGI** now sends the mandatory `Date` header (RFC 7231 §7.1.1.2) plus `Server`,
+  from the same shared per-second cache (≈ free under load) — it previously sent
+  neither.
+
 ### Observability
 
 - **Unified logging / telemetry / error handling across every transport**
