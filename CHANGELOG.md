@@ -6,6 +6,8 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-23
+
 ### Tooling
 
 - **Benchmark suite** (`benchmarks/`, pytest-benchmark; new opt-in `bench` dependency
@@ -78,6 +80,36 @@ request handling; measured against the `benchmarks/` suite):
 
 ### Security
 
+- **`--auth` is now enforced on every transport.** It was silently bypassed by
+  WSGI, CGI, ASGI, WebSocket, the reverse proxy, and HTTP/3 — only HTTP/1.1 and
+  HTTP/2 actually checked credentials, so e.g. `servery --auth … --wsgi app` served
+  the app to anyone. All paths now gate on the credential (401 + `WWW-Authenticate`
+  otherwise). The 401 also closes the connection so a rejected request's unread
+  body can't be mis-parsed as the next request (a keep-alive desync), and CGI
+  `OPTIONS` no longer answers without auth.
+- **Unbounded-read DoS via `Content-Length` fixed.** A negative value turned
+  `rfile.read(length)` into `read(-1)` (reads the whole socket); WSGI had no body
+  cap at all. Now clamped to `max(0, min(value, cap))` in WSGI/CGI/proxy, with a
+  clean `400` on a non-numeric value, and the directory listing caps its scan at
+  100k entries (a huge directory could pin RAM/CPU per request).
+- **ASGI slowloris timeout** — a slow/trickling client can no longer pin the event
+  loop; reads are bounded by `--timeout`.
+- **WebSocket RFC 6455 validation** — unmasked client frames, oversized or
+  fragmented control frames, reserved bits, and invalid UTF-8 text now close with
+  the correct code (1002/1007) instead of being accepted.
+- **The reverse proxy no longer leaks servery's own credential** to the upstream
+  (the client `Authorization` is dropped when `--auth` is set).
+- **Consistent security headers + CORS across all transports.** WSGI, CGI, proxy,
+  ASGI, HTTP/2, and HTTP/3 bypassed the HTTP/1.1 header path and so dropped
+  `X-Content-Type-Options`, `--cors`, HSTS, and (for HTTP/2) a correct CSP; now
+  applied uniformly. Added `frame-ancestors 'self'` to the generated-page CSP.
+- **Robustness against malformed input**: an over-long `Range` header (>4300
+  digits) is a clean response instead of a connection reset; config rejects an
+  out-of-range port / non-positive upload-size / timeout / negative cache; the TLS
+  context pins `minimum_version = TLS 1.2` and logs (instead of silently swallowing)
+  a cipher-policy failure. **HTTP/2 conformance**: unknown frame types are ignored
+  (RFC 9113 §5.5) rather than tearing down the connection, and a zero
+  `WINDOW_UPDATE` / oversized `INITIAL_WINDOW_SIZE` is a protocol error.
 - **Hardened the TLS cipher suite** to forward-secret **AEAD only** (TLS 1.2
   restricted to `ECDHE+AESGCM`/`ECDHE+CHACHA20`; TLS 1.3 is all-AEAD already).
   Dropping CBC suites removes the Lucky13/SWEET32 surface. Validated with
@@ -305,6 +337,7 @@ First stable release. A zero-dependency, pure-Python HTTP file server.
 - **Free-threading** support (3.13t/3.14t), full type hints (`ty`-checked), and a
   CI gate that enforces zero runtime dependencies in the core wheel.
 
+[1.2.0]: https://github.com/mjbommar/servery/releases/tag/v1.2.0
 [1.1.1]: https://github.com/mjbommar/servery/releases/tag/v1.1.1
 [1.1.0]: https://github.com/mjbommar/servery/releases/tag/v1.1.0
 [1.0.2]: https://github.com/mjbommar/servery/releases/tag/v1.0.2
