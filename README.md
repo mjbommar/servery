@@ -55,7 +55,11 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
 - **HTTP Basic Auth** — single credential or a pre-hashed `user:sha256:…`, constant-time compare.
 - **Upload** — opt-in `--upload`, streaming `multipart/form-data` (no `cgi`), atomic writes,
   bounded size, overwrite off by default.
-- **Archive download** — stream any directory as `tar.gz` or `zip` (`?archive=tar.gz`).
+- **Archive download** — stream any directory as `tar.gz` or `zip` (`?archive=tar.gz`), or
+  tick the per-entry checkboxes and **zip just the selected files/folders** — all with **no
+  JavaScript**.
+- **Access logging** — `--access-log PATH` writes one line per response in Common Log Format
+  (`--access-log-format clf`/`combined`/`json`), separate from the diagnostic stderr log.
 - **WebDAV** — `--dav` lets macOS Finder / Windows Explorer / Linux *mount* the share as a
   network drive (read-only); `--dav-write` adds write (PUT/DELETE/MKCOL/MOVE/COPY). Pure
   stdlib, same path-safety as everything else; writes honor `--auth`.
