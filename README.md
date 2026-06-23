@@ -108,6 +108,15 @@ make build                   # build + zero-dependency gate
 CI runs the suite on Linux/macOS/Windows × CPython 3.13/3.14, the free-threaded 3.13t/3.14t
 builds, and 3.15. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+A reproducible per-transport benchmark suite (pytest-benchmark) lives in `benchmarks/`:
+
+```bash
+uv run --group bench pytest benchmarks/   # HTTP/1.1, TLS, HTTP/2, WSGI, CGI, ASGI, proxy, …
+```
+
+See [BENCHMARKS.md](BENCHMARKS.md) for reference numbers, the HTTP/3 case, and the
+regression-comparison workflow.
+
 ## License
 
 MIT

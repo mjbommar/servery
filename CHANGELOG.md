@@ -6,6 +6,17 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+### Tooling
+
+- **Benchmark suite** (`benchmarks/`, pytest-benchmark; new opt-in `bench` dependency
+  group). Reproducible per-request latency for every transport — HTTP/1.1, TLS, HTTP/2
+  (ALPN + h2c), HTTP/3, WSGI, CGI, ASGI, reverse proxy — plus the internal hot paths
+  (HPACK, frame codec, listing render, Range parsing, head builder, cert generation).
+  `scripts/run_benchmarks.sh` emits a JSON artifact and gates median regressions vs the
+  last saved run; HTTP/3's QUIC round-trip runs on a GIL build via `--extra http3`. See
+  [BENCHMARKS.md](BENCHMARKS.md). The functional suite stays unittest-based; pytest is
+  scoped to `benchmarks/` only.
+
 ### Performance
 
 A measured pass over the async/parallel paths (server out-of-process, async
