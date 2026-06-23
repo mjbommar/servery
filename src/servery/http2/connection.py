@@ -218,15 +218,6 @@ class H2Connection:
             if_modified_since=ims.decode("latin-1") if ims is not None else None,
         )
 
-    @staticmethod
-    def _error(status: int) -> tuple[int, _HeaderList, bytes]:
-        body = str(status).encode("ascii")
-        headers: _HeaderList = [
-            (b"content-type", b"text/plain"),
-            (b"content-length", str(len(body)).encode("ascii")),
-        ]
-        return status, headers, body
-
     # -- response writing -------------------------------------------------
 
     def _respond(

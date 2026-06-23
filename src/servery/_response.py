@@ -11,7 +11,6 @@ Headers are wire form: ``list[(bytes, bytes)]`` with lowercase names.
 
 from __future__ import annotations
 
-import email.utils
 import mimetypes
 import os
 from typing import TYPE_CHECKING
@@ -129,7 +128,7 @@ def build_static(
     etag = _conditional.make_etag(stat)
     if gzip:
         etag = _conditional.gzip_variant(etag)
-    last_modified = email.utils.formatdate(stat.st_mtime, usegmt=True)
+    last_modified = _http1.format_http_date(stat.st_mtime)
     headers.append((b"etag", etag.encode("ascii")))
     headers.append((b"last-modified", last_modified.encode("latin-1")))
     if _conditional.is_not_modified(

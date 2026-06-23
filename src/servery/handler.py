@@ -16,7 +16,6 @@ redirects, and MIME typing. servery overrides what it improves:
 from __future__ import annotations
 
 import contextlib
-import email.utils
 import http.cookies
 import http.server
 import io
@@ -132,7 +131,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         # Last-Modified (timestamp given) still formats per file; the current-time
         # Date header (no timestamp) comes from the per-second process-wide cache.
         if timestamp is not None:
-            return email.utils.formatdate(timestamp, usegmt=True)
+            return _http1.format_http_date(timestamp)
         return _http1.http_date()
 
     def setup(self) -> None:

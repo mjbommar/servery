@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import email.utils
 import enum
+import functools
 import time
 
 # The Date header is emitted on every response but only changes once a second, so
@@ -25,9 +26,25 @@ def http_date() -> str:
     now = int(time.time())
     second, formatted = _DATE_CACHE[0]
     if now != second:
-        formatted = email.utils.formatdate(now, usegmt=True)
+        formatted = format_http_date(now)
         _DATE_CACHE[0] = (now, formatted)
     return formatted
+
+
+@functools.lru_cache(maxsize=4096)
+def _format_http_date_second(second: int) -> str:
+    return email.utils.formatdate(second, usegmt=True)
+
+
+def format_http_date(timestamp: float) -> str:
+    """An RFC 7231 IMF-fixdate for a specific time (e.g. Last-Modified).
+
+    HTTP-date is second-granular, so this caches by whole second (exact, no precision
+    loss): a file requested repeatedly formats its mtime once. The single
+    timestamp→HTTP-date formatter shared by the handler, the buffered backends, and
+    WebDAV.
+    """
+    return _format_http_date_second(int(timestamp))
 
 
 # A ready-to-send 500 used when an app errors before committing a response.

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import contextlib
 import datetime
-import email.utils
 import os
 import shutil
 import tempfile
@@ -21,7 +20,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING
 
-from servery import _response, security
+from servery import _http1, _response, security
 from servery._conditional import make_etag
 
 if TYPE_CHECKING:
@@ -41,7 +40,7 @@ def _q(tag: str) -> str:
 
 
 def _http_date(mtime: float) -> str:
-    return email.utils.formatdate(mtime, usegmt=True)
+    return _http1.format_http_date(mtime)
 
 
 def _iso_date(ctime: float) -> str:
