@@ -165,6 +165,27 @@ def _print_qr(config: Config, port: int) -> None:  # pragma: no cover - terminal
         print(_qr.render(_qr.generate(url)) + "\n", file=sys.stderr)
 
 
+def _start_mdns(config: Config, port: int):  # pragma: no cover - needs multicast
+    """Begin advertising over mDNS; return a responder handle (or None)."""
+    import socket as _socket
+
+    from servery import _mdns, _netinfo
+
+    ip, status = _netinfo.display_host(config.host)
+    if status != "ok":
+        if not config.quiet:
+            print(
+                f"servery: --discoverable needs a reachable LAN address ({status})", file=sys.stderr
+            )
+        return None
+    host = _socket.gethostname().split(".")[0] or "servery"
+    instance = f"servery on {host} ({port})"
+    responder = _mdns.start(instance, host, ip, port)
+    if responder is not None and not config.quiet:
+        print(f"servery: discoverable as '{instance}' on _http._tcp.local", file=sys.stderr)
+    return responder
+
+
 def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (CLI entry)
     """Run the server until interrupted. Blocks the calling thread."""
     if not config.quiet:
@@ -191,5 +212,10 @@ def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (C
                 print(f"servery: WARNING {warning}", file=sys.stderr)
             if config.qr:
                 _print_qr(config, port)
-        with contextlib.suppress(KeyboardInterrupt):
-            httpd.serve_forever()
+        responder = _start_mdns(config, port) if config.discoverable else None
+        try:
+            with contextlib.suppress(KeyboardInterrupt):
+                httpd.serve_forever()
+        finally:
+            if responder is not None:
+                responder.stop()

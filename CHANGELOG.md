@@ -8,6 +8,13 @@ All notable changes to servery are documented here. The format follows
 
 ### Added
 
+- **Frictionless LAN sharing** — `--qr` prints a scannable QR of the server's LAN
+  URL on startup (pure-stdlib QR encoder, no dependency), and `--discoverable`
+  advertises the server over mDNS/DNS-SD (`_http._tcp.local`) so it appears in
+  Finder / file-manager network views and resolves at `<host>.local`. The LAN IP
+  is auto-detected even when bound to `0.0.0.0`. The "run it, scan it, you're in"
+  path.
+
 - **On-the-fly gzip** of text-like responses (HTML/CSS/JS/JSON/SVG/XML + the
   directory listing) when the client sends `Accept-Encoding: gzip` — on by default,
   `--no-compress` to disable. RFC 9110-correct: `gzip` only (deflate is ambiguous),

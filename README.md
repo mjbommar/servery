@@ -57,6 +57,9 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
 - **On-the-fly gzip** — text-like responses (and the directory listing) are gzipped when the
   client accepts it (RFC 9110: q-value negotiation, `Vary`, distinct ETag, ranges served
   identity). Already-compressed media is left alone (keeps `sendfile`). Off via `--no-compress`.
+- **Frictionless LAN sharing** — `--qr` prints a scannable QR of the LAN URL (pure-stdlib QR
+  encoder, with auto-detected LAN IP even on a `0.0.0.0` bind), and `--discoverable` advertises
+  over mDNS/DNS-SD so the share shows up in Finder / file managers and at `<host>.local`.
 - **HTTP/2** — `--http2` enables a *pure-stdlib* HTTP/2 server (ALPN `h2` over TLS, or h2c
   prior-knowledge). The HPACK and frame codecs are implemented against the RFCs with no
   third-party package.
