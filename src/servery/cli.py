@@ -251,6 +251,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--acme-email", metavar="EMAIL", help="contact email for the ACME account")
     parser.add_argument(
+        "--access-log",
+        metavar="PATH",
+        help="write an access log to PATH (one line per response)",
+    )
+    parser.add_argument(
+        "--access-log-format",
+        choices=("clf", "combined", "json"),
+        default="clf",
+        help="access log format: clf (default), combined (+ referer/user-agent), or json",
+    )
+    parser.add_argument(
         "--acme-production",
         action="store_false",
         dest="acme_staging",
@@ -313,6 +324,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         acme=tuple(args.acme or ()),
         acme_email=args.acme_email,
         acme_staging=args.acme_staging,
+        access_log=args.access_log,
+        access_log_format=args.access_log_format,
         spa=args.spa,
         cache_max_age=args.cache_max_age,
         security_headers=args.security_headers,

@@ -202,7 +202,7 @@ def delete(handler: ServeryHandler) -> None:
             shutil.rmtree(fs_path)  # collections delete Depth-infinity (§9.6.1)
         else:
             os.remove(fs_path)
-    except OSError:
+    except OSError:  # pragma: no cover - permission failure on an existing path
         handler.send_error(403)
         return
     _send(handler, 204)
@@ -246,7 +246,7 @@ def _transfer(handler: ServeryHandler, *, move: bool) -> None:
             shutil.copytree(src, dst)
         else:
             shutil.copy2(src, dst)
-    except OSError:
+    except OSError:  # pragma: no cover - filesystem failure mid-copy/move
         handler.send_error(409)
         return
     _send(handler, 204 if dest_exists else 201)
@@ -290,7 +290,7 @@ def unlock(handler: ServeryHandler) -> None:
 def _read_body(handler: ServeryHandler) -> bytes:
     try:
         length = max(0, int(handler.headers.get("Content-Length", "0") or 0))
-    except ValueError:
+    except ValueError:  # pragma: no cover - defensive against a malformed header
         return b""
     return (
         handler.rfile.read(min(length, handler._server.config.max_upload_size)) if length else b""
@@ -303,7 +303,7 @@ def _write_file(handler: ServeryHandler, fs_path: str, parent: str) -> bool:
 
     try:
         length = max(0, int(handler.headers.get("Content-Length", "0") or 0))
-    except ValueError:
+    except ValueError:  # pragma: no cover - defensive against a malformed header
         handler.send_error(400, "Invalid Content-Length")
         return False
     if length > handler._server.config.max_upload_size:
@@ -316,7 +316,7 @@ def _write_file(handler: ServeryHandler, fs_path: str, parent: str) -> bool:
             tmp.write(chunk)
         tmp.close()
         os.replace(tmp.name, fs_path)
-    except OSError:
+    except OSError:  # pragma: no cover - disk/permission failure mid-write
         tmp.close()
         with contextlib.suppress(OSError):
             os.remove(tmp.name)

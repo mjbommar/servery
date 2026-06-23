@@ -46,6 +46,8 @@ class Config:
     acme: tuple[str, ...] = ()  # domains to obtain a Let's Encrypt cert for (empty = off)
     acme_email: str | None = None
     acme_staging: bool = True  # use the staging CA (safe default); --acme-production to opt in
+    access_log: str | None = None  # path to write an access log (off = stderr only)
+    access_log_format: str = "clf"  # clf | combined | json
     timeout: float = 30.0
     max_workers: int | None = None
     http2: bool = False
@@ -117,6 +119,8 @@ class Config:
         acme: tuple[str, ...] = (),
         acme_email: str | None = None,
         acme_staging: bool = True,
+        access_log: str | None = None,
+        access_log_format: str = "clf",
         timeout: float = 30.0,
         max_workers: int | None = None,
         http2: bool = False,
@@ -161,6 +165,8 @@ class Config:
             raise ValueError("--upload-extract requires --upload")
         if dav_write and not dav:
             raise ValueError("--dav-write requires --dav")
+        if access_log_format not in ("clf", "combined", "json"):
+            raise ValueError("--access-log-format must be clf, combined, or json")
         if dav and (dynamic or http2 or proxy_routes):
             raise ValueError("--dav is HTTP/1.1 file serving only")
         return cls(
@@ -190,6 +196,8 @@ class Config:
             acme=tuple(acme),
             acme_email=acme_email,
             acme_staging=acme_staging,
+            access_log=access_log,
+            access_log_format=access_log_format,
             timeout=timeout,
             max_workers=max_workers,
             http2=http2,

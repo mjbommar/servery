@@ -106,6 +106,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     _body_offset: int = 0
     _generated_page: bool = False
     _vary_accept_encoding: bool = False  # emit Vary: Accept-Encoding (compressible resource)
+    _access_status: int | str = "-"  # captured per response for the access log
+    _access_size: int | str = "-"
     _version_string_cache: ClassVar[str | None] = None  # the Server header is constant
     # Our parse_request() populates these (replacing the email-based parser).
     headers: _RequestHeaders
@@ -771,6 +773,26 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if self._vary_accept_encoding:
             self.send_header("Vary", "Accept-Encoding")
         super().end_headers()
+        access = self._server.access_log
+        if access is not None:
+            access.record(
+                self.address_string(),
+                getattr(self, "requestline", "-"),
+                self._access_status,
+                self._access_size,
+                referer=self.headers.get("Referer", "-") if self.headers else "-",
+                user_agent=self.headers.get("User-Agent", "-") if self.headers else "-",
+            )
+
+    def send_response_only(self, code: int, message: str | None = None) -> None:
+        self._access_status = code  # captured for the access log (size set in send_header)
+        self._access_size = "-"
+        super().send_response_only(code, message)
+
+    def send_header(self, keyword: str, value: str) -> None:
+        if keyword.lower() == "content-length":
+            self._access_size = value
+        super().send_header(keyword, value)
 
     def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
         self._generated_page = True  # the error body is generated HTML

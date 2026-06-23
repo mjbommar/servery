@@ -255,7 +255,7 @@ def _challenge_server(port: int, tokens: dict[str, str]) -> Any:
     return http.server.HTTPServer(("", port), _Handler)  # nosec B104 - HTTP-01 needs all interfaces
 
 
-def obtain(
+def obtain(  # pragma: no cover - integration-only (live CA + bound listener; see Pebble test)
     domains: list[str],
     *,
     email: str | None = None,
@@ -269,6 +269,9 @@ def obtain(
 
     Spins a short-lived HTTP listener on ``http_port`` (must be reachable by the CA
     — port 80 in production) to answer the challenge. Keys are generated if not given.
+
+    Orchestrates over a live CA + a bound listener — exercised by the opt-in Pebble
+    integration test (tests/test_acme.py), not the default unit suite.
     """
     import threading
 

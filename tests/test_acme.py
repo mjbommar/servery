@@ -13,7 +13,9 @@ import subprocess  # nosec B404 - manages the Pebble test container (opt-in inte
 import tempfile
 import time
 import unittest
+import urllib.error
 import urllib.request
+from unittest import mock
 
 from servery import _acme, _certgen
 
@@ -93,6 +95,7 @@ class _MockCA:
     def __init__(self) -> None:
         self.nonce = 0
         self.authz_fetches = 0
+        self.order_fetches = 0
         self.posts: list[tuple[str, dict, str]] = []
 
     def _headers(self, **extra: str) -> dict[str, str]:
@@ -109,7 +112,7 @@ class _MockCA:
                 "newAccount": _B + "/acct",
                 "newOrder": _B + "/order",
             }
-            return _Resp(200, json.dumps(body), self._headers())
+            return _Resp(200, json.dumps(body), {})  # no nonce here -> client fetches one
         env = json.loads(req.data)
         protected = json.loads(_b64u_decode(env["protected"]))
         payload = env["payload"]
@@ -143,6 +146,13 @@ class _MockCA:
         if url == _B + "/finalize":
             return _Resp(200, json.dumps({"status": "processing"}), self._headers())
         if url == _B + "/order/1":
+            self.order_fetches += 1
+            if self.order_fetches == 1:  # one "processing" poll before it's valid
+                return _Resp(
+                    200,
+                    json.dumps({"status": "processing"}),
+                    {**self._headers(), "Retry-After": "1"},
+                )
             valid = {"status": "valid", "certificate": _B + "/cert/1"}
             return _Resp(200, json.dumps(valid), self._headers())
         if url == _B + "/cert/1":
@@ -179,12 +189,14 @@ class FlowTest(unittest.TestCase):
         client = _acme.AcmeClient(
             _B + "/dir",
             account,
+            contact="admin@example.com",  # exercises the account-contact branch
             set_challenge=challenges.__setitem__,
             clear_challenge=lambda t: _drop(challenges, t),
         )
         client._opener = ca  # ty: ignore[invalid-assignment]  # inject the mock transport
 
-        pem = client.issue(["example.com"], cert_key)
+        with mock.patch.object(_acme.time, "sleep"):  # don't actually wait on the poll
+            pem = client.issue(["example.com"], cert_key)
         self.assertIn("BEGIN CERTIFICATE", pem)
 
         # First signed POST (newAccount) embeds the JWK; everything after uses the kid.
@@ -203,6 +215,31 @@ class FlowTest(unittest.TestCase):
         self.assertIn("csr", json.loads(_b64u_decode(finalize[2])))
         # The challenge was provisioned during validation and cleared afterward.
         self.assertEqual(challenges, {})
+
+
+class ChallengeServerTest(unittest.TestCase):
+    def test_serves_key_authorization(self):
+        import threading
+
+        tokens = {"tok123": "tok123.thumbprint"}
+        httpd = _acme._challenge_server(0, tokens)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            resp = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/.well-known/acme-challenge/tok123", timeout=5
+            )
+            self.assertEqual(resp.read(), b"tok123.thumbprint")
+            with self.assertRaises(urllib.error.HTTPError) as cm:  # unknown token -> 404
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/.well-known/acme-challenge/nope", timeout=5
+                )
+            self.assertEqual(cm.exception.code, 404)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
 
 
 @unittest.skipUnless(

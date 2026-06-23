@@ -96,6 +96,83 @@ class DavMethodTest(_DavCase):
         self.assertEqual((self.root / "sub" / "m.txt").read_text(), "hi")
         self.assertFalse((self.root / "hello.txt").exists())
 
+    def test_copy(self):
+        with serving(self.cfg) as (host, port):
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request(
+                "COPY", "/hello.txt", headers={"Destination": f"http://{host}:{port}/c.txt"}
+            )
+            self.assertEqual(conn.getresponse().status, 201)
+            conn.close()
+        self.assertEqual((self.root / "c.txt").read_text(), "hi")
+        self.assertTrue((self.root / "hello.txt").exists())  # original kept (copy, not move)
+
+    def test_copy_overwrite_false_is_412(self):
+        (self.root / "dest.txt").write_text("old")
+        with serving(self.cfg) as (host, port):
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request(
+                "COPY",
+                "/hello.txt",
+                headers={"Destination": f"http://{host}:{port}/dest.txt", "Overwrite": "F"},
+            )
+            self.assertEqual(conn.getresponse().status, 412)
+            conn.close()
+        self.assertEqual((self.root / "dest.txt").read_text(), "old")  # untouched
+
+    def test_proppatch_accepts(self):
+        status, _, body = self._req(
+            "PROPPATCH",
+            "/hello.txt",
+            body=b'<D:propertyupdate xmlns:D="DAV:"><D:set><D:prop>'
+            b"<D:foo>1</D:foo></D:prop></D:set></D:propertyupdate>",
+        )
+        self.assertEqual(status, 207)
+        self.assertIn(b"200 OK", body)
+
+    def test_propfind_missing_is_404(self):
+        self.assertEqual(self._req("PROPFIND", "/nope", headers={"Depth": "0"})[0], 404)
+
+    def test_put_on_collection_is_405(self):
+        self.assertEqual(self._req("PUT", "/sub", body=b"x")[0], 405)
+
+    def test_delete_missing_is_404(self):
+        self.assertEqual(self._req("DELETE", "/nope")[0], 404)
+
+    def test_mkcol_with_body_is_415(self):
+        self.assertEqual(self._req("MKCOL", "/d", body=b"junk")[0], 415)
+
+    def test_move_missing_source_is_404(self):
+        with serving(self.cfg) as (host, port):
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request("MOVE", "/nope", headers={"Destination": f"http://{host}:{port}/x"})
+            self.assertEqual(conn.getresponse().status, 404)
+            conn.close()
+
+    def test_move_without_destination_is_400(self):
+        self.assertEqual(self._req("MOVE", "/hello.txt")[0], 400)
+
+    def test_proppatch_missing_is_404(self):
+        self.assertEqual(self._req("PROPPATCH", "/nope", body=b"<x/>")[0], 404)
+
+    def test_copy_to_missing_parent_is_409(self):
+        with serving(self.cfg) as (host, port):
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request(
+                "COPY", "/hello.txt", headers={"Destination": f"http://{host}:{port}/no/x"}
+            )
+            self.assertEqual(conn.getresponse().status, 409)
+            conn.close()
+
+    def test_move_onto_itself_is_403(self):
+        with serving(self.cfg) as (host, port):
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            conn.request(
+                "MOVE", "/hello.txt", headers={"Destination": f"http://{host}:{port}/hello.txt"}
+            )
+            self.assertEqual(conn.getresponse().status, 403)
+            conn.close()
+
     def test_lock_returns_token(self):
         status, hdrs, body = self._req(
             "LOCK",

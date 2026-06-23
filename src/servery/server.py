@@ -39,6 +39,11 @@ class ServeryHTTPServer(ThreadingHTTPServer):
         self.config = config
         self.root_real = os.path.realpath(config.directory)
         self.credential = auth.parse(config.auth)
+        self.access_log = None
+        if config.access_log:
+            from servery import _accesslog
+
+            self.access_log = _accesslog.AccessLog(config.access_log, config.access_log_format)
         self._executor = (
             ThreadPoolExecutor(max_workers=config.max_workers) if config.max_workers else None
         )
