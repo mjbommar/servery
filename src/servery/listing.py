@@ -22,6 +22,7 @@ import functools
 import html
 import mimetypes
 import os
+import re
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -65,6 +66,22 @@ class EntryInfo(NamedTuple):
 def code_to_sort(code: str) -> str:
     """Map a URL column code (N/S/M) to a canonical sort name."""
     return _CODE_TO_SORT.get(code, "name")
+
+
+# Anything outside the URL-unreserved set (+ "/") that quote() would percent-encode.
+_NAME_NEEDS_QUOTE = re.compile(r"[^A-Za-z0-9._~/-]").search
+
+
+def _quote_name(name: str) -> str:
+    """URL-quote a path segment, fast-pathing the common all-safe-ASCII name.
+
+    ``urllib.parse.quote`` encodes the string to bytes on every call; for the typical
+    filename (ASCII, only unreserved chars) the result is the input unchanged, so a
+    cheap C-level precheck (isascii + a no-match regex search) skips that round-trip.
+    """
+    if name.isascii() and not _NAME_NEEDS_QUOTE(name):
+        return name
+    return urllib.parse.quote(name, errors="surrogatepass")
 
 
 def _human_size(num: int) -> str:
@@ -568,7 +585,7 @@ def _row(entry: EntryInfo, max_size: int, now: float) -> str:
     # quote() percent-encodes every HTML-special character (< > & " '), so the
     # resulting href is already safe to drop into the attribute — escaping it
     # again is a no-op. quote(name + "/") == quote(name) + "/", so quote once.
-    quoted = urllib.parse.quote(entry.name, errors="surrogatepass")
+    quoted = _quote_name(entry.name)
     icon = _CATEGORY_ICON[_category(entry)]
     name_cell = f'<span class="icon" aria-hidden="true">{icon}</span>'
     name_cell += f'<a href="{quoted + suffix}">{esc_display}</a>'
