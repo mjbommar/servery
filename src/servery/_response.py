@@ -15,7 +15,7 @@ import mimetypes
 import os
 from typing import TYPE_CHECKING
 
-from servery import _compress, listing
+from servery import _compress, _http1, listing
 from servery.handler import _CSP
 
 if TYPE_CHECKING:
@@ -31,14 +31,20 @@ def guess_type(fs_path: str) -> str:
 
 
 def base_headers(config: Config, *, tls: bool) -> _HeaderList:
-    """The per-response policy headers: nosniff, HSTS (TLS only), CORS, Cache-Control."""
-    headers: _HeaderList = []
-    if config.security_headers:
-        headers.append((b"x-content-type-options", b"nosniff"))
-        if tls:
-            headers.append((b"strict-transport-security", b"max-age=63072000"))
-    if config.cors:
-        headers.append((b"access-control-allow-origin", b"*"))
+    """The per-response policy headers: nosniff, HSTS (TLS only), CORS, Cache-Control.
+
+    The cross-cutting trio comes from the single source of truth, ``_http1.policy_headers``
+    (shared with WSGI/CGI/ASGI/proxy), encoded to wire bytes; Cache-Control is added
+    here because the buffered backends serve files, not arbitrary apps.
+    """
+    # h2/h3 require lowercase field names (RFC 9113 §8.2.1); policy_headers returns
+    # the canonical Title-Case used on the HTTP/1.1 wire, so lowercase here.
+    headers: _HeaderList = [
+        (name.lower().encode("latin-1"), value.encode("latin-1"))
+        for name, value in _http1.policy_headers(
+            security_headers=config.security_headers, cors=config.cors, tls=tls
+        )
+    ]
     headers.append((b"cache-control", config.cache_control.encode("latin-1")))
     return headers
 
