@@ -75,11 +75,18 @@ def _human_size(num: int) -> str:
     return f"{num} B"  # pragma: no cover - unreachable; satisfies the type checker
 
 
-def _format_mtime(ts: float) -> str:
+@functools.lru_cache(maxsize=2048)
+def _format_minute(minute: int) -> str:
     # Local time, human display only. time.localtime + manual formatting avoids
     # both strftime's format-string parsing and a datetime allocation per entry.
-    tm = time.localtime(ts)
+    tm = time.localtime(minute * 60)
     return f"{tm.tm_year:04d}-{tm.tm_mon:02d}-{tm.tm_mday:02d} {tm.tm_hour:02d}:{tm.tm_min:02d}"
+
+
+def _format_mtime(ts: float) -> str:
+    # The display is minute-granular, so cache by whole minute: a directory of files
+    # written together (an unpacked archive, a sync) collapses to one localtime call.
+    return _format_minute(int(ts // 60))
 
 
 def _relative_time(ts: float, now: float) -> str:
@@ -550,15 +557,18 @@ def _pager(page: int, total_pages: int, total: int, per_page: int, base: dict[st
 
 def _row(entry: EntryInfo, max_size: int, now: float) -> str:
     suffix = "/" if entry.is_dir else ""
-    display = entry.name + suffix
+    # Escape the name ONCE and reuse it everywhere (link text, checkbox value, aria
+    # label). html.escape("/") == "/", so the escaped display is just esc_name +
+    # suffix — html.escape was a hot spot, and it was being run 3x per row.
+    esc_name = html.escape(entry.name)
+    esc_display = esc_name + suffix
     # quote() percent-encodes every HTML-special character (< > & " '), so the
     # resulting href is already safe to drop into the attribute — escaping it
-    # again is a no-op (and html.escape was a hot spot in the listing path).
-    # quote(name + "/") == quote(name) + "/" ("/" is a safe char), so quote once.
+    # again is a no-op. quote(name + "/") == quote(name) + "/", so quote once.
     quoted = urllib.parse.quote(entry.name, errors="surrogatepass")
     icon = _CATEGORY_ICON[_category(entry)]
     name_cell = f'<span class="icon" aria-hidden="true">{icon}</span>'
-    name_cell += f'<a href="{quoted + suffix}">{html.escape(display)}</a>'
+    name_cell += f'<a href="{quoted + suffix}">{esc_display}</a>'
     if entry.is_symlink:
         name_cell += ' <span class="sym">\N{RIGHTWARDS ARROW}</span>'
     if not entry.is_dir:
@@ -583,8 +593,7 @@ def _row(entry: EntryInfo, max_size: int, now: float) -> str:
     # so no wrapping form and no JavaScript) lets several entries be zipped together.
     pick = (
         f'<td class="pick"><input type="checkbox" name="sel" form="zipform" '
-        f'value="{html.escape(entry.name, quote=True)}" aria-label="Select {html.escape(display)}">'
-        "</td>"
+        f'value="{esc_name}" aria-label="Select {esc_display}"></td>'
     )
     return (
         f'<tr>{pick}<td class="name">{name_cell}</td>'
