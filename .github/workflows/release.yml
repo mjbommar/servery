@@ -35,6 +35,50 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  bundle:
+    name: Single-file bundle + GitHub release
+    needs: build # only publish the bundle once the dists build + verify clean
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload servery.py / servery.pyz
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: false
+      - name: Build single-file artifacts
+        run: |
+          mkdir -p dist
+          uv run python scripts/amalgamate.py > dist/servery.py
+          uv run python -m zipapp src -m "servery.cli:main" -o dist/servery.pyz -p "/usr/bin/env python3"
+      - name: Smoke-test the bundle (no network)
+        run: |
+          want="servery $(uv run python -c 'from servery._version import __version__; print(__version__)')"
+          got="$(python3 dist/servery.py --version)"
+          test "$got" = "$want" || { echo "servery.py --version: '$got' != '$want'"; exit 1; }
+          python3 dist/servery.pyz --version
+      - name: Create / update the GitHub release with the bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            echo '## Run without installing — one file, straight from a pipe'
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/servery.py | python3 - ./public -p 8000"
+            echo '```'
+            echo
+            echo "Pin a version with \`.../download/${TAG}/servery.py\`, or grab \`servery.pyz\` and run \`python3 servery.pyz ./public\`. Or \`pip install servery\`."
+            echo
+            echo "Both single-file artifacts are pure stdlib (zero runtime dependencies). Full notes: [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/CHANGELOG.md)."
+          } > /tmp/notes.md
+          gh release create "$TAG" --title "servery ${TAG#v}" --notes-file /tmp/notes.md \
+              dist/servery.py dist/servery.pyz \
+            || gh release upload "$TAG" dist/servery.py dist/servery.pyz --clobber
+
   publish:
     name: Publish to PyPI (Trusted Publishing)
     needs: build
