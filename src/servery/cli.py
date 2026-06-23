@@ -153,6 +153,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable on-the-fly gzip of text-like responses",
     )
     parser.add_argument(
+        "--qr",
+        action="store_true",
+        help="print a scannable QR code of the LAN URL on startup",
+    )
+    parser.add_argument(
+        "--discoverable",
+        action="store_true",
+        help="advertise the server on the local network via mDNS/DNS-SD (Bonjour)",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=30.0,
@@ -272,6 +282,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         upload_extract=args.upload_extract,
         cors=args.cors,
         compress=args.compress,
+        qr=args.qr,
+        discoverable=args.discoverable,
         spa=args.spa,
         cache_max_age=args.cache_max_age,
         security_headers=args.security_headers,

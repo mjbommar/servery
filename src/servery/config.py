@@ -39,6 +39,8 @@ class Config:
     cache_max_age: int | None = None
     security_headers: bool = True
     compress: bool = True  # gzip text-like responses when the client accepts it
+    qr: bool = False  # print a QR of the LAN URL on startup
+    discoverable: bool = False  # advertise over mDNS/DNS-SD (_http._tcp.local)
     timeout: float = 30.0
     max_workers: int | None = None
     http2: bool = False
@@ -101,6 +103,8 @@ class Config:
         cache_max_age: int | None = None,
         security_headers: bool = True,
         compress: bool = True,
+        qr: bool = False,
+        discoverable: bool = False,
         timeout: float = 30.0,
         max_workers: int | None = None,
         http2: bool = False,
@@ -159,6 +163,8 @@ class Config:
             cache_max_age=cache_max_age,
             security_headers=security_headers,
             compress=compress,
+            qr=qr,
+            discoverable=discoverable,
             timeout=timeout,
             max_workers=max_workers,
             http2=http2,

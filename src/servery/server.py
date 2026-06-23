@@ -139,6 +139,32 @@ def server_url(server: ServeryHTTPServer) -> str:
     return f"{scheme}://{host_display}:{port}/"
 
 
+def _lan_url(config: Config, port: int) -> tuple[str, str]:
+    """The URL to advertise (LAN IP substituted for a wildcard bind) + a status."""
+    from servery import _netinfo
+
+    host, status = _netinfo.display_host(config.host)
+    host_display = f"[{host}]" if ":" in host else host
+    scheme = "https" if config.uses_tls else "http"
+    return f"{scheme}://{host_display}:{port}/", status
+
+
+def _print_qr(config: Config, port: int) -> None:  # pragma: no cover - terminal output
+    """Print a scannable QR of the LAN URL (or a hint if there's no reachable IP)."""
+    from servery import _qr
+
+    url, status = _lan_url(config, port)
+    if status != "ok":
+        print(
+            f"servery: --qr needs a reachable LAN address (bound to {config.host}: {status})",
+            file=sys.stderr,
+        )
+        return
+    with contextlib.suppress(_qr.QrError):
+        print(f"\nservery: scan to open on another device — {url}", file=sys.stderr)
+        print(_qr.render(_qr.generate(url)) + "\n", file=sys.stderr)
+
+
 def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (CLI entry)
     """Run the server until interrupted. Blocks the calling thread."""
     if not config.quiet:
@@ -158,9 +184,12 @@ def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (C
         asgi.run(config)
         return
     with make_server(config) as httpd:
+        port = httpd.server_address[1]
         if not config.quiet:
             print(f"servery: serving {config.directory} at {server_url(httpd)}", file=sys.stderr)
             for warning in config.startup_warnings():
                 print(f"servery: WARNING {warning}", file=sys.stderr)
+            if config.qr:
+                _print_qr(config, port)
         with contextlib.suppress(KeyboardInterrupt):
             httpd.serve_forever()

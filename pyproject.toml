@@ -58,6 +58,9 @@ test = [
   # Interop-only: an independent client to cross-check the server (HTTP/1.1 + 2).
   # Never a runtime dependency; interop tests skip when it is absent.
   "httpx[http2]>=0.27",
+  # Oracle-only: an independent QR encoder to validate servery._qr bit-for-bit.
+  # Pure-Python; never a runtime dependency; the QR test skips when it is absent.
+  "qrcode>=7.4",
 ]
 # Development / CI tooling only. Isolated from runtime; never published.
 dev = [
