@@ -56,6 +56,9 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
 - **Upload** — opt-in `--upload`, streaming `multipart/form-data` (no `cgi`), atomic writes,
   bounded size, overwrite off by default.
 - **Archive download** — stream any directory as `tar.gz` or `zip` (`?archive=tar.gz`).
+- **WebDAV** — `--dav` lets macOS Finder / Windows Explorer / Linux *mount* the share as a
+  network drive (read-only); `--dav-write` adds write (PUT/DELETE/MKCOL/MOVE/COPY). Pure
+  stdlib, same path-safety as everything else; writes honor `--auth`.
 - **CORS, SPA fallback, cache control, security headers** — `--cors`, `--spa`, `--cache`,
   with `nosniff` everywhere and a scoped CSP on generated pages (off via `--no-security-headers`).
 - **On-the-fly gzip** — text-like responses (and the directory listing) are gzipped when the

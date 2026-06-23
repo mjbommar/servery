@@ -361,11 +361,55 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if f is not None:
             f.close()
 
+    # --- WebDAV (v1.3, opt-in --dav) -------------------------------------
+
+    def _dav(self, op: str, *, write: bool) -> None:
+        """Dispatch a WebDAV method, gated by --dav / --dav-write and auth."""
+        config = self._server.config
+        if not config.dav:
+            self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command})")
+            return
+        if not self._authorized():  # 401 already sent
+            return
+        if write and not config.dav_write:
+            self.send_error(HTTPStatus.FORBIDDEN, "WebDAV is read-only (enable --dav-write)")
+            return
+        from servery import _webdav
+
+        _webdav.dispatch(self, op)
+
+    def do_PROPFIND(self) -> None:
+        self._dav("propfind", write=False)
+
+    def do_PROPPATCH(self) -> None:
+        self._dav("proppatch", write=True)
+
+    def do_MKCOL(self) -> None:
+        self._dav("mkcol", write=True)
+
+    def do_COPY(self) -> None:
+        self._dav("copy", write=True)
+
+    def do_MOVE(self) -> None:
+        self._dav("move", write=True)
+
+    def do_LOCK(self) -> None:
+        self._dav("lock", write=False)
+
+    def do_UNLOCK(self) -> None:
+        self._dav("unlock", write=False)
+
     def do_PUT(self) -> None:
-        self._proxy_or_unsupported()
+        if self._server.config.dav:
+            self._dav("put", write=True)
+        else:
+            self._proxy_or_unsupported()
 
     def do_DELETE(self) -> None:
-        self._proxy_or_unsupported()
+        if self._server.config.dav:
+            self._dav("delete", write=True)
+        else:
+            self._proxy_or_unsupported()
 
     def do_PATCH(self) -> None:
         self._proxy_or_unsupported()
@@ -714,11 +758,19 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if self._maybe_proxy():
             return
         self._generated_page = False
+        config = self._server.config
         # Preflight must succeed without auth, or the real request never happens.
         self.send_response(HTTPStatus.NO_CONTENT)
-        if self._server.config.cors:
+        if config.cors:
             self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "*")
+        if config.dav:
+            from servery import _webdav
+
+            # Class 2 (with the stub lock) so Finder/Windows mount read-write.
+            self.send_header("DAV", "1, 2")
+            self.send_header("MS-Author-Via", "DAV")
+            self.send_header("Allow", _webdav._ALLOW_RW if config.dav_write else _webdav._ALLOW_RO)
         self.send_header("Content-Length", "0")
         self.end_headers()
 

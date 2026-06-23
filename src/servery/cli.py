@@ -153,6 +153,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable on-the-fly gzip of text-like responses",
     )
     parser.add_argument(
+        "--dav",
+        action="store_true",
+        help="enable WebDAV so the share can be mounted as a network drive (read-only)",
+    )
+    parser.add_argument(
+        "--dav-write",
+        action="store_true",
+        help="allow WebDAV writes (PUT/DELETE/MKCOL/MOVE/COPY); requires --dav (use with --auth)",
+    )
+    parser.add_argument(
         "--qr",
         action="store_true",
         help="print a scannable QR code of the LAN URL on startup",
@@ -296,6 +306,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         upload_extract=args.upload_extract,
         cors=args.cors,
         compress=args.compress,
+        dav=args.dav,
+        dav_write=args.dav_write,
         qr=args.qr,
         discoverable=args.discoverable,
         acme=tuple(args.acme or ()),

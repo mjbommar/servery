@@ -8,6 +8,15 @@ All notable changes to servery are documented here. The format follows
 
 ### Added
 
+- **WebDAV — mount the share as a network drive.** `--dav` enables a read-only
+  WebDAV endpoint (RFC 4918) that macOS Finder, Windows Explorer, and Linux
+  (gio/davfs2) can mount and browse; `--dav-write` adds the write methods
+  (PUT/DELETE/MKCOL/MOVE/COPY/PROPPATCH). Pure stdlib (`xml.etree`); reuses
+  servery's path-safety (the COPY/MOVE `Destination` goes through the same
+  containment check, so it can't escape the root), atomic writes, and ETags. Off by
+  default; writes honor `--auth` and `--allow-overwrite`. Advertises DAV class 2 with
+  a stub lock (the industry norm) so clients mount read-write; `Depth: infinity`
+  PROPFIND is bounded.
 - **Automatic HTTPS via ACME / Let's Encrypt — zero-dependency.** `--acme
   example.com` (repeatable) obtains a browser-trusted certificate over the ACME
   HTTP-01 flow (RFC 8555) and serves HTTPS with it. Because servery already

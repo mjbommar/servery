@@ -34,6 +34,8 @@ class Config:
     max_upload_size: int = 100 * 1024 * 1024
     allow_overwrite: bool = False
     upload_extract: bool = False  # expand uploaded archives (requires upload)
+    dav: bool = False  # WebDAV (read-only mount); dav_write adds the write methods
+    dav_write: bool = False
     cors: bool = False
     spa: bool = False
     cache_max_age: int | None = None
@@ -76,6 +78,8 @@ class Config:
             warnings.append(f"bound to {self.host} — reachable from the network")
         if self.auth is not None and not self.uses_tls:
             warnings.append("Basic auth is enabled without TLS — credentials travel in cleartext")
+        if self.dav_write and self.auth is None:
+            warnings.append("--dav-write allows anyone to upload/delete/move files — add --auth")
         if self.tls_self_signed:
             warnings.append(
                 "using a self-signed certificate — clients will see an "
@@ -101,6 +105,8 @@ class Config:
         max_upload_size: int = 100 * 1024 * 1024,
         allow_overwrite: bool = False,
         upload_extract: bool = False,
+        dav: bool = False,
+        dav_write: bool = False,
         cors: bool = False,
         spa: bool = False,
         cache_max_age: int | None = None,
@@ -153,6 +159,10 @@ class Config:
             raise ValueError(f"--proxy cannot be combined with {other}")
         if upload_extract and not upload:
             raise ValueError("--upload-extract requires --upload")
+        if dav_write and not dav:
+            raise ValueError("--dav-write requires --dav")
+        if dav and (dynamic or http2 or proxy_routes):
+            raise ValueError("--dav is HTTP/1.1 file serving only")
         return cls(
             directory=Path(directory).resolve(),
             host=host,
@@ -168,6 +178,8 @@ class Config:
             max_upload_size=max_upload_size,
             allow_overwrite=allow_overwrite,
             upload_extract=upload_extract,
+            dav=dav,
+            dav_write=dav_write,
             cors=cors,
             spa=spa,
             cache_max_age=cache_max_age,
