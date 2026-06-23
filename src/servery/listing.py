@@ -18,7 +18,6 @@ Content-Security-Policy servery applies to its own generated pages.
 
 from __future__ import annotations
 
-import dataclasses
 import functools
 import html
 import mimetypes
@@ -26,7 +25,7 @@ import os
 import time
 import urllib.parse
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from servery import _log
 
@@ -48,9 +47,13 @@ DEFAULT_PAGE_SIZE = 1000
 _MAX_FACETS = 12
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
-class EntryInfo:
-    """A single directory entry, with stat data already resolved."""
+class EntryInfo(NamedTuple):
+    """A single directory entry, with stat data already resolved.
+
+    A NamedTuple (not a frozen dataclass): it's immutable and slotted like before,
+    but constructs at C speed — and the listing builds one per entry on the hot
+    scan path (a frozen dataclass's __init__ does an object.__setattr__ per field).
+    """
 
     name: str
     is_dir: bool
