@@ -579,8 +579,15 @@ def _row(entry: EntryInfo, max_size: int, now: float) -> str:
             f'<span title="{_format_mtime(entry.mtime)}">{_relative_time(entry.mtime, now)}</span>'
         )
 
+    # A checkbox (associated with the footer #zipform via the HTML5 form= attribute,
+    # so no wrapping form and no JavaScript) lets several entries be zipped together.
+    pick = (
+        f'<td class="pick"><input type="checkbox" name="sel" form="zipform" '
+        f'value="{html.escape(entry.name, quote=True)}" aria-label="Select {html.escape(display)}">'
+        "</td>"
+    )
     return (
-        f'<tr><td class="name">{name_cell}</td>'
+        f'<tr>{pick}<td class="name">{name_cell}</td>'
         f'<td class="size">{size_cell}</td><td class="mtime">{mtime_cell}</td></tr>'
     )
 
@@ -636,7 +643,7 @@ def render(
     rows: list[str] = []
     if display_path != "/" and page == 1:
         rows.append(
-            '<tr><td class="name"><span class="icon" aria-hidden="true">'
+            '<tr><td class="pick"></td><td class="name"><span class="icon" aria-hidden="true">'
             '\N{UPWARDS ARROW}</span><a href="../">../</a></td>'
             '<td class="size">\N{EM DASH}</td><td></td></tr>'
         )
@@ -646,11 +653,11 @@ def render(
         if query or ext:
             clear = _href(base, q=None, ext=None, page=None)
             empty = (
-                '<tr><td class="empty" colspan="3">No items match the current filter. '
+                '<tr><td class="empty" colspan="4">No items match the current filter. '
                 f'<a href="{clear}">Clear filters</a></td></tr>'
             )
         else:
-            empty = '<tr><td class="empty" colspan="3">This directory is empty.</td></tr>'
+            empty = '<tr><td class="empty" colspan="4">This directory is empty.</td></tr>'
         rows.append(empty)
 
     document = _TEMPLATE.format(
@@ -772,14 +779,17 @@ aria-label="Filter">
 {metrics}
 {timeline}
 <table>
-<thead><tr><th class="name"{name_aria}>{name_header}</th><th class="size"{size_aria}>{size_header}</th>\
+<thead><tr><th class="pick"></th><th class="name"{name_aria}>{name_header}</th>\
+<th class="size"{size_aria}>{size_header}</th>\
 <th class="mtime"{mtime_aria}>{mtime_header}</th></tr></thead>
 <tbody>
 {rows}
 </tbody>
 </table>
 {pager}
-<footer>{count} item(s) · download <a href="?archive=tar.gz">tar.gz</a> · \
+<form id="zipform" method="get" hidden></form>
+<footer>{count} item(s) · <button type="submit" form="zipform">zip selected</button> · \
+download <a href="?archive=tar.gz">tar.gz</a> · \
 <a href="?archive=zip">zip</a> · served by servery</footer>
 </body>
 </html>

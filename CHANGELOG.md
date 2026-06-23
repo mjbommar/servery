@@ -8,6 +8,12 @@ All notable changes to servery are documented here. The format follows
 
 ### Added
 
+- **Multi-select → zip in the directory listing (no JavaScript).** Each entry gets a
+  checkbox; a "zip selected" button streams the chosen files/folders as one zip
+  (`?sel=a&sel=b`). Implemented with the HTML5 `form=` attribute (the checkboxes
+  associate with a footer form) — zero JavaScript, consistent with the listing's
+  no-JS design. Selected names are validated as direct children (a crafted `sel`
+  can't escape the directory). Reuses the streaming `zip` machinery.
 - **WebDAV — mount the share as a network drive.** `--dav` enables a read-only
   WebDAV endpoint (RFC 4918) that macOS Finder, Windows Explorer, and Linux
   (gio/davfs2) can mount and browse; `--dav-write` adds the write methods

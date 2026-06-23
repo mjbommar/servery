@@ -285,9 +285,13 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return None
-        archive_format = urllib.parse.parse_qs(parts.query).get("archive", [""])[0]
+        query = urllib.parse.parse_qs(parts.query)
+        archive_format = query.get("archive", [""])[0]
         if archive_format in {"tar.gz", "zip"}:
             return self._serve_archive(path, archive_format)
+        selected = query.get("sel")  # checkboxes from the listing -> zip of those entries
+        if selected:
+            return self._serve_selection(path, selected)
         # Index lookup goes through the SAME containment check as everything else:
         # an index.html symlinked outside the root must not be served.
         for name in self.index_pages:
@@ -297,6 +301,24 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             ):
                 return self._serve_file(candidate)
         return self.list_directory(path)
+
+    def _serve_selection(self, path: str, names: list[str]) -> None:
+        """Stream the checkbox-selected entries of ``path`` as one zip."""
+        base_name = os.path.basename(path.rstrip("/" + os.sep)) or "selection"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", _content_disposition(f"{base_name}.zip"))
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        writer = _ChunkedWriter(self.wfile)
+        try:
+            archive.stream_zip_selection(path, names, base_name, writer)
+            writer.close()
+        except OSError as exc:  # pragma: no cover - client hung up, or a file changed
+            _log.logger.debug("selection zip aborted: %r", exc)
+            self.close_connection = True
 
     def _serve_archive(self, path: str, archive_format: str) -> None:
         base_name = os.path.basename(path.rstrip("/" + os.sep)) or "archive"

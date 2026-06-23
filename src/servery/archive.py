@@ -51,3 +51,31 @@ def stream_zip(root_dir: str, base_name: str, writer: SupportsWrite[bytes]) -> N
     ) as archive:
         for full in _iter_regular_files(root_dir):
             archive.write(full, arcname=_arcname(full, root_dir, base_name))
+
+
+def stream_zip_selection(
+    dir_path: str, names: list[str], base_name: str, writer: SupportsWrite[bytes]
+) -> None:
+    """Stream a zip of the named direct children of ``dir_path`` (files and subdirs).
+
+    ``names`` are bare entry names; any that are not a real child (contain a path
+    separator or ``..``, or are a symlink) are skipped, so a crafted selection can
+    never escape ``dir_path``.
+    """
+    with zipfile.ZipFile(
+        cast("BinaryIO", writer),
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        allowZip64=True,
+    ) as archive:
+        for name in names:
+            if not name or name in (".", "..") or "/" in name or "\\" in name:
+                continue
+            full = os.path.join(dir_path, name)
+            if os.path.islink(full):
+                continue
+            if os.path.isdir(full):
+                for entry in _iter_regular_files(full):
+                    archive.write(entry, arcname=_arcname(entry, dir_path, base_name))
+            elif os.path.isfile(full):
+                archive.write(full, arcname=_arcname(full, dir_path, base_name))
