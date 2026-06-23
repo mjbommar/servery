@@ -26,6 +26,7 @@ import os
 import shutil
 import socket
 import ssl
+import time
 import urllib.parse
 from http import HTTPStatus
 from typing import TYPE_CHECKING, BinaryIO, ClassVar, cast, overload
@@ -39,6 +40,13 @@ if TYPE_CHECKING:
 
 _COPY_BUFSIZE = 64 * 1024
 _WWW_AUTHENTICATE = 'Basic realm="servery", charset="UTF-8"'
+
+# The Date header is emitted on every response but only changes once a second, so
+# we format it at most once per second and share it across all connections (the
+# classic server trick). One-slot list of (second, formatted): the element swap is
+# atomic, so the free-threaded read/write needs no lock; a ~1 s-stale Date is
+# within HTTP's tolerance.
+_DATE_CACHE: list[tuple[int, str]] = [(0, "")]
 # CSP for servery-GENERATED pages (listing / error): no scripts, inline styles
 # only, self forms. Served files are NOT given a CSP (it would break real sites).
 _CSP = (
@@ -114,6 +122,18 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     @property
     def _server(self) -> ServeryHTTPServer:
         return cast("ServeryHTTPServer", self.server)
+
+    def date_time_string(self, timestamp: float | None = None) -> str:
+        # Last-Modified (timestamp given) still formats per file; the current-time
+        # Date header (no timestamp) is cached per second across all responses.
+        if timestamp is not None:
+            return email.utils.formatdate(timestamp, usegmt=True)
+        now = int(time.time())
+        second, formatted = _DATE_CACHE[0]
+        if now != second:
+            formatted = email.utils.formatdate(now, usegmt=True)
+            _DATE_CACHE[0] = (now, formatted)
+        return formatted
 
     def setup(self) -> None:
         super().setup()
