@@ -16,7 +16,6 @@ redirects, and MIME typing. servery overrides what it improves:
 from __future__ import annotations
 
 import contextlib
-import datetime
 import email.utils
 import http.cookies
 import http.server
@@ -33,6 +32,7 @@ from typing import TYPE_CHECKING, BinaryIO, ClassVar, cast, overload
 from servery import (
     __version__,
     _compress,
+    _conditional,
     _http1,
     _log,
     archive,
@@ -539,20 +539,20 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             # bytes is incoherent on the fly, so we only compress when no Range is
             # asked for (RFC 9110 §14.1.2). Compressible resources always advertise
             # Vary: Accept-Encoding so a shared cache can't mix codings (§12.5.5).
-            self._vary_accept_encoding = compressible = _compress.compressible(ctype)
-            use_gzip = (
-                compressible
-                and _compress.GZIP_MIN <= size <= _compress.GZIP_MAX
-                and not range_header
-                and self._server.config.compress
-                and _compress.accepts_gzip(self.headers.get("Accept-Encoding", ""))
+            self._vary_accept_encoding = _compress.compressible(ctype)
+            # gzip uses the shared decision; ranges add the §14.1.2 mutual exclusion.
+            use_gzip = not range_header and _compress.should_gzip(
+                ctype,
+                size,
+                self.headers.get("Accept-Encoding", ""),
+                enabled=self._server.config.compress,
             )
             # The gzip representation needs a distinct (still strong) ETag (§8.8.3.3);
             # decide the coding BEFORE conditionals so a 304/If-None-Match echoes the
             # tag for the representation the client would actually get.
-            etag = _make_etag(stat)
+            etag = _conditional.make_etag(stat)
             if use_gzip:
-                etag = etag[:-1] + '-gz"'
+                etag = _conditional.gzip_variant(etag)
 
             if self._is_not_modified(etag, stat.st_mtime):
                 self.send_response(HTTPStatus.NOT_MODIFIED)
@@ -674,14 +674,12 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     # --- conditional requests -------------------------------------------
 
     def _is_not_modified(self, etag: str, mtime: float) -> bool:
-        # If-None-Match takes precedence; If-Modified-Since is ignored when present.
-        inm = self.headers.get("If-None-Match")
-        if inm is not None:
-            return _etag_matches(inm, etag)
-        ims = self.headers.get("If-Modified-Since")
-        if ims:
-            return _not_modified_since(ims, mtime)
-        return False
+        return _conditional.is_not_modified(
+            etag,
+            mtime,
+            if_none_match=self.headers.get("If-None-Match"),
+            if_modified_since=self.headers.get("If-Modified-Since"),
+        )
 
     def _if_range_ok(self, etag: str, mtime: float) -> bool:
         condition = self.headers.get("If-Range")
@@ -690,7 +688,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         condition = condition.strip()
         if condition.startswith(('"', "W/")):
             return condition == etag  # strong comparison
-        return _not_modified_since(condition, mtime)
+        return _conditional.not_modified_since(condition, mtime)
 
     # --- directory listing (v0.2) ---------------------------------------
 
@@ -910,32 +908,3 @@ def _read_request_headers(rfile: io.BufferedIOBase) -> _RequestHeaders:
             continue  # a line without a colon is not a header field; ignore it
         pairs.append((name.decode("latin-1").strip(), value.strip().decode("latin-1")))
     return _RequestHeaders(pairs)
-
-
-def _make_etag(stat: os.stat_result) -> str:
-    # Strong validator from size + nanosecond mtime (same shape nginx uses): it
-    # is safe for If-Range and for both weak and strong If-None-Match comparison.
-    return f'"{stat.st_size:x}-{stat.st_mtime_ns:x}"'
-
-
-def _etag_matches(header: str, etag: str) -> bool:
-    header = header.strip()
-    if header == "*":
-        return True
-    return any(_unweak(tag.strip()) == _unweak(etag) for tag in header.split(","))
-
-
-def _unweak(tag: str) -> str:
-    return tag[2:] if tag.startswith("W/") else tag
-
-
-def _not_modified_since(header: str, mtime: float) -> bool:
-    try:
-        since = email.utils.parsedate_to_datetime(header)
-        if since.tzinfo is None:
-            since = since.replace(tzinfo=datetime.UTC)
-        # A corrupt/extreme on-disk mtime must not crash the conditional path.
-        last = datetime.datetime.fromtimestamp(mtime, datetime.UTC).replace(microsecond=0)
-    except (TypeError, ValueError, IndexError, OverflowError, OSError):
-        return False
-    return last <= since

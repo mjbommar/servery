@@ -23,7 +23,7 @@ def _h2_exchange(
     path: str,
     method: str = "GET",
     extra_headers: tuple[tuple[bytes, bytes], ...] = (),
-) -> tuple[int | None, bytes]:
+) -> tuple[int | None, dict[bytes, bytes], bytes]:
     sock = socket.create_connection((host, port), timeout=5)
     try:
         request = [
@@ -45,6 +45,7 @@ def _h2_exchange(
         reader = frames.FrameReader()
         decoder = hpack.Decoder()
         status: int | None = None
+        headers: dict[bytes, bytes] = {}
         body = bytearray()
         done = False
         while not done:
@@ -57,11 +58,12 @@ def _h2_exchange(
                     for name, value in decoder.decode(frame.header_block):
                         if name == b":status":
                             status = int(value)
+                        headers[name] = value
                     done = frame.end_stream
                 elif isinstance(frame, frames.DataFrame) and frame.stream_id == 1:
                     body += frame.data
                     done = done or frame.end_stream
-        return status, bytes(body)
+        return status, headers, bytes(body)
     finally:
         sock.close()
 
@@ -91,6 +93,10 @@ class _H2ServerCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def _get(self, path, method="GET", extra_headers=()):
+        status, _headers, body = _h2_exchange(self.host, self.port, path, method, extra_headers)
+        return status, body
+
+    def _get_full(self, path, method="GET", extra_headers=()):
         return _h2_exchange(self.host, self.port, path, method, extra_headers)
 
 
@@ -99,6 +105,22 @@ class Http2ServerTest(_H2ServerCase):
         status, body = self._get("/hello.txt")
         self.assertEqual(status, 200)
         self.assertEqual(body, b"hi there")
+
+    def test_file_has_validators(self):
+        status, headers, _body = self._get_full("/hello.txt")
+        self.assertEqual(status, 200)
+        self.assertIn(b"etag", headers)  # buffered backend now sends validators
+        self.assertIn(b"last-modified", headers)
+
+    def test_conditional_304(self):
+        _status, headers, _body = self._get_full("/hello.txt")
+        etag = headers[b"etag"]
+        status2, headers2, body2 = self._get_full(
+            "/hello.txt", extra_headers=((b"if-none-match", etag),)
+        )
+        self.assertEqual(status2, 304)  # revalidated
+        self.assertEqual(body2, b"")
+        self.assertEqual(headers2[b"etag"], etag)
 
     def test_get_listing(self):
         status, body = self._get("/")

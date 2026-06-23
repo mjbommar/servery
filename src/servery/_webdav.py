@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING
 
 from servery import security
-from servery.handler import _make_etag
+from servery._conditional import make_etag
 
 if TYPE_CHECKING:
     from servery.handler import ServeryHandler
@@ -92,7 +92,7 @@ def _prop_response(href: str, fs_path: str) -> ET.Element:
     else:
         ET.SubElement(prop, _q("getcontentlength")).text = str(stat.st_size)
         ET.SubElement(prop, _q("getcontenttype")).text = "application/octet-stream"
-        ET.SubElement(prop, _q("getetag")).text = _make_etag(stat)
+        ET.SubElement(prop, _q("getetag")).text = make_etag(stat)
     ET.SubElement(prop, _q("displayname")).text = os.path.basename(href.rstrip("/")) or "/"
     ET.SubElement(prop, _q("getlastmodified")).text = _http_date(stat.st_mtime)
     ET.SubElement(prop, _q("creationdate")).text = _iso_date(stat.st_ctime)

@@ -5,13 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from servery.handler import (
-    _content_disposition,
-    _copy_n,
-    _etag_matches,
-    _make_etag,
-    _not_modified_since,
-)
+from servery._conditional import etag_matches as _etag_matches
+from servery._conditional import make_etag as _make_etag
+from servery._conditional import not_modified_since as _not_modified_since
+from servery.handler import _content_disposition, _copy_n
 
 
 class EtagMatchTest(unittest.TestCase):

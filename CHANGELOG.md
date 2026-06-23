@@ -8,6 +8,11 @@ All notable changes to servery are documented here. The format follows
 
 ### Added
 
+- **HTTP/2 and HTTP/3 now send `ETag` + `Last-Modified` and honor conditional
+  requests** (`If-None-Match` / `If-Modified-Since` → `304 Not Modified`), matching
+  the HTTP/1.1 handler — so repeat loads over h2/h3 revalidate cheaply instead of
+  re-downloading. The validator shape and conditional semantics are shared with the
+  HTTP/1.1 path via a new `servery._conditional` module (one source of truth).
 - **Access logging to a file** — `--access-log PATH` writes one line per response in
   `--access-log-format` `clf` (Common Log Format, default), `combined` (CLF +
   referer/user-agent), or `json`. Separate from the diagnostic stderr log;

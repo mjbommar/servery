@@ -11,11 +11,12 @@ Headers are wire form: ``list[(bytes, bytes)]`` with lowercase names.
 
 from __future__ import annotations
 
+import email.utils
 import mimetypes
 import os
 from typing import TYPE_CHECKING
 
-from servery import _compress, _http1, listing
+from servery import _compress, _conditional, _http1, listing
 from servery.handler import _CSP
 
 if TYPE_CHECKING:
@@ -60,36 +61,41 @@ def error(status: int) -> tuple[int, _HeaderList, bytes]:
 
 
 def finalize_body(
-    config: Config, headers: _HeaderList, ctype: str, body: bytes, accept_encoding: str
+    headers: _HeaderList, ctype: str, body: bytes, *, gzip: bool
 ) -> tuple[int, _HeaderList, bytes]:
-    """Append content-type/length, gzip when accepted, Vary on compressible types.
+    """Append Vary (compressible), Content-Encoding (when ``gzip``), Content-Type/Length.
 
-    The single content-coding decision (RFC 9110): compressible type → ``Vary:
-    Accept-Encoding``; and gzip only when enabled, in the size band, and the client
-    accepts it. Shared by every buffered backend so the decision stays identical.
+    The gzip *decision* is made by the caller via :func:`_compress.should_gzip` (so it
+    can agree with the ETag variant); this just assembles the body + headers.
     """
     if _compress.compressible(ctype):
         headers.append((b"vary", b"accept-encoding"))
-        if (
-            config.compress
-            and _compress.GZIP_MIN <= len(body) <= _compress.GZIP_MAX
-            and _compress.accepts_gzip(accept_encoding)
-        ):
-            body = _compress.gzip_bytes(body)
-            headers.append((b"content-encoding", b"gzip"))
+    if gzip:
+        body = _compress.gzip_bytes(body)
+        headers.append((b"content-encoding", b"gzip"))
     headers.append((b"content-type", ctype.encode("latin-1")))
     headers.append((b"content-length", str(len(body)).encode("ascii")))
     return 200, headers, body
 
 
 def build_static(
-    config: Config, fs_path: str, display: str, accept_encoding: str, *, tls: bool
+    config: Config,
+    fs_path: str,
+    display: str,
+    accept_encoding: str,
+    *,
+    tls: bool,
+    if_none_match: str | None = None,
+    if_modified_since: str | None = None,
 ) -> tuple[int, _HeaderList, bytes]:
     """Resolve an already-contained path to a buffered (status, headers, body).
 
     ``fs_path`` must already have passed the transport's containment check (an empty
     string means "escaped" → 404). ``display`` is the URL path (for the redirect and
-    the listing heading). The dir-or-file logic shared by HTTP/2 and HTTP/3.
+    the listing heading). Files get a strong ETag + Last-Modified and honor
+    ``If-None-Match`` / ``If-Modified-Since`` (304) — the same validators and
+    conditional semantics as the HTTP/1.1 handler, via :mod:`servery._conditional`.
+    The dir-or-file logic shared by HTTP/2 and HTTP/3.
     """
     headers = base_headers(config, tls=tls)
     if not fs_path:
@@ -108,10 +114,31 @@ def build_static(
             # "default-src 'none'" alone renders it unstyled.
             headers.append((b"content-security-policy", _CSP.encode("latin-1")))
             headers.append((b"referrer-policy", b"no-referrer"))
-        return finalize_body(config, headers, _LISTING_TYPE, body, accept_encoding)
+        gzip = _compress.should_gzip(
+            _LISTING_TYPE, len(body), accept_encoding, enabled=config.compress
+        )
+        return finalize_body(headers, _LISTING_TYPE, body, gzip=gzip)
+    try:
+        stat = os.stat(fs_path)  # noqa: PTH116 - os-level by design
+    except OSError:
+        return error(404)
+    ctype = guess_type(fs_path)
+    # Decide gzip from the identity size (no read needed) so the ETag for the
+    # representation the client would get is known before any conditional check.
+    gzip = _compress.should_gzip(ctype, stat.st_size, accept_encoding, enabled=config.compress)
+    etag = _conditional.make_etag(stat)
+    if gzip:
+        etag = _conditional.gzip_variant(etag)
+    last_modified = email.utils.formatdate(stat.st_mtime, usegmt=True)
+    headers.append((b"etag", etag.encode("ascii")))
+    headers.append((b"last-modified", last_modified.encode("latin-1")))
+    if _conditional.is_not_modified(
+        etag, stat.st_mtime, if_none_match=if_none_match, if_modified_since=if_modified_since
+    ):
+        return 304, headers, b""  # revalidated — no body, no file read
     try:
         with open(fs_path, "rb") as handle:  # noqa: PTH123 - os-level by design
             body = handle.read()
     except OSError:
         return error(404)
-    return finalize_body(config, headers, guess_type(fs_path), body, accept_encoding)
+    return finalize_body(headers, ctype, body, gzip=gzip)

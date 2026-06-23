@@ -80,6 +80,21 @@ def accepts_gzip(accept_encoding: str) -> bool:
     return best_star > 0  # else a non-zero wildcard accepts it
 
 
+def should_gzip(content_type: str, size: int, accept_encoding: str, *, enabled: bool) -> bool:
+    """The single gzip decision: enabled, compressible type, in the size band, accepted.
+
+    ``size`` is the identity (uncompressed) length, so this can be answered from a
+    stat without reading the file. Shared by every transport so the decision is one
+    place (it must agree with the ETag's gzip variant, RFC 9110 §8.8.3.3).
+    """
+    return (
+        enabled
+        and compressible(content_type)
+        and GZIP_MIN <= size <= GZIP_MAX
+        and accepts_gzip(accept_encoding)
+    )
+
+
 def gzip_bytes(data: bytes) -> bytes:
     """Compress ``data`` as a gzip stream (deterministic: fixed mtime)."""
     return gzip.compress(data, compresslevel=6, mtime=0)

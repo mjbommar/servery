@@ -33,18 +33,25 @@ class Http3UnavailableError(RuntimeError):
 
 
 def build_response(
-    config: Config, root_real: str, method: str, url_path: str, accept_encoding: str = ""
+    config: Config,
+    root_real: str,
+    method: str,
+    url_path: str,
+    accept_encoding: str = "",
+    *,
+    if_none_match: str | None = None,
+    if_modified_since: str | None = None,
 ) -> tuple[int, _HeaderList, bytes]:
     """Resolve a GET/HEAD request to (status, response headers, body).
 
     This is a deliberately reduced backend versus the HTTP/1.1 handler: it enforces
-    auth (in ``_reply``), path-safety, the security headers, CORS, and cache-control,
-    but does NOT yet implement Range/206, conditional/304, SPA fallback, index-file
+    auth (in ``_reply``), path-safety, the security/cache headers, ETag +
+    conditional 304, but does NOT yet implement Range/206, SPA fallback, index-file
     lookup, ``?download``/``?archive``, or streaming (it buffers the whole file).
     HTTP/3 is an opt-in experimental extra; the full-featured path is HTTP/1.1.
 
-    The dir-or-file body building + the content-coding/security headers are shared
-    with HTTP/2 via :mod:`servery._response`, so the decisions can't drift.
+    The dir-or-file body building, content-coding, security headers, and conditional
+    handling are shared with HTTP/2 via :mod:`servery._response`, so they can't drift.
     """
     if method not in {"GET", "HEAD"}:
         return 405, [(b"allow", b"GET, HEAD")], b"405"
@@ -52,7 +59,15 @@ def build_response(
     display = url_path.split("?", 1)[0].split("#", 1)[0]
     # safe_join returns None for an escaping path; build_static maps "" to a 404.
     # HTTP/3 is always TLS, so HSTS always applies.
-    return _response.build_static(config, fs_path or "", display, accept_encoding, tls=True)
+    return _response.build_static(
+        config,
+        fs_path or "",
+        display,
+        accept_encoding,
+        tls=True,
+        if_none_match=if_none_match,
+        if_modified_since=if_modified_since,
+    )
 
 
 def serve_http3(config: Config) -> None:  # pragma: no cover - requires aioquic + UDP
@@ -110,7 +125,17 @@ def serve_http3(config: Config) -> None:  # pragma: no cover - requires aioquic 
                     _log.logger.info('HTTP/3 "%s %s" 401', method, path)
                     return
             accept = headers.get(b"accept-encoding", b"").decode("latin-1")
-            status, response_headers, body = build_response(config, root_real, method, path, accept)
+            inm = headers.get(b"if-none-match")
+            ims = headers.get(b"if-modified-since")
+            status, response_headers, body = build_response(
+                config,
+                root_real,
+                method,
+                path,
+                accept,
+                if_none_match=inm.decode("latin-1") if inm is not None else None,
+                if_modified_since=ims.decode("latin-1") if ims is not None else None,
+            )
             _log.logger.info('HTTP/3 "%s %s" %s', method, path, status)
             send_body = body if method != "HEAD" else b""
             self._http.send_headers(

@@ -186,7 +186,7 @@ class H2Connection:
             return
 
         accept_encoding = regular.get(b"accept-encoding", b"").decode("latin-1")
-        status, headers_out, body = self._build_response(path, accept_encoding)
+        status, headers_out, body = self._build_response(path, accept_encoding, regular)
         self._respond(stream_id, status, headers_out, body if method == "GET" else None)
 
     def _authorized(self, regular: dict[bytes, bytes]) -> bool:
@@ -197,7 +197,7 @@ class H2Connection:
         return header is not None and credential.check_header(header.decode("latin-1"))
 
     def _build_response(
-        self, url_path: str, accept_encoding: str = ""
+        self, url_path: str, accept_encoding: str, regular: dict[bytes, bytes]
     ) -> tuple[int, _HeaderList, bytes]:
         # translate_path() already ran the symlink-safe containment check and
         # returned "" for anything escaping the root (build_static maps that to a
@@ -206,7 +206,17 @@ class H2Connection:
         display = url_path.split("?", 1)[0].split("#", 1)[0]
         # h2 may be cleartext (h2c); only assert HSTS over a real TLS socket.
         tls = isinstance(self.handler.connection, ssl.SSLSocket)
-        return _response.build_static(self.config, fs_path, display, accept_encoding, tls=tls)
+        inm = regular.get(b"if-none-match")
+        ims = regular.get(b"if-modified-since")
+        return _response.build_static(
+            self.config,
+            fs_path,
+            display,
+            accept_encoding,
+            tls=tls,
+            if_none_match=inm.decode("latin-1") if inm is not None else None,
+            if_modified_since=ims.decode("latin-1") if ims is not None else None,
+        )
 
     @staticmethod
     def _error(status: int) -> tuple[int, _HeaderList, bytes]:
