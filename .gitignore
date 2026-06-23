@@ -24,3 +24,6 @@ venv/
 
 # uv
 # (uv.lock IS committed; the virtualenv is not)
+
+# pytest-benchmark autosave cache (machine-specific; baselines are committed explicitly)
+.benchmarks/

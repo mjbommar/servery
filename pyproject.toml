@@ -68,6 +68,19 @@ dev = [
   "twine>=5.0",
   "pre-commit>=3.7",
 ]
+# Performance benchmarking only — opt-in, kept OUT of the lean `test` group so the
+# free-threaded CI stays clean. Run with `uv run --group bench pytest benchmarks/`.
+# pytest + pytest-benchmark give reproducible artifacts (--benchmark-json, autosave,
+# and --benchmark-compare for regression gating). NOTE: aioquic (for the HTTP/3
+# benchmark) is deliberately NOT here — its pylsqpack C-extension has no
+# free-threaded build, so it would break `bench` on the default 3.14t interpreter.
+# The HTTP/3 benchmark importorskips aioquic; run it on a GIL build with the extra:
+#   uv run --python 3.13 --group bench --extra http3 pytest benchmarks/
+bench = [
+  {include-group = "test"},
+  "pytest>=8",
+  "pytest-benchmark>=5",
+]
 # Note: ty (the type checker) is run via `uvx ty` — it is preview-versioned and
 # fast-moving, so we pull the latest ephemerally rather than pinning it here.
 
@@ -154,3 +167,9 @@ exclude_lines = [
   "if __name__ == .__main__.:",
   "raise NotImplementedError",
 ]
+
+# pytest is used ONLY for the benchmark suite (the functional suite is unittest, run
+# via `python -m unittest`). Scoped to benchmarks/ so `pytest` never collects tests/.
+[tool.pytest.ini_options]
+testpaths = ["benchmarks"]
+addopts = "--benchmark-columns=median,ops,rounds --benchmark-sort=name"
