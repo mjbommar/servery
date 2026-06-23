@@ -78,6 +78,17 @@ class Flag(enum.IntFlag):
     PRIORITY = 0x20
 
 
+# Plain-int masks for the hot parse/check path. IntFlag's & / | / ~ route through
+# the (slow) enum machinery — re-canonicalizing a member on every operation — so the
+# per-frame flag checks operate on raw ints from the wire instead. The Flag enum
+# stays the readable API for constructing frames to send (a cold path).
+_F_END_STREAM = Flag.END_STREAM.value
+_F_ACK = Flag.ACK.value
+_F_END_HEADERS = Flag.END_HEADERS.value
+_F_PADDED = Flag.PADDED.value
+_F_PRIORITY = Flag.PRIORITY.value
+
+
 class ErrorCode(enum.IntEnum):
     """RFC 9113 §7 error codes (32-bit, used by RST_STREAM and GOAWAY)."""
 
@@ -148,13 +159,13 @@ class DataFrame:
     """A DATA frame (§6.1) with padding already stripped from ``data``."""
 
     stream_id: int
-    flags: Flag
+    flags: int
     data: bytes
 
     @property
     def end_stream(self) -> bool:
         """True if the END_STREAM flag is set."""
-        return bool(self.flags & Flag.END_STREAM)
+        return bool(self.flags & _F_END_STREAM)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -168,7 +179,7 @@ class HeadersFrame:
     """
 
     stream_id: int
-    flags: Flag
+    flags: int
     header_block: bytes
     exclusive: bool | None = None
     stream_dependency: int | None = None
@@ -177,12 +188,12 @@ class HeadersFrame:
     @property
     def end_stream(self) -> bool:
         """True if the END_STREAM flag is set."""
-        return bool(self.flags & Flag.END_STREAM)
+        return bool(self.flags & _F_END_STREAM)
 
     @property
     def end_headers(self) -> bool:
         """True if the END_HEADERS flag is set (no CONTINUATION follows)."""
-        return bool(self.flags & Flag.END_HEADERS)
+        return bool(self.flags & _F_END_HEADERS)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -190,7 +201,7 @@ class PriorityFrame:
     """A PRIORITY frame (§6.3): a stream-dependency edge plus weight."""
 
     stream_id: int
-    flags: Flag
+    flags: int
     exclusive: bool
     stream_dependency: int
     weight: int
@@ -201,7 +212,7 @@ class RstStreamFrame:
     """A RST_STREAM frame (§6.4): abrupt stream termination with an error code."""
 
     stream_id: int
-    flags: Flag
+    flags: int
     error_code: int
 
 
@@ -215,13 +226,13 @@ class SettingsFrame:
     """
 
     stream_id: int
-    flags: Flag
+    flags: int
     settings: tuple[tuple[int, int], ...]
 
     @property
     def ack(self) -> bool:
         """True if this is a SETTINGS acknowledgement."""
-        return bool(self.flags & Flag.ACK)
+        return bool(self.flags & _F_ACK)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -229,14 +240,14 @@ class PushPromiseFrame:
     """A PUSH_PROMISE frame (§6.6) with padding stripped from ``header_block``."""
 
     stream_id: int
-    flags: Flag
+    flags: int
     promised_stream_id: int
     header_block: bytes
 
     @property
     def end_headers(self) -> bool:
         """True if the END_HEADERS flag is set."""
-        return bool(self.flags & Flag.END_HEADERS)
+        return bool(self.flags & _F_END_HEADERS)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -244,13 +255,13 @@ class PingFrame:
     """A PING frame (§6.7): 8 octets of opaque data, optionally an ACK."""
 
     stream_id: int
-    flags: Flag
+    flags: int
     opaque_data: bytes
 
     @property
     def ack(self) -> bool:
         """True if this is a PING acknowledgement."""
-        return bool(self.flags & Flag.ACK)
+        return bool(self.flags & _F_ACK)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -258,7 +269,7 @@ class GoAwayFrame:
     """A GOAWAY frame (§6.8): connection shutdown with diagnostics."""
 
     stream_id: int
-    flags: Flag
+    flags: int
     last_stream_id: int
     error_code: int
     debug_data: bytes
@@ -269,7 +280,7 @@ class WindowUpdateFrame:
     """A WINDOW_UPDATE frame (§6.9): a flow-control window increment."""
 
     stream_id: int
-    flags: Flag
+    flags: int
     window_size_increment: int
 
 
@@ -278,13 +289,13 @@ class ContinuationFrame:
     """A CONTINUATION frame (§6.10): more field-block fragment bytes."""
 
     stream_id: int
-    flags: Flag
+    flags: int
     header_block: bytes
 
     @property
     def end_headers(self) -> bool:
         """True if the END_HEADERS flag is set."""
-        return bool(self.flags & Flag.END_HEADERS)
+        return bool(self.flags & _F_END_HEADERS)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -292,7 +303,7 @@ class UnknownFrame:
     """An unknown/extension frame type — receivers MUST ignore it (RFC 9113 §5.5)."""
 
     stream_id: int
-    flags: Flag
+    flags: int
     frame_type: int
 
 
@@ -413,12 +424,12 @@ def parse_frame(header9: bytes, payload: bytes) -> Frame:
         raise FrameError(
             f"payload length {len(payload)} does not match header length {header.length}"
         )
-    flags = Flag(header.flags)
+    flags = header.flags  # raw int; checks use _F_* masks (avoids IntFlag overhead)
     sid = header.stream_id
 
     if header.type == FrameType.DATA:
         _require_stream(sid, "DATA")
-        data = _strip_padding(payload) if flags & Flag.PADDED else payload
+        data = _strip_padding(payload) if flags & _F_PADDED else payload
         return DataFrame(sid, flags, data)
 
     if header.type == FrameType.HEADERS:
@@ -478,10 +489,10 @@ def parse_frame(header9: bytes, payload: bytes) -> Frame:
     return UnknownFrame(sid, flags, header.type)
 
 
-def _parse_headers(sid: int, flags: Flag, payload: bytes) -> HeadersFrame:
+def _parse_headers(sid: int, flags: int, payload: bytes) -> HeadersFrame:
     """Parse a HEADERS payload, stripping padding then peeling priority fields."""
-    body = _strip_padding(payload) if flags & Flag.PADDED else payload
-    if flags & Flag.PRIORITY:
+    body = _strip_padding(payload) if flags & _F_PADDED else payload
+    if flags & _F_PRIORITY:
         if len(body) < 5:
             raise FrameError("HEADERS with PRIORITY flag missing 5-octet priority block")
         exclusive, dep, weight = _read_priority_fields(body)
@@ -489,9 +500,9 @@ def _parse_headers(sid: int, flags: Flag, payload: bytes) -> HeadersFrame:
     return HeadersFrame(sid, flags, body)
 
 
-def _parse_settings(sid: int, flags: Flag, payload: bytes) -> SettingsFrame:
+def _parse_settings(sid: int, flags: int, payload: bytes) -> SettingsFrame:
     """Parse a SETTINGS payload into (id, value) pairs, validating ACK/length."""
-    if flags & Flag.ACK:
+    if flags & _F_ACK:
         if payload:
             raise FrameError("SETTINGS ACK frame must have empty payload")
         return SettingsFrame(sid, flags, ())
@@ -503,9 +514,9 @@ def _parse_settings(sid: int, flags: Flag, payload: bytes) -> SettingsFrame:
     return SettingsFrame(sid, flags, settings)
 
 
-def _parse_push_promise(sid: int, flags: Flag, payload: bytes) -> PushPromiseFrame:
+def _parse_push_promise(sid: int, flags: int, payload: bytes) -> PushPromiseFrame:
     """Parse a PUSH_PROMISE payload: strip padding, read promised stream id."""
-    body = _strip_padding(payload) if flags & Flag.PADDED else payload
+    body = _strip_padding(payload) if flags & _F_PADDED else payload
     if len(body) < 4:
         raise FrameError("PUSH_PROMISE frame missing promised stream id")
     (raw,) = _U32.unpack(body[:4])
