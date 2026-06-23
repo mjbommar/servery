@@ -20,6 +20,10 @@ import hmac
 
 _HASH_ALGORITHMS = ("sha256", "sha512")
 
+# The single WWW-Authenticate challenge value, shared by every transport's 401 so
+# the realm (and the UTF-8 charset hint, RFC 7617 §2.1) can't drift between them.
+WWW_AUTHENTICATE = 'Basic realm="servery", charset="UTF-8"'
+
 
 def _ct_equal(expected: str, given: str) -> bool:
     """Length-independent constant-time string comparison.

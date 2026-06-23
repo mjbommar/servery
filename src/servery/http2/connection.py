@@ -19,7 +19,7 @@ import contextlib
 import ssl
 from typing import TYPE_CHECKING
 
-from servery import _log, _response
+from servery import _log, _response, auth
 from servery.http2 import frames, hpack
 from servery.http2.frames import ErrorCode, Flag, FrameType
 
@@ -174,7 +174,12 @@ class H2Connection:
         path = pseudo[b":path"].decode("latin-1")
 
         if self.config.auth is not None and not self._authorized(regular):
-            self._respond(stream_id, 401, [(b"www-authenticate", b'Basic realm="servery"')], b"")
+            self._respond(
+                stream_id,
+                401,
+                [(b"www-authenticate", auth.WWW_AUTHENTICATE.encode("latin-1"))],
+                b"",
+            )
             return
         if method not in {"GET", "HEAD"}:
             self._respond(stream_id, 405, [(b"allow", b"GET, HEAD")], b"")

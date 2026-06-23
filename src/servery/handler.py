@@ -30,7 +30,18 @@ import urllib.parse
 from http import HTTPStatus
 from typing import TYPE_CHECKING, BinaryIO, ClassVar, cast, overload
 
-from servery import __version__, _compress, _http1, _log, archive, listing, ranges, security, upload
+from servery import (
+    __version__,
+    _compress,
+    _http1,
+    _log,
+    archive,
+    auth,
+    listing,
+    ranges,
+    security,
+    upload,
+)
 
 if TYPE_CHECKING:
     from _typeshed import SupportsRead, SupportsWrite
@@ -38,7 +49,6 @@ if TYPE_CHECKING:
     from servery.server import ServeryHTTPServer
 
 _COPY_BUFSIZE = 64 * 1024
-_WWW_AUTHENTICATE = 'Basic realm="servery", charset="UTF-8"'
 # CSP for servery-GENERATED pages (listing / error): no scripts, inline styles
 # only, self forms. Served files are NOT given a CSP (it would break real sites).
 _CSP = (
@@ -655,7 +665,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         # (e.g. a POST) which would otherwise be mis-parsed as the next request.
         self.close_connection = True
         self.send_response(HTTPStatus.UNAUTHORIZED)
-        self.send_header("WWW-Authenticate", _WWW_AUTHENTICATE)
+        self.send_header("WWW-Authenticate", auth.WWW_AUTHENTICATE)
         self.send_header("Content-Length", "0")
         self.send_header("Connection", "close")
         self.end_headers()

@@ -100,7 +100,10 @@ def serve_http3(config: Config) -> None:  # pragma: no cover - requires aioquic 
                 if not credential.check_header(authz):
                     self._http.send_headers(
                         stream_id,
-                        [(b":status", b"401"), (b"www-authenticate", b'Basic realm="servery"')],
+                        [
+                            (b":status", b"401"),
+                            (b"www-authenticate", auth.WWW_AUTHENTICATE.encode("latin-1")),
+                        ],
                         end_stream=True,
                     )
                     self.transmit()
