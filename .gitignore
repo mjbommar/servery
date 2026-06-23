@@ -25,5 +25,9 @@ venv/
 # uv
 # (uv.lock IS committed; the virtualenv is not)
 
-# pytest-benchmark autosave cache (machine-specific; baselines are committed explicitly)
+# Benchmark outputs are machine-specific (timings + hostname), so they're generated
+# locally (scripts/run_benchmarks.sh), never committed. Reference numbers live in
+# BENCHMARKS.md; regression comparison uses the local .benchmarks/ autosave.
 .benchmarks/
+benchmarks/artifacts/
+benchmarks/baselines/
