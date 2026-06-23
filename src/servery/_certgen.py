@@ -173,6 +173,7 @@ _OID = {
     "sha256": "2.16.840.1.101.3.4.2.1",
     "common_name": "2.5.4.3",
     "san": "2.5.29.17",
+    "ext_request": "1.2.840.113549.1.9.14",  # PKCS#9 extensionRequest (CSR attribute)
     "basic_constraints": "2.5.29.19",
     "key_usage": "2.5.29.15",
     "ext_key_usage": "2.5.29.37",
@@ -207,6 +208,36 @@ def _pem(label: str, der: bytes) -> str:
     return f"-----BEGIN {label}-----\n{body}-----END {label}-----\n"
 
 
+def _pkcs1v15_sign(key: dict[str, int], message: bytes) -> bytes:
+    """RSASSA-PKCS1-v1.5 signature over SHA-256(``message``).
+
+    This is exactly RS256 (RFC 7518 §3.3) — the same primitive that signs an X.509
+    TBS below — so the ACME client (``servery._acme``) reuses it for JWS + the CSR.
+    """
+    digest = hashlib.sha256(message).digest()
+    digest_info = _seq(_seq(_oid(_OID["sha256"]), _null()), _octets(digest))
+    key_bytes = (key["n"].bit_length() + 7) // 8
+    padding = b"\xff" * (key_bytes - len(digest_info) - 3)
+    encoded = b"\x00\x01" + padding + b"\x00" + digest_info
+    return pow(int.from_bytes(encoded, "big"), key["d"], key["n"]).to_bytes(key_bytes, "big")
+
+
+def _rsa_private_key_pem(key: dict[str, int]) -> str:
+    """Serialize an RSA key (the ``_generate_rsa`` dict) as a PKCS#1 ``RSA PRIVATE KEY``."""
+    der = _seq(
+        _int(0),
+        _int(key["n"]),
+        _int(key["e"]),
+        _int(key["d"]),
+        _int(key["p"]),
+        _int(key["q"]),
+        _int(key["dp"]),
+        _int(key["dq"]),
+        _int(key["qinv"]),
+    )
+    return _pem("RSA PRIVATE KEY", der)
+
+
 def generate(
     hosts: Sequence[str] = ("localhost", "127.0.0.1", "::1"),
     *,
@@ -237,23 +268,5 @@ def generate(
         spki,
         _extensions(hosts),
     )
-    # PKCS#1 v1.5 signature over SHA-256(tbs).
-    digest = hashlib.sha256(tbs).digest()
-    digest_info = _seq(_seq(_oid(_OID["sha256"]), _null()), _octets(digest))
-    key_bytes = (key["n"].bit_length() + 7) // 8
-    padding = b"\xff" * (key_bytes - len(digest_info) - 3)
-    encoded = b"\x00\x01" + padding + b"\x00" + digest_info
-    signature = pow(int.from_bytes(encoded, "big"), key["d"], key["n"]).to_bytes(key_bytes, "big")
-    certificate = _seq(tbs, sig_alg, _bitstring(signature))
-    private_key = _seq(
-        _int(0),
-        _int(key["n"]),
-        _int(key["e"]),
-        _int(key["d"]),
-        _int(key["p"]),
-        _int(key["q"]),
-        _int(key["dp"]),
-        _int(key["dq"]),
-        _int(key["qinv"]),
-    )
-    return _pem("CERTIFICATE", certificate), _pem("RSA PRIVATE KEY", private_key)
+    certificate = _seq(tbs, sig_alg, _bitstring(_pkcs1v15_sign(key, tbs)))
+    return _pem("CERTIFICATE", certificate), _rsa_private_key_pem(key)

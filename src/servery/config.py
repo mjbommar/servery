@@ -41,6 +41,9 @@ class Config:
     compress: bool = True  # gzip text-like responses when the client accepts it
     qr: bool = False  # print a QR of the LAN URL on startup
     discoverable: bool = False  # advertise over mDNS/DNS-SD (_http._tcp.local)
+    acme: tuple[str, ...] = ()  # domains to obtain a Let's Encrypt cert for (empty = off)
+    acme_email: str | None = None
+    acme_staging: bool = True  # use the staging CA (safe default); --acme-production to opt in
     timeout: float = 30.0
     max_workers: int | None = None
     http2: bool = False
@@ -105,6 +108,9 @@ class Config:
         compress: bool = True,
         qr: bool = False,
         discoverable: bool = False,
+        acme: tuple[str, ...] = (),
+        acme_email: str | None = None,
+        acme_staging: bool = True,
         timeout: float = 30.0,
         max_workers: int | None = None,
         http2: bool = False,
@@ -127,6 +133,10 @@ class Config:
             raise ValueError("--cache must be >= 0 seconds")
         if tls_self_signed and tls_cert is not None:
             raise ValueError("--tls-self-signed cannot be combined with --tls-cert")
+        if acme and (tls_cert is not None or tls_self_signed):
+            raise ValueError(
+                "--acme obtains its own certificate; drop --tls-cert/--tls-self-signed"
+            )
         dynamic = [
             name
             for name, value in (("--wsgi", wsgi_app), ("--cgi", cgi_dir), ("--asgi", asgi_app))
@@ -165,6 +175,9 @@ class Config:
             compress=compress,
             qr=qr,
             discoverable=discoverable,
+            acme=tuple(acme),
+            acme_email=acme_email,
+            acme_staging=acme_staging,
             timeout=timeout,
             max_workers=max_workers,
             http2=http2,

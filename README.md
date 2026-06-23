@@ -48,6 +48,10 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
 - **HTTPS** — bring your own cert (`--tls-cert`/`--tls-key`) or get an ad-hoc
   self-signed one with **`--tls-self-signed`** (zero-dependency, generated at
   startup — handy for a quick encrypted LAN share). ALPN + HSTS over TLS.
+- **Automatic HTTPS (Let's Encrypt), zero-dependency** — `--acme example.com` obtains
+  a browser-trusted certificate over ACME HTTP-01 (RFC 8555) and serves it. The JWS +
+  CSR are built from servery's own RSA/DER primitives, so trusted auto-TLS needs **no**
+  third-party crypto. Staging by default; `--acme-production` for real certs.
 - **HTTP Basic Auth** — single credential or a pre-hashed `user:sha256:…`, constant-time compare.
 - **Upload** — opt-in `--upload`, streaming `multipart/form-data` (no `cgi`), atomic writes,
   bounded size, overwrite off by default.

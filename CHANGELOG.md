@@ -8,6 +8,16 @@ All notable changes to servery are documented here. The format follows
 
 ### Added
 
+- **Automatic HTTPS via ACME / Let's Encrypt — zero-dependency.** `--acme
+  example.com` (repeatable) obtains a browser-trusted certificate over the ACME
+  HTTP-01 flow (RFC 8555) and serves HTTPS with it. Because servery already
+  hand-rolls RSA + DER + PKCS#1 v1.5 signing, the JWS and the PKCS#10 CSR need **no
+  third-party crypto** — almost no tool offers trusted auto-TLS dependency-free. The
+  account key + certificate are cached (`~/.config/servery/acme/`) and a still-valid
+  cert is reused (rate-limit-safe). Defaults to the Let's Encrypt **staging** CA;
+  `--acme-production` opts into real certs; `--acme-email` sets the account contact.
+  Validated end-to-end against Pebble (a real ACME server accepts the JWS + CSR).
+
 - **Frictionless LAN sharing** — `--qr` prints a scannable QR of the server's LAN
   URL on startup (pure-stdlib QR encoder, no dependency), and `--discoverable`
   advertises the server over mDNS/DNS-SD (`_http._tcp.local`) so it appears in

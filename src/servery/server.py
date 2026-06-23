@@ -186,10 +186,61 @@ def _start_mdns(config: Config, port: int):  # pragma: no cover - needs multicas
     return responder
 
 
+def _ensure_acme(config: Config) -> tuple[str, str]:  # pragma: no cover - needs a CA + port 80
+    """Obtain (or reuse a cached) ACME certificate; return (cert_path, key_path)."""
+    import json
+    import time
+
+    from servery import _acme, _certgen
+
+    staging = config.acme_staging
+    directory = _acme.LE_STAGING if staging else _acme.LE_PRODUCTION
+    cache = Path.home() / ".config" / "servery" / "acme" / ("staging" if staging else "production")
+    cache.mkdir(parents=True, exist_ok=True)
+    primary = config.acme[0]
+    cert_path, key_path = cache / f"{primary}.crt", cache / f"{primary}.key"
+    # Reuse a cert younger than 60 days (Let's Encrypt certs last 90) — respects rate limits.
+    if (
+        cert_path.exists()
+        and key_path.exists()
+        and time.time() - cert_path.stat().st_mtime < 60 * 86400
+    ):
+        return str(cert_path), str(key_path)
+    # Persist the account key so restarts don't re-register (RFC 8555 §7.3.1).
+    account_path = cache / "account.json"
+    if account_path.exists():
+        account_key = {k: int(v) for k, v in json.loads(account_path.read_text()).items()}
+    else:
+        account_key = _certgen._generate_rsa(2048)
+        account_path.write_text(json.dumps({k: str(v) for k, v in account_key.items()}))
+        account_path.chmod(0o600)
+    chain, key_pem = _acme.obtain(
+        list(config.acme),
+        email=config.acme_email,
+        directory_url=directory,
+        account_key=account_key,
+    )
+    cert_path.write_text(chain)
+    key_path.write_text(key_pem)
+    key_path.chmod(0o600)
+    return str(cert_path), str(key_path)
+
+
 def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (CLI entry)
     """Run the server until interrupted. Blocks the calling thread."""
     if not config.quiet:
         _log.configure_stderr()
+    if config.acme:  # obtain (or reuse) a Let's Encrypt cert, then serve HTTPS with it
+        import dataclasses
+
+        ca = "staging" if config.acme_staging else "PRODUCTION"
+        if not config.quiet:
+            print(
+                f"servery: obtaining ACME cert ({ca}) for {', '.join(config.acme)} …",
+                file=sys.stderr,
+            )
+        cert_path, key_path = _ensure_acme(config)
+        config = dataclasses.replace(config, tls_cert=cert_path, tls_key=key_path)
     if config.asgi_app:  # ASGI runs its own asyncio event loop, not the threading server
         from servery import asgi
 

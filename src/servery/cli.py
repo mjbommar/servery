@@ -232,6 +232,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print how to generate a self-signed certificate, then exit",
     )
+    parser.add_argument(
+        "--acme",
+        metavar="DOMAIN",
+        action="append",
+        help="obtain a browser-trusted Let's Encrypt cert for DOMAIN via ACME HTTP-01 "
+        "(repeatable; needs the HTTP-01 challenge reachable on port 80). Zero-dependency.",
+    )
+    parser.add_argument("--acme-email", metavar="EMAIL", help="contact email for the ACME account")
+    parser.add_argument(
+        "--acme-production",
+        action="store_false",
+        dest="acme_staging",
+        help="use the Let's Encrypt PRODUCTION CA (default: staging — safe for testing)",
+    )
     parser.add_argument("--version", action="version", version=f"servery {__version__}")
     return parser
 
@@ -284,6 +298,9 @@ def config_from_args(args: argparse.Namespace) -> Config:
         compress=args.compress,
         qr=args.qr,
         discoverable=args.discoverable,
+        acme=tuple(args.acme or ()),
+        acme_email=args.acme_email,
+        acme_staging=args.acme_staging,
         spa=args.spa,
         cache_max_age=args.cache_max_age,
         security_headers=args.security_headers,
