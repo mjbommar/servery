@@ -65,7 +65,10 @@ class _ServerCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         root = Path(self._tmp.name)
-        (root / "page.html").write_text("<h1>hi</h1>\n" + "x" * 4000)  # compressible, > 1 KiB
+        # write_bytes (not write_text) so the content is identical on every OS —
+        # Windows text mode would translate "\n" to "\r\n" and break the exact-body
+        # assertions below.
+        (root / "page.html").write_bytes(b"<h1>hi</h1>\n" + b"x" * 4000)  # compressible, > 1 KiB
         (root / "tiny.txt").write_text("small")  # below the 1 KiB threshold
         (root / "photo.jpg").write_bytes(b"\xff\xd8\xff" + b"j" * 4000)  # not compressible
         self.cfg = Config.create(

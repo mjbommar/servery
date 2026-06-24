@@ -103,6 +103,8 @@ class ServeryHTTPServer(ThreadingHTTPServer):
         super().server_close()
         if self._executor is not None:
             self._executor.shutdown(wait=True)
+        if self.access_log is not None:  # release the access-log file handle
+            self.access_log.close()
 
     def server_bind(self) -> None:
         # Accept both IPv4 and IPv6 when bound to an IPv6 wildcard.

@@ -45,6 +45,16 @@ class AccessLog:
         file_handler.setFormatter(logging.Formatter("%(message)s"))
         self._logger.addHandler(file_handler)
 
+    def close(self) -> None:
+        """Detach and close the file handler, releasing the OS file handle.
+
+        Called on server shutdown; without it the open handle would leak (and on
+        Windows would block deleting the directory the log lives in).
+        """
+        for handler in list(self._logger.handlers):
+            self._logger.removeHandler(handler)
+            handler.close()
+
     def record(
         self,
         client: str,

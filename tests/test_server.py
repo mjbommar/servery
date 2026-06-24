@@ -701,6 +701,11 @@ class HandleErrorTest(unittest.TestCase):
 
 
 class PortAutoScanTest(unittest.TestCase):
+    @unittest.skipUnless(
+        os.name == "posix",
+        "Windows SO_REUSEADDR lets a second bind share the port, so it never raises "
+        "EADDRINUSE for the scan to react to",
+    )
     def test_busy_port_scans_to_next_free(self):
         import socket
 
