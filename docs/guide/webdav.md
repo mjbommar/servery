@@ -1,4 +1,4 @@
-# WebDAV — mount the share as a drive
+# WebDAV
 
 With `--dav`, servery exposes a WebDAV endpoint (RFC 4918) that macOS Finder,
 Windows Explorer, and Linux file managers can **mount as a network drive** — browse

@@ -1,4 +1,4 @@
-# Compression, caching, CORS & headers
+# Compression, caching & headers
 
 servery applies the cross-cutting web behaviors you'd expect from a real static
 server — most on by default, each with a flag.

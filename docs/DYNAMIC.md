@@ -1,4 +1,4 @@
-# Dynamic handlers (WSGI, CGI, ASGI)
+# Dynamic handlers
 
 servery is a **file server**. This document plans an *optional, opt-in* capability
 to also run dynamic handlers — CGI scripts, WSGI apps, ASGI apps — **using only

@@ -1,4 +1,4 @@
-# Transports (HTTP/1.1 → 2 → 3)
+# Transports
 
 > Companion to `VISION.md`, `PRINCIPLES.md`, `STANDARDS.md`, and
 > `ARCHITECTURE.md`. This document records servery's **multi-HTTP-version

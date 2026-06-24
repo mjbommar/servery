@@ -78,7 +78,7 @@ nav:
       - Uploads & authentication: guide/uploads.md
       - HTTPS & certificates: guide/https.md
       - Sharing on a LAN: guide/lan.md
-      - WebDAV (mount as a drive): guide/webdav.md
+      - WebDAV: guide/webdav.md
       - Compression, caching & headers: guide/web.md
       - HTTP/2, HTTP/3 & concurrency: guide/protocols.md
   - Recipes: recipes.md
@@ -91,11 +91,11 @@ nav:
       - Vision & goals: VISION.md
       - Principles: PRINCIPLES.md
       - Architecture: ARCHITECTURE.md
-      - Transports (HTTP/1.1 → 2 → 3): TRANSPORTS.md
-      - Standards (RFC compliance): STANDARDS.md
+      - Transports: TRANSPORTS.md
+      - Standards: STANDARDS.md
       - Requirements: REQUIREMENTS.md
       - Implementation best practices: BEST-PRACTICES.md
-      - Dynamic handlers (WSGI, CGI, ASGI): DYNAMIC.md
+      - Dynamic handlers: DYNAMIC.md
       - Roadmap: ROADMAP.md
       - References & prior art: REFERENCES.md
 
