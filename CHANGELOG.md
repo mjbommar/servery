@@ -6,6 +6,14 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Styled, on-brand error pages.** 404/403/500/… responses now render a clean error
+  page in the directory listing's design language (system font, OS light/dark, the
+  same accent, a "back to home" link) instead of the bland stdlib default. Both
+  generated pages share a consistent `<title>` brand (`Index of … · servery`,
+  `404 Not Found · servery`).
+
 ## [1.3.0] - 2026-06-23
 
 ### Added

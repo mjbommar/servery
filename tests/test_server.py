@@ -97,10 +97,15 @@ class ServerTestCase(unittest.TestCase):
         conn = self._conn()
         conn.request("GET", "/does-not-exist")
         resp = conn.getresponse()
-        resp.read()
+        body = resp.read().decode("utf-8", "replace")
         conn.close()
         self.assertEqual(resp.status, 404)
         self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
+        # The on-brand styled error page (not the bland stdlib default).
+        self.assertIn("<title>404", body)
+        self.assertIn("served by servery", body)
+        self.assertIn('href="/"', body)  # a link back home
+        self.assertNotIn("Error response", body)  # the stdlib default title is gone
 
     def test_listing_has_csp_and_referrer(self):
         conn = self._conn()

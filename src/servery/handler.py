@@ -55,6 +55,44 @@ _CSP = (
     "form-action 'self'; frame-ancestors 'self'"
 )
 
+# On-brand error page, replacing the bland stdlib default — same design language as
+# the directory listing (system font, OS light/dark, the listing's accent). A
+# `%`-format template (no literal `%`): the base class fills code/message/explain,
+# all already HTML-escaped by `http.server`.
+_ERROR_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%(code)d %(message)s \N{MIDDLE DOT} servery</title>
+<style>
+:root { color-scheme: light dark; --accent: #2563eb; }
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; margin: 0; min-height: 100vh;
+  display: grid; place-items: center; padding: 2rem; background: Canvas; color: CanvasText; }
+main { max-width: 32rem; text-align: center; }
+.code { font-size: 4.5rem; font-weight: 700; line-height: 1;
+  letter-spacing: -0.03em; opacity: 0.85; }
+.msg { font-size: 1.3rem; font-weight: 600; margin: 0.5rem 0 0; }
+.explain { opacity: 0.7; margin: 0.5rem 0 1.75rem; }
+a.home { color: var(--accent); text-decoration: none; font-weight: 500; }
+a.home:hover { text-decoration: underline; }
+footer { margin-top: 2.5rem; font-size: 0.8rem; opacity: 0.5; }
+</style>
+</head>
+<body>
+<main>
+<div class="code">%(code)d</div>
+<p class="msg">%(message)s</p>
+<p class="explain">%(explain)s</p>
+<a class="home" href="/">\N{LEFTWARDS ARROW} Back to home</a>
+<footer>served by servery</footer>
+</main>
+</body>
+</html>
+"""
+
 
 def _copy_n(source: SupportsRead[bytes], dest: SupportsWrite[bytes], count: int) -> None:
     """Copy exactly ``count`` bytes (or until EOF) from ``source`` to ``dest``."""
@@ -111,6 +149,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = f"servery/{__version__}"
     index_pages = ("index.html", "index.htm")
+    error_message_format = _ERROR_TEMPLATE  # styled, on-brand error pages
     _body_remaining: int | None = None
     _body_offset: int = 0
     _generated_page: bool = False
