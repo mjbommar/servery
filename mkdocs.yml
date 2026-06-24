@@ -56,6 +56,11 @@ markdown_extensions:
       alternate_style: true
   - pymdownx.details
   - pymdownx.keys
+  # Render :material-*: / :octicons-*: / :fontawesome-*: shortcodes as inline SVG
+  # icons (used in the home-page feature cards).
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 # Existing design/contributor docs live under docs/ but aren't all in the nav;
 # don't fail the build on the ones we link to contextually instead.
