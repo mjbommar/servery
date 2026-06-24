@@ -58,7 +58,9 @@ def serving_asgi(
 
     thread = threading.Thread(target=runner, daemon=True)
     thread.start()
-    if not ready.wait(5):
+    # Generous startup budget: under CI load (free-threaded / macOS runners) and with
+    # TLS — which generates a pure-Python self-signed cert — a 5 s wait flaked.
+    if not ready.wait(30):
         raise RuntimeError("ASGI server did not start")
     addr = holder["addr"]
     try:
