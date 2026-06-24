@@ -13,16 +13,17 @@ library**.
 ## Run it right now — no install
 
 ```bash
-# one self-contained file, straight from a pipe (latest release):
-curl -fsSL https://github.com/mjbommar/servery/releases/latest/download/servery.py | python3 - ./public -p 8000
-
-# …or from PyPI with uv:
+# with uv — fetches a matching Python and runs servery, nothing to install:
 uvx servery ./public --port 8000
+
+# …or one self-contained file, straight from a pipe (latest release):
+curl -fsSL https://github.com/mjbommar/servery/releases/latest/download/servery.py | python3 - ./public -p 8000
 ```
 
-The piped `servery.py` is the released package amalgamated into one auditable file
-(pure stdlib). Inspect it first if you like (`curl -fsSL <url> | less`), pin a version
-(`…/releases/download/v1.3.0/servery.py`), or grab the `servery.pyz` zipapp.
+[`uvx`](https://docs.astral.sh/uv/) (from uv) is the easiest path — it manages Python
+for you. The piped `servery.py` is the released package amalgamated into one auditable
+file (pure stdlib): inspect it first if you like (`curl -fsSL <url> | less`), pin a
+version (`…/releases/download/v1.3.0/servery.py`), or grab the `servery.pyz` zipapp.
 
 ```console
 $ servery                                  # serve the current directory on http://127.0.0.1:8000
@@ -40,8 +41,8 @@ $ servery --dav --dav-write --auth me:s3cret  # mount it as a network drive
 
     ---
 
-    The core installs nothing from PyPI — enforced by a CI gate. One `pip install`,
-    or no install at all via the single-file bundle.
+    The core installs nothing from PyPI — enforced by a CI gate. One `uvx servery`
+    (or `pip install`), or no install at all via the single-file bundle.
 
     [:octicons-arrow-right-24: The principles](PRINCIPLES.md)
 
@@ -76,17 +77,20 @@ $ servery --dav --dav-write --auth me:s3cret  # mount it as a network drive
 
 ## Install
 
+=== "uv (recommended)"
+
+    ```bash
+    uvx servery                  # run ad-hoc, nothing installed
+    uv tool install servery      # …or install the command persistently
+    ```
+
+    New to [uv](https://docs.astral.sh/uv/)? `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+
 === "pip"
 
     ```bash
     pip install servery          # core: zero dependencies
     pip install servery[http3]   # optional HTTP/3 (aioquic)
-    ```
-
-=== "uv"
-
-    ```bash
-    uv tool install servery      # or run ad-hoc with: uvx servery
     ```
 
 === "single file"

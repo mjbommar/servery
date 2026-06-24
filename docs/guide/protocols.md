@@ -29,7 +29,11 @@ handshake that the standard library doesn't provide — so it's the one **opt-in
 exception to zero-dependency, behind the `servery[http3]` extra:
 
 ```bash
-pip install 'servery[http3]'
+# run ad-hoc with the extra, via uv:
+uvx --from 'servery[http3]' servery --http3 --tls-cert cert.pem --tls-key key.pem
+
+# …or install it (uv or pip):
+uv tool install 'servery[http3]'   # or: pip install 'servery[http3]'
 servery --http3 --tls-cert cert.pem --tls-key key.pem
 ```
 

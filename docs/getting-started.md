@@ -2,18 +2,26 @@
 
 ## Install
 
+The quickest way is [**uv**](https://docs.astral.sh/uv/) — it manages Python for you,
+so there's nothing else to set up.
+
+=== "uv (recommended)"
+
+    ```bash
+    # run it ad-hoc, no install at all:
+    uvx servery
+
+    # …or install the `servery` command persistently:
+    uv tool install servery
+    ```
+
+    Don't have uv yet? `curl -LsSf https://astral.sh/uv/install.sh | sh` (or see the
+    [uv install docs](https://docs.astral.sh/uv/getting-started/installation/)).
+
 === "pip"
 
     ```bash
     pip install servery
-    ```
-
-=== "uv"
-
-    ```bash
-    uv tool install servery       # installs the `servery` command
-    # or run it ad-hoc without installing:
-    uvx servery
     ```
 
 === "no install (single file)"
@@ -24,7 +32,8 @@
     ```
 
 servery needs **Python 3.13+** (the free-threaded 3.13t/3.14t builds work too) and
-has **no third-party runtime dependencies**.
+has **no third-party runtime dependencies**. With `uvx`, uv even fetches a matching
+Python for you.
 
 ## Your first server
 
@@ -34,6 +43,12 @@ Run `servery` in any directory:
 $ servery
 servery: serving /home/you/project on http://127.0.0.1:8000/
 ```
+
+!!! tip "Running without installing"
+
+    The examples below use the `servery` command. To run any of them **without
+    installing**, just prefix with `uvx ` — e.g. `uvx servery --upload`. uv fetches
+    servery (and a matching Python) on first use and caches it.
 
 Open <http://127.0.0.1:8000/> and you get a rich, sortable directory listing —
 sizes, modified times, a search box, per-type icons, and a light/dark theme — all

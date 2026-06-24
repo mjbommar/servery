@@ -11,17 +11,19 @@ A **zero-dependency, pure-Python** HTTP file server — *a batteries-included `p
 **Run it right now — no install:**
 
 ```bash
-# one self-contained file, straight from a pipe (latest release):
-curl -fsSL https://github.com/mjbommar/servery/releases/latest/download/servery.py | python3 - ./public -p 8000
-
-# …or from PyPI with uv:
+# with uv — fetches a matching Python and runs servery, nothing to install:
 uvx servery ./public --port 8000
+
+# …or one self-contained file, straight from a pipe (latest release):
+curl -fsSL https://github.com/mjbommar/servery/releases/latest/download/servery.py | python3 - ./public -p 8000
 ```
 
-The piped `servery.py` is the released package amalgamated into one auditable file
-(pure stdlib). It runs code, so inspect it first if you like (`curl -fsSL <url> | less`),
-pin a version (`…/releases/download/v1.2.0/servery.py`), or grab the `servery.pyz` zipapp —
-both are attached to [every release](https://github.com/mjbommar/servery/releases/latest).
+[`uvx`](https://docs.astral.sh/uv/) (from [uv](https://docs.astral.sh/uv/)) is the
+easiest path — it even fetches a matching Python for you. The piped `servery.py` is the
+released package amalgamated into one auditable file (pure stdlib). It runs code, so
+inspect it first if you like (`curl -fsSL <url> | less`), pin a version
+(`…/releases/download/v1.3.0/servery.py`), or grab the `servery.pyz` zipapp — both are
+attached to [every release](https://github.com/mjbommar/servery/releases/latest).
 
 Serve or share a directory over HTTP with the niceties people expect from tools like
 [miniserve](https://github.com/svenstaro/miniserve) or `npx serve` — rich sortable
@@ -83,6 +85,15 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
   no module-level mutable state.
 
 ## Install
+
+With [uv](https://docs.astral.sh/uv/) (recommended — manages Python for you):
+
+```bash
+uvx servery                    # run ad-hoc, nothing installed
+uv tool install servery        # …or install the `servery` command
+```
+
+Or with pip:
 
 ```bash
 pip install servery            # core: zero dependencies
