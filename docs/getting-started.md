@@ -64,7 +64,8 @@ servery ./public --port 9000
 ```
 
 - `directory` (positional) — what to serve; defaults to the current directory.
-- `-p, --port` — defaults to `8000`.
+- `-p, --port` — defaults to `8000`. If it's already in use, servery binds the next
+  free port and tells you which (no "address already in use" crash).
 - `-b, --bind` — defaults to `127.0.0.1`. Use `0.0.0.0` to expose on your LAN.
 
 ## Share it on your network

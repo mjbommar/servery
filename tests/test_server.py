@@ -107,6 +107,16 @@ class ServerTestCase(unittest.TestCase):
         self.assertIn('href="/"', body)  # a link back home
         self.assertNotIn("Error response", body)  # the stdlib default title is gone
 
+    def test_text_file_declares_utf8_charset(self):
+        # Text types must declare UTF-8 so browsers don't mojibake non-ASCII content.
+        (self.dir / "note.md").write_text("em — dash, “curly”, café 🙂", encoding="utf-8")
+        conn = self._conn()
+        conn.request("GET", "/note.md")
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertEqual(resp.getheader("Content-Type"), "text/markdown; charset=utf-8")
+
     def test_listing_has_csp_and_referrer(self):
         conn = self._conn()
         conn.request("GET", "/")
@@ -688,6 +698,36 @@ class HandleErrorTest(unittest.TestCase):
             self.assertTrue(any("unhandled error" in m for m in cap.messages()), cap.messages())
         finally:
             srv.server_close()
+
+
+class PortAutoScanTest(unittest.TestCase):
+    def test_busy_port_scans_to_next_free(self):
+        import socket
+
+        # Occupy a port, then ask servery for it — it should bind the next one.
+        busy = socket.socket()
+        busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        taken = busy.getsockname()[1]
+        try:
+            cfg = Config.create(".", host="127.0.0.1", port=taken, quiet=True)
+            httpd = make_server(cfg)
+            try:
+                self.assertNotEqual(httpd.server_address[1], taken)
+                self.assertGreater(httpd.server_address[1], taken)
+            finally:
+                httpd.server_close()
+        finally:
+            busy.close()
+
+    def test_ephemeral_port_binds_directly(self):
+        cfg = Config.create(".", host="127.0.0.1", port=0, quiet=True)
+        httpd = make_server(cfg)
+        try:
+            self.assertGreater(httpd.server_address[1], 0)
+        finally:
+            httpd.server_close()
 
 
 if __name__ == "__main__":

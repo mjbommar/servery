@@ -48,6 +48,39 @@ def compressible(content_type: str) -> bool:
     return base in _COMPRESSIBLE_EXACT
 
 
+# Text-based types that aren't ``text/*`` but are still UTF-8 text on the wire.
+_CHARSET_TYPES = frozenset(
+    {
+        "application/json",
+        "application/xml",
+        "application/javascript",
+        "image/svg+xml",
+        "application/manifest+json",
+        "application/x-ndjson",
+        "application/ld+json",
+        "application/rss+xml",
+        "application/atom+xml",
+    }
+)
+
+
+def with_charset(content_type: str) -> str:
+    """Add ``; charset=utf-8`` to a text-based type so browsers decode it as UTF-8.
+
+    ``text/*`` historically defaults to US-ASCII (and browsers fall back to a legacy
+    8-bit encoding), which mangles UTF-8 — em dashes, curly quotes, emoji — when no
+    charset is declared (e.g. a Markdown or plain-text file with no in-band charset).
+    servery serves UTF-8, so it says so. Types that already carry a parameter, and
+    binary types, are returned unchanged.
+    """
+    if not content_type or ";" in content_type:
+        return content_type
+    base = content_type.strip().lower()
+    if base.startswith("text/") or base.endswith(("+json", "+xml")) or base in _CHARSET_TYPES:
+        return f"{content_type}; charset=utf-8"
+    return content_type
+
+
 def accepts_gzip(accept_encoding: str) -> bool:
     """True if the client accepts ``gzip`` per RFC 9110 §12.5.3 (q-value aware).
 

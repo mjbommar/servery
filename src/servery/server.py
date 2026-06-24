@@ -131,9 +131,34 @@ class ServeryHTTPServer(ThreadingHTTPServer):
         )
 
 
-def make_server(config: Config) -> ServeryHTTPServer:
-    """Create (bind + activate) a server for ``config``."""
-    return ServeryHTTPServer(config)
+def make_server(config: Config, *, port_scan: int = 64) -> ServeryHTTPServer:
+    """Create (bind + activate) a server for ``config``.
+
+    If ``config.port`` is already in use, scan forward for the next free port (up to
+    ``port_scan`` ports) instead of failing — the port actually bound is reported on
+    ``server.server_address``. An ephemeral port (``0``) binds directly, and bind
+    errors other than "address in use" (e.g. permission denied) are never retried.
+    """
+    import dataclasses
+    import errno
+
+    if config.port == 0:  # the OS already picks a free port — nothing to scan
+        return ServeryHTTPServer(config)
+    in_use = {errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", errno.EADDRINUSE)}
+    last: OSError | None = None
+    for port in range(config.port, min(config.port + port_scan + 1, 65536)):
+        candidate = config if port == config.port else dataclasses.replace(config, port=port)
+        try:
+            server = ServeryHTTPServer(candidate)
+        except OSError as exc:
+            if exc.errno not in in_use:
+                raise
+            last = exc
+            continue
+        if port != config.port:
+            _log.logger.warning("port %d is in use — bound %d instead", config.port, port)
+        return server
+    raise last if last is not None else OSError("no free port found")  # pragma: no cover
 
 
 def server_url(server: ServeryHTTPServer) -> str:

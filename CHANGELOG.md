@@ -6,8 +6,20 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Text files now declare `charset=utf-8`.** Text responses (Markdown, plain text,
+  CSV, JSON, SVG, …) are served with an explicit UTF-8 charset, so browsers render
+  non-ASCII content (em dashes, curly quotes, accents, emoji) correctly instead of
+  as mojibake. Previously a `.md`/`.txt` with no in-band encoding could be
+  mis-decoded.
+
 ### Changed
 
+- **Auto-detect a free port.** If the requested `--port` is already in use, servery
+  now scans forward for the next free port (and logs which one it bound) instead of
+  hard-failing with "address already in use". An ephemeral port (`--port 0`) still
+  binds directly.
 - **Styled, on-brand error pages.** 404/403/500/… responses now render a clean error
   page in the directory listing's design language (system font, OS light/dark, the
   same accent, a "back to home" link) instead of the bland stdlib default. Both

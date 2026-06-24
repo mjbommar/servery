@@ -151,5 +151,28 @@ class NoCompressTest(_ServerCase):
         self.assertNotIn(b"content-encoding: gzip", head.lower())
 
 
+class WithCharsetTest(unittest.TestCase):
+    def test_text_types_get_utf8(self):
+        for ctype in ("text/markdown", "text/plain", "text/html", "text/csv", "text/javascript"):
+            self.assertEqual(_compress.with_charset(ctype), f"{ctype}; charset=utf-8")
+
+    def test_structured_text_types_get_utf8(self):
+        for ctype in ("application/json", "image/svg+xml", "application/xml", "application/ld+json"):
+            self.assertEqual(_compress.with_charset(ctype), f"{ctype}; charset=utf-8")
+
+    def test_binary_types_unchanged(self):
+        for ctype in ("image/png", "application/octet-stream", "font/woff2", "video/mp4"):
+            self.assertEqual(_compress.with_charset(ctype), ctype)
+
+    def test_already_parameterized_unchanged(self):
+        self.assertEqual(
+            _compress.with_charset("text/html; charset=iso-8859-1"),
+            "text/html; charset=iso-8859-1",
+        )
+
+    def test_empty_unchanged(self):
+        self.assertEqual(_compress.with_charset(""), "")
+
+
 if __name__ == "__main__":
     unittest.main()

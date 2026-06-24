@@ -16,7 +16,7 @@ Run `servery --help` for the same list inline, or `servery --version`.
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `-p, --port PORT` | `8000` | port to listen on |
+| `-p, --port PORT` | `8000` | port to listen on (if taken, the next free port is used) |
 | `-b, --bind ADDR` | `127.0.0.1` | bind address (`0.0.0.0` to expose on the network) |
 | `--show-hidden` | off | include dotfiles in listings |
 | `-q, --quiet` | off | suppress request logging and the startup banner |

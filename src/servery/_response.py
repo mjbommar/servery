@@ -26,8 +26,12 @@ _LISTING_TYPE = "text/html; charset=utf-8"
 
 
 def guess_type(fs_path: str) -> str:
-    """MIME type for ``fs_path`` with the octet-stream fallback (one source of truth)."""
-    return mimetypes.guess_file_type(fs_path)[0] or "application/octet-stream"
+    """MIME type for ``fs_path`` (octet-stream fallback), with UTF-8 charset on text.
+
+    One source of truth for the buffered backends; the charset keeps browsers from
+    mis-decoding a UTF-8 text file (e.g. Markdown) that declares no in-band encoding.
+    """
+    return _compress.with_charset(mimetypes.guess_file_type(fs_path)[0] or "application/octet-stream")
 
 
 def base_headers(config: Config, *, tls: bool) -> _HeaderList:

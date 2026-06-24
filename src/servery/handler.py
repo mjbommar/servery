@@ -563,7 +563,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             stat = os.fstat(f.fileno())
             size = stat.st_size
             last_modified = self.date_time_string(stat.st_mtime)
-            ctype = self.guess_type(path)
+            # Declare UTF-8 on text types so browsers don't mis-decode them (e.g. a
+            # .md/.txt with em dashes or emoji rendered as mojibake).
+            ctype = _compress.with_charset(self.guess_type(path))
             cache_control = self._server.config.cache_control
             # ?download=1 forces a save dialog instead of inline rendering. The
             # substring pre-check skips urlsplit+parse_qs (the common case has no
