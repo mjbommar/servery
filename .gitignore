@@ -31,3 +31,6 @@ venv/
 .benchmarks/
 benchmarks/artifacts/
 benchmarks/baselines/
+
+# MkDocs build output
+site/

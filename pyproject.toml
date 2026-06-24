@@ -84,6 +84,11 @@ bench = [
   "pytest>=8",
   "pytest-benchmark>=5",
 ]
+# Documentation site only (MkDocs Material -> GitHub Pages). Dev tooling; never
+# shipped in the wheel. Build locally with `uv run --group docs mkdocs serve`.
+docs = [
+  "mkdocs-material>=9.5",
+]
 # Note: ty (the type checker) is run via `uvx ty` — it is preview-versioned and
 # fast-moving, so we pull the latest ephemerally rather than pinning it here.
 
