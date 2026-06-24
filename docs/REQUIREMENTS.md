@@ -1,4 +1,4 @@
-# servery — Requirements Specification
+# Requirements
 
 > A batteries-included `python -m http.server`.
 >

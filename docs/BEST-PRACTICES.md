@@ -1,4 +1,4 @@
-# servery — Modern Implementation Best Practices (2026)
+# Implementation best practices
 
 > Companion to `PRINCIPLES.md`, `ARCHITECTURE.md`, and `REQUIREMENTS.md`. This
 > document distills 2026-era best practices from the strongest modern Python HTTP

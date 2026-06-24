@@ -1,4 +1,4 @@
-# servery — Architecture & Technical Design
+# Architecture
 
 > Companion to `VISION.md`, `PRINCIPLES.md`, and `REFERENCES.md`. This document
 > describes *how* servery is built. The supreme constraint from `PRINCIPLES.md`

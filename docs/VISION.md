@@ -1,4 +1,4 @@
-# servery — Vision
+# Vision & goals
 
 > A batteries-included `python -m http.server`.
 

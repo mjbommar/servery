@@ -1,4 +1,4 @@
-# servery — Principles & Tenets
+# Principles
 
 These are the rules servery lives by. They are deliberately opinionated. When a
 design decision is unclear, re-read Principle 0; it usually settles the

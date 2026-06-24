@@ -1,4 +1,4 @@
-# Dynamic content: CGI / WSGI / ASGI — phased roadmap
+# Dynamic handlers (WSGI, CGI, ASGI)
 
 servery is a **file server**. This document plans an *optional, opt-in* capability
 to also run dynamic handlers — CGI scripts, WSGI apps, ASGI apps — **using only

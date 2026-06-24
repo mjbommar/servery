@@ -1,4 +1,4 @@
-# servery — Standards / RFC-Compliance Specification
+# Standards (RFC compliance)
 
 > Companion to `VISION.md`, `PRINCIPLES.md`, `REQUIREMENTS.md`, and
 > `ARCHITECTURE.md`. This document is the **RFC-compliance map** for servery as a

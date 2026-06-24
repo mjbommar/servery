@@ -93,7 +93,9 @@ nav:
       - Architecture: ARCHITECTURE.md
       - Transports (HTTP/1.1 → 2 → 3): TRANSPORTS.md
       - Standards (RFC compliance): STANDARDS.md
-      - Dynamic handlers (WSGI/CGI/ASGI): DYNAMIC.md
+      - Requirements: REQUIREMENTS.md
+      - Implementation best practices: BEST-PRACTICES.md
+      - Dynamic handlers (WSGI, CGI, ASGI): DYNAMIC.md
       - Roadmap: ROADMAP.md
       - References & prior art: REFERENCES.md
 

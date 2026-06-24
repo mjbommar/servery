@@ -1,4 +1,4 @@
-# servery — References / Prior-Art
+# References & prior art
 
 Research for **servery**: a zero-dependency, pure-Python **stdlib-only** HTTP file server —
 "a batteries-included `python -m http.server`" in the spirit of miniserve / `npx serve`,

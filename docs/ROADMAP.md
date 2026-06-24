@@ -1,4 +1,4 @@
-# servery — Roadmap
+# Roadmap
 
 > From an empty repo to a polished, PyPI-published v1.0 — sequenced by
 > value-to-effort and dependency order, foundation before features.
