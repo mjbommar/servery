@@ -31,7 +31,9 @@ def guess_type(fs_path: str) -> str:
     One source of truth for the buffered backends; the charset keeps browsers from
     mis-decoding a UTF-8 text file (e.g. Markdown) that declares no in-band encoding.
     """
-    return _compress.with_charset(mimetypes.guess_file_type(fs_path)[0] or "application/octet-stream")
+    return _compress.with_charset(
+        mimetypes.guess_file_type(fs_path)[0] or "application/octet-stream"
+    )
 
 
 def base_headers(config: Config, *, tls: bool) -> _HeaderList:

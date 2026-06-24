@@ -157,7 +157,12 @@ class WithCharsetTest(unittest.TestCase):
             self.assertEqual(_compress.with_charset(ctype), f"{ctype}; charset=utf-8")
 
     def test_structured_text_types_get_utf8(self):
-        for ctype in ("application/json", "image/svg+xml", "application/xml", "application/ld+json"):
+        for ctype in (
+            "application/json",
+            "image/svg+xml",
+            "application/xml",
+            "application/ld+json",
+        ):
             self.assertEqual(_compress.with_charset(ctype), f"{ctype}; charset=utf-8")
 
     def test_binary_types_unchanged(self):

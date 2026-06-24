@@ -34,8 +34,14 @@ async def _read_response(reader: asyncio.StreamReader) -> int:
     return length
 
 
-async def _keepalive(host: str, port: int, request: bytes, deadline: float,
-                     latencies: list[float], counters: list[int]) -> None:
+async def _keepalive(
+    host: str,
+    port: int,
+    request: bytes,
+    deadline: float,
+    latencies: list[float],
+    counters: list[int],
+) -> None:
     reader, writer = await asyncio.open_connection(host, port)
     try:
         while time.monotonic() < deadline:
@@ -63,8 +69,14 @@ async def _one_close_request(host: str, port: int, request: bytes, counters: lis
             await writer.wait_closed()
 
 
-async def _churn(host: str, port: int, request: bytes, deadline: float,
-                 latencies: list[float], counters: list[int]) -> None:
+async def _churn(
+    host: str,
+    port: int,
+    request: bytes,
+    deadline: float,
+    latencies: list[float],
+    counters: list[int],
+) -> None:
     """A fresh connection per request (Connection: close) — stresses accept/backlog.
 
     Each cycle is bounded by a timeout so a connect/read stalled by a full backlog
@@ -81,12 +93,13 @@ async def _churn(host: str, port: int, request: bytes, deadline: float,
         counters[0] += 1
 
 
-async def _run_async(host: str, port: int, path: str, conns: int, duration: float,
-                     close: bool) -> dict:
+async def _run_async(
+    host: str, port: int, path: str, conns: int, duration: float, close: bool
+) -> dict:
     conn_header = "close" if close else "keep-alive"
-    request = (
-        f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: {conn_header}\r\n\r\n"
-    ).encode("latin-1")
+    request = (f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: {conn_header}\r\n\r\n").encode(
+        "latin-1"
+    )
     latencies: list[float] = []
     counters = [0, 0, 0]  # [requests, bytes, errors]
     deadline = time.monotonic() + duration
@@ -96,7 +109,9 @@ async def _run_async(host: str, port: int, path: str, conns: int, duration: floa
         return_exceptions=True,
     )
     return {
-        "requests": counters[0], "bytes": counters[1], "errors": counters[2],
+        "requests": counters[0],
+        "bytes": counters[1],
+        "errors": counters[2],
         "latencies": latencies,
     }
 

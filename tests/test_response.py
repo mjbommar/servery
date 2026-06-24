@@ -17,7 +17,7 @@ from servery.config import Config
 
 
 def _headers_dict(headers):
-    return {name: value for name, value in headers}
+    return dict(headers)
 
 
 class ShouldGzipTest(unittest.TestCase):
