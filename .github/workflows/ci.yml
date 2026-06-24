@@ -38,9 +38,10 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
-      # httpx is a dev-only interop dependency used in tests; give ty access to
-      # it (in its isolated env) so it resolves and type-checks that code.
-      - run: uvx --with "httpx[http2]" ty check src tests
+      # httpx and qrcode are dev-only test dependencies (interop client + QR
+      # oracle); give ty access to them in its isolated env so it resolves and
+      # type-checks that test code (matching the `test` dependency group).
+      - run: uvx --with "httpx[http2]" --with qrcode ty check src tests
 
   security:
     name: SAST (bandit)
