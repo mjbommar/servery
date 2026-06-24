@@ -6,6 +6,8 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-06-24
+
 ### Fixed
 
 - **Text files now declare `charset=utf-8`.** Text responses (Markdown, plain text,
@@ -431,6 +433,7 @@ First stable release. A zero-dependency, pure-Python HTTP file server.
 - **Free-threading** support (3.13t/3.14t), full type hints (`ty`-checked), and a
   CI gate that enforces zero runtime dependencies in the core wheel.
 
+[1.3.1]: https://github.com/mjbommar/servery/releases/tag/v1.3.1
 [1.3.0]: https://github.com/mjbommar/servery/releases/tag/v1.3.0
 [1.2.0]: https://github.com/mjbommar/servery/releases/tag/v1.2.0
 [1.1.1]: https://github.com/mjbommar/servery/releases/tag/v1.1.1
