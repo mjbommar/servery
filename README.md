@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/mjbommar/servery/actions/workflows/ci.yml/badge.svg)](https://github.com/mjbommar/servery/actions/workflows/ci.yml)
 [![Security](https://github.com/mjbommar/servery/actions/workflows/security.yml/badge.svg)](https://github.com/mjbommar/servery/actions/workflows/security.yml)
+[![Docs](https://img.shields.io/badge/docs-mjbommar.github.io%2Fservery-teal)](https://mjbommar.github.io/servery/)
 ![Python](https://img.shields.io/badge/python-3.13%2B-blue)
 ![Core dependencies](https://img.shields.io/badge/core%20dependencies-zero-brightgreen)
 
@@ -112,6 +113,15 @@ routing or app-building here. It is a dev / LAN / ad-hoc sharing tool, not a har
 public-internet server.
 
 ## Documentation
+
+📖 **[Full documentation site → mjbommar.github.io/servery](https://mjbommar.github.io/servery/)** —
+[getting started](https://mjbommar.github.io/servery/getting-started/), task-oriented
+[guides](https://mjbommar.github.io/servery/guide/serving/) with examples,
+[recipes](https://mjbommar.github.io/servery/recipes/),
+[how to extend it](https://mjbommar.github.io/servery/extending/library/), and a full
+[CLI reference](https://mjbommar.github.io/servery/reference/cli/).
+
+The deep-dive design docs (also rendered on the site):
 
 | Document | What it covers |
 |---|---|
