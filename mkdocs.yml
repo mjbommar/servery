@@ -76,12 +76,19 @@ nav:
       - WebDAV (mount as a drive): guide/webdav.md
       - Compression, caching & headers: guide/web.md
       - HTTP/2, HTTP/3 & concurrency: guide/protocols.md
+  - Recipes: recipes.md
+  - Extending:
+      - Using servery as a library: extending/library.md
+      - Running apps & proxying: extending/apps.md
+  - Reference:
+      - CLI reference: reference/cli.md
   - Project:
       - Vision & goals: VISION.md
       - Principles: PRINCIPLES.md
       - Architecture: ARCHITECTURE.md
       - Transports (HTTP/1.1 → 2 → 3): TRANSPORTS.md
       - Standards (RFC compliance): STANDARDS.md
+      - Dynamic handlers (WSGI/CGI/ASGI): DYNAMIC.md
       - Roadmap: ROADMAP.md
       - References & prior art: REFERENCES.md
 
