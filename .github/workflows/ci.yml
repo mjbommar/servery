@@ -73,7 +73,12 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python }}
       - run: uv run --no-default-groups --group test --python ${{ matrix.python }} coverage run -m unittest discover -s tests -v
-      - run: uv run --no-default-groups --group test --python ${{ matrix.python }} coverage report
+      # The 90% threshold is enforced on the canonical platform only: POSIX-only code
+      # (e.g. the ctypes/OpenSSL path in _oscrypto) and OS-specific tests make per-OS
+      # coverage uneven, but the full suite still RUNS (above) on every OS.
+      - name: Coverage threshold (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run --no-default-groups --group test --python ${{ matrix.python }} coverage report
 
   test-freethreaded:
     name: Test free-threaded (py${{ matrix.python }})
