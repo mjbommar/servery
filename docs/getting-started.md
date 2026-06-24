@@ -67,8 +67,8 @@ servery: serving /home/you/photos on http://0.0.0.0:8000/
 servery: WARNING bound to 0.0.0.0 — reachable from the network
 ```
 
-See [Sharing on a LAN](getting-started.md) for `--discoverable` (mDNS/Bonjour) and
-QR details.
+See [Sharing on a LAN](guide/lan.md) for `--discoverable` (mDNS/Bonjour) and QR
+details.
 
 ## A password-protected drop box
 
@@ -101,7 +101,7 @@ servery --acme example.com --acme-email you@example.com --acme-production
 ```
 
 (It defaults to the Let's Encrypt **staging** CA so you can test safely; add
-`--acme-production` for the real thing.) See [HTTPS & certificates](getting-started.md).
+`--acme-production` for the real thing.) See [HTTPS & certificates](guide/https.md).
 
 ## Profiles: presets for common setups
 
@@ -115,8 +115,8 @@ servery --profile cdn       # long cache + CORS, for serving static assets
 ```
 
 The full list: `app`, `cdn`, `dev`, `inbox`, `local`, `public-readonly`,
-`public-readwrite`, `share`. See the [CLI reference](getting-started.md) for what
-each one sets.
+`public-readwrite`, `share` — run `servery --help` to see them, or browse the
+[Guide](guide/serving.md) for each feature they bundle.
 
 ## Next steps
 
@@ -125,7 +125,8 @@ each one sets.
   security model.
 - **[Transports](TRANSPORTS.md)** — the HTTP/1.1 → HTTP/2 → HTTP/3 tiering.
 
-More task-oriented guides (uploads, WebDAV mounts, compression, access logs, running
-a WSGI/ASGI app) are being added to this site — for now the
-[`servery --help`](getting-started.md) output documents every flag, and the
-[README](https://github.com/mjbommar/servery#readme) has the full feature list.
+Then dig into the task-oriented **[Guide](guide/serving.md)** — [uploads &
+auth](guide/uploads.md), [HTTPS & certificates](guide/https.md), [WebDAV
+mounts](guide/webdav.md), [compression & caching](guide/web.md),
+[HTTP/2 & HTTP/3](guide/protocols.md) — each with copy-paste examples. Every flag is
+also documented by `servery --help`.
