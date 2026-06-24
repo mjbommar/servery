@@ -6,6 +6,13 @@ PROPPATCH, and a *stub* LOCK/UNLOCK (advertise class 2 so clients mount read-wri
 the lock stores no state — the industry norm). Pure stdlib; reuses servery's
 path-safety, ETag, and atomic-write primitives. The handler's thin ``do_*`` methods
 dispatch here.
+
+XML safety: ``xml.etree.ElementTree`` is used **only to serialize** responses
+(``Element``/``SubElement``/``tostring``). servery never *parses* a request body as
+XML — request bodies are consumed as opaque bytes — so the XML-attack surface bandit
+warns about (B405: entity expansion / external entities) does not exist here.
+``defusedxml`` would be the alternative, but it is a third-party dependency and the
+core stays zero-dependency, so B405 is suppressed on the import below.
 """
 
 from __future__ import annotations
@@ -17,7 +24,7 @@ import shutil
 import tempfile
 import urllib.parse
 import uuid
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # nosec B405 - serialize-only; see module docstring
 from typing import TYPE_CHECKING
 
 from servery import _http1, _response, security
