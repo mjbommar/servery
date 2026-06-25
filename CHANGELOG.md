@@ -6,6 +6,19 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-06-25
+
+### Fixed
+
+- **Much faster plaintext downloads on Windows.** On Windows (which has no
+  `os.sendfile`), `socket.sendfile()` silently falls back to a pure-Python send loop;
+  combined with servery's socket timeout, that loop ran a `select()` before every
+  8 KiB `send()`, throttling cleartext file downloads to a fraction of line rate
+  (~3× slower than the HTTPS path on the same host). servery now routes the
+  no-`sendfile` path through its userspace copy with a 1 MiB buffer, so plaintext
+  downloads match or beat the TLS path. Unix (Linux/macOS/BSD) is unchanged — it keeps
+  zero-copy `sendfile`.
+
 ## [1.3.1] - 2026-06-24
 
 ### Fixed

@@ -48,6 +48,18 @@ if TYPE_CHECKING:
     from servery.server import ServeryHTTPServer
 
 _COPY_BUFSIZE = 64 * 1024
+# Zero-copy sendfile(2) only exists on Unix. On Windows ``socket.sendfile`` silently
+# falls back to a pure-Python send loop, and because we set a socket timeout (see
+# setup()), that loop runs a ``selector.select()`` before *every* 8 KiB send(2) — two
+# syscalls per 8 KiB plus selector overhead. The result throttles plaintext downloads
+# to a fraction of line rate (measured ~70 Mbps vs ~200+ for the userspace copy on the
+# same host). Gate the fast path on real sendfile so Windows takes the copy below.
+_HAS_SENDFILE = hasattr(os, "sendfile")
+# Buffer for that userspace copy on a *plain* socket. wfile is unbuffered (wbufsize=0),
+# so this is the send(2) size: a large buffer means ~256 sends for a 256 MiB file
+# instead of tens of thousands, which matters on Windows. TLS keeps the smaller
+# ``_COPY_BUFSIZE`` — OpenSSL re-chunks every write into ~16 KiB records regardless.
+_RAW_COPY_BUFSIZE = 1024 * 1024
 # CSP for servery-GENERATED pages (listing / error): no scripts, inline styles
 # only, self forms. Served files are NOT given a CSP (it would break real sites).
 _CSP = (
@@ -94,11 +106,16 @@ footer { margin-top: 2.5rem; font-size: 0.8rem; opacity: 0.5; }
 """
 
 
-def _copy_n(source: SupportsRead[bytes], dest: SupportsWrite[bytes], count: int) -> None:
+def _copy_n(
+    source: SupportsRead[bytes],
+    dest: SupportsWrite[bytes],
+    count: int,
+    bufsize: int = _COPY_BUFSIZE,
+) -> None:
     """Copy exactly ``count`` bytes (or until EOF) from ``source`` to ``dest``."""
     remaining = count
     while remaining > 0:
-        chunk = source.read(min(_COPY_BUFSIZE, remaining))
+        chunk = source.read(min(bufsize, remaining))
         if not chunk:
             break
         dest.write(chunk)
@@ -675,7 +692,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         # Zero-copy fast path for plain sockets. (socket.sendfile transparently
         # handles non-regular sources like BytesIO via its own send loop; TLS
         # sockets cannot sendfile, so they take the userspace path below.)
-        if not isinstance(sock, ssl.SSLSocket):
+        # Skip it where os.sendfile is absent (Windows): socket.sendfile would fall
+        # back to a slow 8 KiB send loop — take the userspace copy below instead.
+        if _HAS_SENDFILE and not isinstance(sock, ssl.SSLSocket):
             # The offset is already known (0, or the range start), so we avoid a
             # source.tell() lseek on every request.
             offset = self._body_offset
@@ -688,10 +707,14 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 # userspace when nothing went out.
                 if source.tell() != offset:
                     raise
+        # Userspace copy: TLS sockets, or plain sockets on no-sendfile platforms
+        # (Windows). A plain socket sends each write in one syscall, so it gets the
+        # large raw buffer; TLS re-chunks to its record size and keeps the default.
+        bufsize = _COPY_BUFSIZE if isinstance(sock, ssl.SSLSocket) else _RAW_COPY_BUFSIZE
         if count is None:
-            shutil.copyfileobj(source, self.wfile)
+            shutil.copyfileobj(source, self.wfile, bufsize)
         else:
-            _copy_n(source, self.wfile, count)
+            _copy_n(source, self.wfile, count, bufsize)
 
     # --- authentication --------------------------------------------------
 
