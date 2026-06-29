@@ -221,6 +221,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="serve HTTP/3 over QUIC (requires TLS and the 'servery[http3]' extra)",
     )
     parser.add_argument(
+        "--tftp",
+        action="store_true",
+        help="also serve the directory over TFTP on UDP (read-only; LAN/trusted "
+        "networks only — no auth or encryption). Useful for PXE boot / network gear",
+    )
+    parser.add_argument(
+        "--tftp-port",
+        type=int,
+        default=69,
+        metavar="PORT",
+        help="UDP port for --tftp (default: 69; needs privileges below 1024)",
+    )
+    parser.add_argument(
+        "--tftp-write",
+        action="store_true",
+        help="allow anonymous TFTP uploads (WRQ); requires --tftp (use on trusted LANs only)",
+    )
+    parser.add_argument(
         "--tls-cert",
         metavar="PATH",
         help="TLS certificate chain (PEM); enables HTTPS",
@@ -336,6 +354,9 @@ def config_from_args(args: argparse.Namespace) -> Config:
         cgi_dir=args.cgi,
         asgi_app=args.asgi,
         proxy=args.proxy,
+        tftp=args.tftp,
+        tftp_port=args.tftp_port,
+        tftp_write=args.tftp_write,
     )
 
 

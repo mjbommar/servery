@@ -35,6 +35,36 @@ symlink escapes. Requires `--upload`.
 servery --upload --upload-extract
 ```
 
+### Resumable uploads (`PUT` with `Content-Range`)
+
+`--upload` also enables resumable uploads over `PUT`, so an interrupted transfer can
+pick up where it left off instead of starting over. It follows the widely-used
+Google/S3 convention and needs no client library — bare `curl` works:
+
+```bash
+# Whole-file PUT (create or, with --allow-overwrite, replace):
+curl -T big.iso http://localhost:8000/big.iso
+
+# Or upload in chunks, resuming on failure:
+curl -X PUT --data-binary @part1 -H 'Content-Range: bytes 0-1048575/3000000' \
+     http://localhost:8000/big.iso          # -> 308, Range: bytes=0-1048575
+curl -X PUT --data-binary @part2 -H 'Content-Range: bytes 1048576-2999999/3000000' \
+     http://localhost:8000/big.iso          # -> 201 Created
+
+# Ask how far an upload got (empty body), then resume from there:
+curl -X PUT -H 'Content-Range: bytes */3000000' http://localhost:8000/big.iso
+```
+
+Partial data accumulates in a hidden sidecar next to the target and is committed
+atomically only when the final byte arrives — a half-finished upload never appears
+in the listing. Chunks must arrive in order; a gap returns `409` so the client
+re-queries. The same `--max-upload-size` / `--allow-overwrite` limits apply.
+
+!!! note "WebDAV owns `PUT`"
+
+    When `--dav` is enabled, `PUT` is handled by [WebDAV](webdav.md) instead. The
+    resumable `PUT` API is the `--upload` (non-DAV) write interface.
+
 ## Requiring a password
 
 ```bash

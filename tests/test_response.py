@@ -42,9 +42,9 @@ class ShouldGzipTest(unittest.TestCase):
 
 
 class FinalizeBodyTest(unittest.TestCase):
-    def test_gzip_true_compresses_and_sets_encoding(self):
+    def test_gzip_compresses_and_sets_encoding(self):
         body = b"x" * (_compress.GZIP_MIN + 100)
-        status, headers, out = _response.finalize_body([], "text/plain", body, gzip=True)
+        status, headers, out = _response.finalize_body([], "text/plain", body, coding="gzip")
         h = _headers_dict(headers)
         self.assertEqual(status, 200)
         self.assertEqual(h[b"vary"], b"accept-encoding")  # compressible type
@@ -52,9 +52,9 @@ class FinalizeBodyTest(unittest.TestCase):
         self.assertEqual(gzip.decompress(out), body)
         self.assertEqual(h[b"content-length"], str(len(out)).encode())
 
-    def test_gzip_false_serves_identity_but_still_varies(self):
+    def test_identity_serves_plain_but_still_varies(self):
         body = b"x" * 100
-        _status, headers, out = _response.finalize_body([], "text/plain", body, gzip=False)
+        _status, headers, out = _response.finalize_body([], "text/plain", body, coding=None)
         h = _headers_dict(headers)
         self.assertEqual(h[b"vary"], b"accept-encoding")  # still advertise negotiation
         self.assertNotIn(b"content-encoding", h)
@@ -62,7 +62,7 @@ class FinalizeBodyTest(unittest.TestCase):
 
     def test_incompressible_no_vary(self):
         body = b"\x00" * 100
-        _status, headers, out = _response.finalize_body([], "image/png", body, gzip=False)
+        _status, headers, out = _response.finalize_body([], "image/png", body, coding=None)
         self.assertNotIn(b"vary", _headers_dict(headers))
         self.assertEqual(out, body)
 

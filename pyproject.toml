@@ -154,6 +154,12 @@ known-first-party = ["servery"]
 "src/servery/cgi.py" = ["N802", "PTH"]
 # The extractor works at the os path level (realpath containment by design).
 "src/servery/_extract.py" = ["PTH"]
+# Resumable PUT manipulates string paths + atomic os.replace (shared model with
+# upload.py); pathlib does not improve safety here.
+"src/servery/_resumable.py" = ["PTH"]
+# The TFTP server resolves paths at the os level (shared safe_join model) and
+# mirrors the "commit then return" idiom in its transfer loops.
+"src/servery/_tftp.py" = ["PTH", "TRY300"]
 
 [tool.ty.environment]
 python-version = "3.13"

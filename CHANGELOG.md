@@ -6,6 +6,41 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-06-28
+
+### Added
+
+- **Resumable uploads (`Content-Range` PUT).** With `--upload`, a `PUT` may carry
+  `Content-Range: bytes <start>-<end>/<total>` to append a chunk, resuming an
+  interrupted upload instead of starting over. The server stores partial data in a
+  hidden sidecar and commits it atomically on completion (`201`/`200`); a partial
+  chunk gets `308` + `Range: bytes=0-<last>`, and `Content-Range: bytes */<total>`
+  with an empty body queries how far an upload got. Works from a bare `curl` — no
+  client library — and follows the widely-deployed Google/S3 convention. A plain
+  `PUT` (no `Content-Range`) writes the whole file. (When `--dav` is on, WebDAV
+  still owns `PUT`.) Overwrites remain gated by `--allow-overwrite`.
+- **`zstd` response compression (Python 3.14+).** When the interpreter ships
+  `compression.zstd` (PEP 784, 3.14+) **and** the client sends
+  `Accept-Encoding: zstd`, text-like responses and the directory listing are
+  compressed with zstd (better ratio, much faster decode than gzip); otherwise
+  servery falls back to gzip exactly as before. zstd is advertised only when it is
+  actually available, so a 3.13 build is unchanged. `--no-compress` disables both.
+  Honored across HTTP/1.1, HTTP/2, and HTTP/3.
+- **Integrity digests (RFC 9530).** A client that sends `Want-Repr-Digest` gets a
+  `Repr-Digest: sha-256=:…:` (or `sha-512`) over the full representation on identity
+  file responses — including `206` range responses, so a download reassembled from
+  parallel ranges can be verified. A standardized, self-describing replacement for a
+  `.sha256` sidecar; computed only when asked, so the default download path is
+  unchanged. Pure stdlib (`hashlib`/`base64`).
+- **TFTP (RFC 1350), opt-in.** `--tftp` serves the same directory over TFTP on UDP
+  (a separate listener alongside HTTP), for the niche nothing modern replaced — PXE
+  network boot and pushing firmware/configs to switches, routers, and embedded gear.
+  Read-only by default; `--tftp-write` allows uploads. Octet and netascii modes, and
+  the RFC 2347-2349 `blksize`/`tsize`/`timeout` options PXE relies on, with
+  timeout-retransmit. Path safety reuses the same containment check as HTTP. TFTP has
+  **no authentication or encryption** — it is for trusted LAN / lab networks only,
+  off by default, with a loud startup warning. Pure stdlib (`socket`/`struct`).
+
 ## [1.3.2] - 2026-06-25
 
 ### Fixed

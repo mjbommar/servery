@@ -258,6 +258,28 @@ def _ensure_acme(config: Config) -> tuple[str, str]:  # pragma: no cover - needs
     return str(cert_path), str(key_path)
 
 
+def _start_tftp(config: Config):  # pragma: no cover - needs a UDP socket
+    """Start a TFTP listener serving the same directory; return the server handle."""
+    from servery import _tftp
+
+    root_real = os.path.realpath(config.directory)
+    server = _tftp.TftpServer(
+        root_real,
+        config.host,
+        config.tftp_port,
+        allow_write=config.tftp_write,
+        max_write_size=config.max_upload_size,
+    )
+    server.start()
+    if not config.quiet:
+        mode = "read/write" if config.tftp_write else "read-only"
+        print(
+            f"servery: serving TFTP ({mode}) on {config.host}:{server.port}/udp",
+            file=sys.stderr,
+        )
+    return server
+
+
 def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (CLI entry)
     """Run the server until interrupted. Blocks the calling thread."""
     if not config.quiet:
@@ -273,32 +295,40 @@ def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (C
             )
         cert_path, key_path = _ensure_acme(config)
         config = dataclasses.replace(config, tls_cert=cert_path, tls_key=key_path)
-    if config.asgi_app:  # ASGI runs its own asyncio event loop, not the threading server
-        from servery import asgi
+    # TFTP is a separate UDP listener that runs alongside whichever HTTP path we take.
+    tftp_server = _start_tftp(config) if config.tftp else None
+    try:
+        if config.asgi_app:  # ASGI runs its own asyncio event loop, not the threading server
+            from servery import asgi
 
-        if not config.quiet:
-            scheme = "https" if config.uses_tls else "http"
-            print(
-                f"servery: serving ASGI app {config.asgi_app} at "
-                f"{scheme}://{config.host}:{config.port}/ (experimental)",
-                file=sys.stderr,
-            )
-            for warning in config.startup_warnings():
-                print(f"servery: WARNING {warning}", file=sys.stderr)
-        asgi.run(config)
-        return
-    with make_server(config) as httpd:
-        port = httpd.server_address[1]
-        if not config.quiet:
-            print(f"servery: serving {config.directory} at {server_url(httpd)}", file=sys.stderr)
-            for warning in config.startup_warnings():
-                print(f"servery: WARNING {warning}", file=sys.stderr)
-            if config.qr:
-                _print_qr(config, port)
-        responder = _start_mdns(config, port) if config.discoverable else None
-        try:
-            with contextlib.suppress(KeyboardInterrupt):
-                httpd.serve_forever()
-        finally:
-            if responder is not None:
-                responder.stop()
+            if not config.quiet:
+                scheme = "https" if config.uses_tls else "http"
+                print(
+                    f"servery: serving ASGI app {config.asgi_app} at "
+                    f"{scheme}://{config.host}:{config.port}/ (experimental)",
+                    file=sys.stderr,
+                )
+                for warning in config.startup_warnings():
+                    print(f"servery: WARNING {warning}", file=sys.stderr)
+            asgi.run(config)
+            return
+        with make_server(config) as httpd:
+            port = httpd.server_address[1]
+            if not config.quiet:
+                print(
+                    f"servery: serving {config.directory} at {server_url(httpd)}", file=sys.stderr
+                )
+                for warning in config.startup_warnings():
+                    print(f"servery: WARNING {warning}", file=sys.stderr)
+                if config.qr:
+                    _print_qr(config, port)
+            responder = _start_mdns(config, port) if config.discoverable else None
+            try:
+                with contextlib.suppress(KeyboardInterrupt):
+                    httpd.serve_forever()
+            finally:
+                if responder is not None:
+                    responder.stop()
+    finally:
+        if tftp_server is not None:
+            tftp_server.stop()

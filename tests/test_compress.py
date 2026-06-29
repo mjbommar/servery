@@ -25,6 +25,7 @@ class NegotiationTest(unittest.TestCase):
             "br",
             "gzip;q=0",
             "gzip;q=0.0",
+            "gzip;q=notanumber",  # unparseable q-value -> treated as q=0
             "*;q=0",
             "identity, *;q=0",
         ):
@@ -57,6 +58,36 @@ class NegotiationTest(unittest.TestCase):
     def test_gzip_roundtrips(self):
         data = b"servery " * 500
         self.assertEqual(gzip.decompress(_compress.gzip_bytes(data)), data)
+
+    def test_accepts_zstd(self):
+        for header in ("zstd", "gzip, zstd", "*", "zstd;q=0.5", "ZSTD"):
+            self.assertTrue(_compress.accepts_zstd(header), header)
+        for header in ("", "gzip", "zstd;q=0", "*;q=0"):
+            self.assertFalse(_compress.accepts_zstd(header), header)
+
+    def test_negotiate_prefers_zstd_when_available(self):
+        if _compress.HAVE_ZSTD:
+            self.assertEqual(_compress.negotiate("gzip, zstd", enabled=True), "zstd")
+        # gzip-only always yields gzip, regardless of zstd support.
+        self.assertEqual(_compress.negotiate("gzip", enabled=True), "gzip")
+        self.assertIsNone(_compress.negotiate("identity", enabled=True))
+        self.assertIsNone(_compress.negotiate("gzip", enabled=False))
+
+    def test_negotiate_falls_back_to_gzip_without_zstd(self):
+        # Simulate a 3.13 interpreter (no compression.zstd): zstd must not be offered.
+        original = _compress.HAVE_ZSTD
+        _compress.HAVE_ZSTD = False
+        try:
+            self.assertEqual(_compress.negotiate("gzip, zstd", enabled=True), "gzip")
+        finally:
+            _compress.HAVE_ZSTD = original
+
+    @unittest.skipUnless(_compress.HAVE_ZSTD, "zstd needs Python 3.14+ (compression.zstd)")
+    def test_zstd_roundtrips(self):
+        from compression import zstd  # ty: ignore[unresolved-import]
+
+        data = b"servery " * 500
+        self.assertEqual(zstd.decompress(_compress.zstd_bytes(data)), data)
 
 
 class _ServerCase(unittest.TestCase):
@@ -146,12 +177,45 @@ class GzipServerTest(_ServerCase):
         self.assertEqual(body2, b"")
 
 
+@unittest.skipUnless(_compress.HAVE_ZSTD, "zstd needs Python 3.14+ (compression.zstd)")
+class ZstdServerTest(_ServerCase):
+    def _split(self, resp):
+        head, _, body = resp.partition(b"\r\n\r\n")
+        return head.lower(), body
+
+    def test_compresses_text_with_zstd_when_accepted(self):
+        from compression import zstd  # ty: ignore[unresolved-import]
+
+        head, body = self._split(self._get("/page.html", accept_encoding="zstd"))
+        self.assertIn(b"content-encoding: zstd", head)
+        self.assertIn(b"vary: accept-encoding", head)
+        self.assertNotIn(b"accept-ranges", head)  # a coded body is not byte-rangeable
+        self.assertIn(b'-zst"', head)  # distinct ETag for the zstd representation
+        self.assertEqual(zstd.decompress(body), b"<h1>hi</h1>\n" + b"x" * 4000)
+
+    def test_zstd_preferred_over_gzip(self):
+        head, _ = self._split(self._get("/page.html", accept_encoding="gzip, zstd"))
+        self.assertIn(b"content-encoding: zstd", head)
+
+    def test_gzip_still_served_when_only_gzip_accepted(self):
+        head, _ = self._split(self._get("/page.html", accept_encoding="gzip"))
+        self.assertIn(b"content-encoding: gzip", head)
+
+    def test_listing_uses_zstd(self):
+        head, _ = self._split(self._get("/", accept_encoding="zstd"))
+        self.assertIn(b"content-encoding: zstd", head)
+
+
 class NoCompressTest(_ServerCase):
     compress = False
 
     def test_no_compress_disables_gzip(self):
         head, _ = self._get("/page.html", accept_encoding="gzip").partition(b"\r\n\r\n")[0], None
         self.assertNotIn(b"content-encoding: gzip", head.lower())
+
+    def test_no_compress_disables_zstd(self):
+        head, _ = self._get("/page.html", accept_encoding="zstd").partition(b"\r\n\r\n")[0], None
+        self.assertNotIn(b"content-encoding:", head.lower())
 
 
 class WithCharsetTest(unittest.TestCase):

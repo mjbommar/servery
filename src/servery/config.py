@@ -55,6 +55,9 @@ class Config:
     cgi_dir: str | None = None  # cgi-bin directory — opt-in dynamic handler
     asgi_app: str | None = None  # "module:callable" — opt-in async dynamic handler
     proxy_routes: tuple[tuple[str, str], ...] = ()  # (path-prefix, upstream-url) pairs
+    tftp: bool = False  # serve the same dir over TFTP (separate UDP listener; LAN only)
+    tftp_port: int = 69
+    tftp_write: bool = False  # allow anonymous TFTP writes (WRQ); requires tftp
 
     @property
     def cache_control(self) -> str:
@@ -87,6 +90,12 @@ class Config:
                 "using a self-signed certificate — clients will see an "
                 "'untrusted certificate' warning (fine for a dev box or LAN)"
             )
+        if self.tftp:
+            warnings.append(
+                "TFTP has no authentication or encryption — use it on trusted LANs only"
+            )
+        if self.tftp_write:
+            warnings.append("--tftp-write accepts anonymous file writes over UDP")
         return warnings
 
     @classmethod
@@ -128,6 +137,9 @@ class Config:
         cgi_dir: str | None = None,
         asgi_app: str | None = None,
         proxy: list[str] | None = None,
+        tftp: bool = False,
+        tftp_port: int = 69,
+        tftp_write: bool = False,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
         proxy_routes = _parse_proxy_routes(proxy or [])
@@ -135,6 +147,10 @@ class Config:
         # an opaque OSError/UploadError. (port 0 is valid: an ephemeral port.)
         if not 0 <= port <= 65535:
             raise ValueError(f"--port must be 0-65535, got {port}")
+        if not 0 <= tftp_port <= 65535:
+            raise ValueError(f"--tftp-port must be 0-65535, got {tftp_port}")
+        if tftp_write and not tftp:
+            raise ValueError("--tftp-write requires --tftp")
         if max_upload_size <= 0:
             raise ValueError("--max-upload-size must be a positive number of bytes")
         if timeout <= 0:
@@ -205,6 +221,9 @@ class Config:
             cgi_dir=cgi_dir,
             asgi_app=asgi_app,
             proxy_routes=proxy_routes,
+            tftp=tftp,
+            tftp_port=tftp_port,
+            tftp_write=tftp_write,
         )
 
 

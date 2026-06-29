@@ -40,6 +40,36 @@ servery --http3 --tls-cert cert.pem --tls-key key.pem
 The core stays dependency-free; only HTTP/3 pulls in the reference QUIC stack
 (`aioquic`).
 
+## TFTP
+
+```bash
+servery --tftp                 # read-only TFTP on UDP/69, alongside HTTP
+servery --tftp --tftp-write    # also accept uploads (WRQ)
+servery --tftp --tftp-port 6900  # an unprivileged port
+```
+
+`--tftp` serves the **same directory** over TFTP (RFC 1350) on a separate UDP
+listener that runs alongside the HTTP server. It exists for the niche nothing modern
+replaced: **PXE network boot** and pushing firmware/configs to switches, routers,
+phones, and other embedded gear. It's pure stdlib (`socket`/`struct`), supports the
+octet and netascii modes and the RFC 2347-2349 `blksize` / `tsize` / `timeout`
+options PXE relies on, and retransmits on timeout. Path safety reuses the same
+containment check as the HTTP side, so a request can't escape the served root.
+
+!!! danger "TFTP has no authentication or encryption"
+
+    TFTP is cleartext UDP with no access control, and a known DDoS-amplification
+    surface. Use it on **trusted LAN / lab networks only** — never the open internet.
+    It is off by default, read-only unless you add `--tftp-write`, and servery prints
+    a loud startup warning when it's enabled. Port 69 (the default) needs privileges;
+    use `--tftp-port` for an unprivileged port.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--tftp` | off | serve the directory over TFTP (UDP), read-only |
+| `--tftp-port PORT` | `69` | UDP port for TFTP |
+| `--tftp-write` | off | allow anonymous TFTP uploads (`WRQ`); requires `--tftp` |
+
 ## Tuning concurrency
 
 servery runs one thread per connection by default. Under high concurrency that can

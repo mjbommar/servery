@@ -27,7 +27,7 @@ Run `servery --help` for the same list inline, or `servery --version`.
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--upload` | off | accept `POST multipart/form-data` uploads into the tree |
+| `--upload` | off | accept `POST multipart/form-data` uploads, and **resumable `Content-Range` `PUT`** uploads, into the tree |
 | `--max-upload-size BYTES` | 100 MiB | maximum accepted upload size |
 | `--allow-overwrite` | off | let uploads overwrite existing files |
 | `--upload-extract` | off | safely expand uploaded zip/tar archives (requires `--upload`) |
@@ -80,7 +80,7 @@ Run `servery --help` for the same list inline, or `servery --version`.
 | `--cache SECONDS` | `no-cache` | `Cache-Control: max-age` for file responses |
 | `--cors` | off | send permissive CORS headers (`Access-Control-Allow-Origin: *`) |
 | `--spa` | off | serve `/index.html` for unknown paths (single-page apps) |
-| `--no-compress` | (gzip on) | disable on-the-fly gzip of text-like responses |
+| `--no-compress` | (on) | disable on-the-fly compression (zstd on 3.14+, else gzip) of text-like responses |
 | `--no-security-headers` | (on) | disable servery's default security response headers |
 | `--access-log PATH` | — | write an access log to PATH |
 | `--access-log-format {clf,combined,json}` | `clf` | access log format |
@@ -96,6 +96,20 @@ Run `servery --help` for the same list inline, or `servery --version`.
 | `--max-workers N` | unbounded | bound concurrency to N worker threads |
 
 → [HTTP/2, HTTP/3 & concurrency](../guide/protocols.md)
+
+## TFTP (opt-in; separate UDP listener)
+
+Serves the **same directory** over TFTP (RFC 1350) alongside HTTP — for PXE boot
+and network gear. **No authentication or encryption**: trusted LAN / lab networks
+only. Read-only unless `--tftp-write`.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--tftp` | off | also serve the directory over TFTP on UDP (read-only) |
+| `--tftp-port PORT` | `69` | UDP port for TFTP (below 1024 needs privileges) |
+| `--tftp-write` | off | allow anonymous TFTP uploads (`WRQ`); requires `--tftp` |
+
+→ [HTTP/2, HTTP/3 & concurrency](../guide/protocols.md#tftp)
 
 ## Apps & proxying (opt-in; replace file serving)
 

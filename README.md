@@ -47,7 +47,9 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
   cookie-backed light/dark/auto theme — all server-side with **no JavaScript**.
 - **Correct downloads** — RFC 9110 `Range`/`206` (resumable), strong `ETag`s, the full
   conditional-request ladder (`If-None-Match`/`If-Modified-Since`/`If-Range` → `304`/`412`),
-  and zero-copy `sendfile`.
+  and zero-copy `sendfile`. Opt-in **RFC 9530 integrity digests** — send
+  `Want-Repr-Digest` and get a `Repr-Digest: sha-256=:…:` over the whole file (even for
+  a ranged/parallel download), a standardized replacement for a `.sha256` sidecar.
 - **HTTPS** — bring your own cert (`--tls-cert`/`--tls-key`) or get an ad-hoc
   self-signed one with **`--tls-self-signed`** (zero-dependency, generated at
   startup — handy for a quick encrypted LAN share). ALPN + HSTS over TLS.
@@ -57,7 +59,9 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
   third-party crypto. Staging by default; `--acme-production` for real certs.
 - **HTTP Basic Auth** — single credential or a pre-hashed `user:sha256:…`, constant-time compare.
 - **Upload** — opt-in `--upload`, streaming `multipart/form-data` (no `cgi`), atomic writes,
-  bounded size, overwrite off by default.
+  bounded size, overwrite off by default. **Resumable uploads** too: `PUT` with
+  `Content-Range` appends a chunk and survives an interrupted transfer (the Google/S3
+  convention — works from bare `curl`, `308` + `Range` to resume).
 - **Archive download** — stream any directory as `tar.gz` or `zip` (`?archive=tar.gz`), or
   tick the per-entry checkboxes and **zip just the selected files/folders** — all with **no
   JavaScript**.
@@ -68,9 +72,11 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
   stdlib, same path-safety as everything else; writes honor `--auth`.
 - **CORS, SPA fallback, cache control, security headers** — `--cors`, `--spa`, `--cache`,
   with `nosniff` everywhere and a scoped CSP on generated pages (off via `--no-security-headers`).
-- **On-the-fly gzip** — text-like responses (and the directory listing) are gzipped when the
-  client accepts it (RFC 9110: q-value negotiation, `Vary`, distinct ETag, ranges served
-  identity). Already-compressed media is left alone (keeps `sendfile`). Off via `--no-compress`.
+- **On-the-fly compression** — text-like responses (and the directory listing) are compressed
+  when the client accepts it (RFC 9110: q-value negotiation, `Vary`, distinct ETag, ranges
+  served identity). Prefers **`zstd`** when the interpreter has it (Python 3.14+,
+  `compression.zstd`) and the client accepts it, else **`gzip`**. Already-compressed media is
+  left alone (keeps `sendfile`). Off via `--no-compress`.
 - **Frictionless LAN sharing** — `--qr` prints a scannable QR of the LAN URL (pure-stdlib QR
   encoder, with auto-detected LAN IP even on a `0.0.0.0` bind), and `--discoverable` advertises
   over mDNS/DNS-SD so the share shows up in Finder / file managers and at `<host>.local`.
@@ -79,6 +85,9 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
   third-party package.
 - **HTTP/3** — optional, via `pip install servery[http3]` (the `aioquic` QUIC stack); the core
   stays zero-dependency.
+- **TFTP** — opt-in `--tftp` also serves the directory over TFTP (UDP, RFC 1350) for PXE boot
+  and network gear, with `blksize`/`tsize`/`timeout` options; read-only unless `--tftp-write`.
+  Pure stdlib. No auth or encryption — **trusted LAN / lab networks only** (off by default).
 - **Safe by default** — binds `127.0.0.1`, path-traversal + symlink-escape protection, a
   default socket timeout, and loud warnings when you expose it or run auth without TLS.
 - **Free-threading ready** — runs under the no-GIL builds (3.13t/3.14t); immutable config,

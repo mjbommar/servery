@@ -107,6 +107,16 @@ class CliParserTest(unittest.TestCase):
         self.assertTrue(any("cleartext" in w for w in warnings))
         self.assertEqual(servery.Config.create(".").startup_warnings(), [])
 
+    def test_tftp_flags_and_warnings(self):
+        args = cli.build_parser().parse_args(["--tftp", "--tftp-port", "6900", "--tftp-write"])
+        config = cli.config_from_args(args)
+        self.assertTrue(config.tftp)
+        self.assertEqual(config.tftp_port, 6900)
+        self.assertTrue(config.tftp_write)
+        warnings = config.startup_warnings()
+        self.assertTrue(any("TFTP" in w for w in warnings))
+        self.assertTrue(any("anonymous" in w for w in warnings))
+
     def test_tls_config_and_password_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             pw = Path(tmp) / "pw.txt"
@@ -133,6 +143,10 @@ class ConfigValidationTest(unittest.TestCase):
             Config.create(".", timeout=0)
         with self.assertRaises(ValueError):
             Config.create(".", cache_max_age=-1)
+        with self.assertRaises(ValueError):
+            Config.create(".", tftp_port=70000)
+        with self.assertRaises(ValueError):
+            Config.create(".", tftp_write=True)  # requires tftp
 
     def test_accepts_ephemeral_port_zero(self):
         from servery.config import Config

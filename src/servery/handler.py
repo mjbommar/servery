@@ -32,8 +32,10 @@ from servery import (
     __version__,
     _compress,
     _conditional,
+    _digest,
     _http1,
     _log,
+    _resumable,
     archive,
     auth,
     listing,
@@ -490,10 +492,16 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         self._dav("unlock", write=False)
 
     def do_PUT(self) -> None:
-        if self._server.config.dav:
+        config = self._server.config
+        if config.dav:  # WebDAV owns PUT when mounted
             self._dav("put", write=True)
-        else:
-            self._proxy_or_unsupported()
+            return
+        if self._maybe_proxy():
+            return
+        if config.upload:  # resumable Content-Range PUT (the --upload write API)
+            self._resumable_put()
+            return
+        self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command})")
 
     def do_DELETE(self) -> None:
         if self._server.config.dav:
@@ -570,6 +578,142 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    # --- resumable upload (Content-Range PUT, opt-in --upload) -----------
+
+    def _resumable_put(self) -> None:
+        """Write/append a file via PUT, resumably (the S3/GCS Content-Range pattern)."""
+        if not self._authorized():
+            return
+        config = self._server.config
+        target = self.translate_path(self.path)
+        url_path = urllib.parse.urlsplit(self.path).path
+        # The URL must name a file inside the served root with an existing parent.
+        if not target or url_path.endswith("/"):
+            self._put_reject(HTTPStatus.FORBIDDEN, "PUT target must be a file path")
+            return
+        if os.path.isdir(target):
+            self._put_reject(HTTPStatus.CONFLICT, "Target is a directory")
+            return
+        if not os.path.isdir(os.path.dirname(target)) or not security.is_contained(
+            self._server.root_real, target
+        ):
+            self._put_reject(HTTPStatus.NOT_FOUND, "Upload directory not found")
+            return
+
+        length = self._put_content_length()
+        if length is None:
+            return  # an error was already sent
+        if length > config.max_upload_size:
+            self._put_reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Upload exceeds the size limit")
+            return
+
+        range_header = self.headers.get("Content-Range")
+        if range_header is None:  # a plain PUT writes the whole body
+            self._put_whole(target, length)
+            return
+        try:
+            content_range = _resumable.parse_content_range(range_header)
+        except _resumable.ResumableError as exc:
+            self._put_reject(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        self._put_ranged(target, content_range, length)
+
+    def _put_content_length(self) -> int | None:
+        """Parse a required, non-negative Content-Length, or send an error and return None."""
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            self._put_reject(HTTPStatus.LENGTH_REQUIRED, "Content-Length required for upload")
+            return None
+        try:
+            length = int(raw)
+        except ValueError:
+            length = -1
+        if length < 0:
+            self._put_reject(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
+            return None
+        return length
+
+    def _put_ranged(self, target: str, cr: _resumable.ContentRange, length: int) -> None:
+        config = self._server.config
+        if cr.total is not None and cr.total > config.max_upload_size:
+            self._put_reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Upload exceeds the size limit")
+            return
+        part = _resumable.part_path(target)
+        stored = _resumable.stored_bytes(part)
+        if cr.is_query:  # "bytes */total": report how far we got, no body to read
+            self._put_incomplete(stored)
+            return
+        if cr.length != length:
+            self._put_reject(HTTPStatus.BAD_REQUEST, "Content-Length must match Content-Range")
+            return
+        if cr.start != stored:  # a gap/overlap: the body is unread, so close and resync
+            self.close_connection = True
+            self._put_incomplete(stored, status=HTTPStatus.CONFLICT)
+            return
+        if stored + cr.length > config.max_upload_size:
+            self._put_reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Upload exceeds the size limit")
+            return
+        reader = upload.BoundedReader(self.rfile, length)
+        try:
+            written = _resumable.append(part, reader, length)
+        except OSError:
+            self._put_reject(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not write upload")
+            return
+        reader.drain()
+        new_offset = stored + written
+        if cr.total is not None and new_offset >= cr.total:
+            self._put_commit(part, target)
+        else:
+            self._put_incomplete(new_offset)
+
+    def _put_whole(self, target: str, length: int) -> None:
+        existed = os.path.exists(target)
+        if existed and not self._server.config.allow_overwrite:
+            self._put_reject(HTTPStatus.CONFLICT, "A file with that name already exists")
+            return
+        reader = upload.BoundedReader(self.rfile, length)
+        try:
+            _resumable.write_whole(target, reader, length)
+        except OSError:
+            self._put_reject(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not write upload")
+            return
+        reader.drain()
+        self._put_created(existed)
+
+    def _put_commit(self, part: str, target: str) -> None:
+        existed = os.path.exists(target)
+        if existed and not self._server.config.allow_overwrite:
+            # The body was already consumed (aligned) — keep the completed sidecar so
+            # an --allow-overwrite retry can finish; just signal the conflict.
+            self.send_error(HTTPStatus.CONFLICT, "A file with that name already exists")
+            return
+        try:
+            _resumable.commit(part, target)
+        except OSError:
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not finalize upload")
+            return
+        self._put_created(existed)
+
+    def _put_created(self, existed: bool) -> None:
+        self.send_response(HTTPStatus.OK if existed else HTTPStatus.CREATED)
+        if not existed:
+            self.send_header("Location", self.path)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _put_incomplete(self, offset: int, *, status: int = 308) -> None:
+        """A 308 'Resume Incomplete' (Google convention) reporting bytes stored."""
+        self.send_response(status, "Resume Incomplete")
+        if offset > 0:
+            self.send_header("Range", f"bytes=0-{offset - 1}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _put_reject(self, code: int, message: str) -> None:
+        # The request body was not consumed; close so keep-alive can't desync.
+        self.close_connection = True
+        self.send_error(code, message)
+
     def _serve_file(self, path: str) -> BinaryIO | None:
         try:
             f = open(path, "rb")  # noqa: SIM115 (handed to the caller / closed on error)
@@ -593,24 +737,27 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             disposition = _content_disposition(os.path.basename(path)) if download else None
 
             range_header = self.headers.get("Range")
-            # gzip and ranges are mutually exclusive: a Range over the *encoded*
-            # bytes is incoherent on the fly, so we only compress when no Range is
-            # asked for (RFC 9110 §14.1.2). Compressible resources always advertise
-            # Vary: Accept-Encoding so a shared cache can't mix codings (§12.5.5).
+            # Compression and ranges are mutually exclusive: a Range over the
+            # *encoded* bytes is incoherent on the fly, so we only compress when no
+            # Range is asked for (RFC 9110 §14.1.2). Compressible resources always
+            # advertise Vary: Accept-Encoding so a shared cache can't mix codings
+            # (§12.5.5). The coding is zstd (3.14+) when offered and accepted, else
+            # gzip, else None — one shared decision (see _compress.choose_encoding).
             self._vary_accept_encoding = _compress.compressible(ctype)
-            # gzip uses the shared decision; ranges add the §14.1.2 mutual exclusion.
-            use_gzip = not range_header and _compress.should_gzip(
-                ctype,
-                size,
-                self.headers.get("Accept-Encoding", ""),
-                enabled=self._server.config.compress,
+            coding = (
+                None
+                if range_header
+                else _compress.choose_encoding(
+                    ctype,
+                    size,
+                    self.headers.get("Accept-Encoding", ""),
+                    enabled=self._server.config.compress,
+                )
             )
-            # The gzip representation needs a distinct (still strong) ETag (§8.8.3.3);
+            # The coded representation needs a distinct (still strong) ETag (§8.8.3.3);
             # decide the coding BEFORE conditionals so a 304/If-None-Match echoes the
             # tag for the representation the client would actually get.
-            etag = _conditional.make_etag(stat)
-            if use_gzip:
-                etag = _conditional.gzip_variant(etag)
+            etag = _conditional.coding_variant(_conditional.make_etag(stat), coding)
 
             if self._is_not_modified(etag, stat.st_mtime):
                 self.send_response(HTTPStatus.NOT_MODIFIED)
@@ -620,19 +767,19 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 f.close()
                 return None
 
-            if use_gzip:
-                body = _compress.gzip_bytes(f.read())
+            if coding is not None:
+                body = _compress.encode(f.read(), coding)
                 f.close()
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Cache-Control", cache_control)
-                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Content-Encoding", coding)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("ETag", etag)
                 self.send_header("Last-Modified", last_modified)
                 if disposition is not None:
                     self.send_header("Content-Disposition", disposition)
-                self.end_headers()  # no Accept-Ranges: a gzipped body isn't byte-rangeable
+                self.end_headers()  # no Accept-Ranges: a coded body isn't byte-rangeable
                 self._body_remaining = len(body)
                 return io.BytesIO(body)
 
@@ -658,6 +805,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Accept-Ranges", "bytes")
                 self.send_header("ETag", etag)
                 self.send_header("Last-Modified", last_modified)
+                self._send_repr_digest(path)
                 if disposition is not None:
                     self.send_header("Content-Disposition", disposition)
                 self.end_headers()
@@ -673,6 +821,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("ETag", etag)
             self.send_header("Last-Modified", last_modified)
+            self._send_repr_digest(path)
             if disposition is not None:
                 self.send_header("Content-Disposition", disposition)
             self.end_headers()
@@ -745,6 +894,21 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             if_modified_since=self.headers.get("If-Modified-Since"),
         )
 
+    def _send_repr_digest(self, path: str) -> None:
+        """Emit an RFC 9530 ``Repr-Digest`` over the full file if the client asked.
+
+        Only on identity (un-coded) responses, where the representation *is* the file
+        on disk; computed lazily (it reads the whole file) so the default download
+        path pays nothing. Covers a parallel/ranged download: the digest is over the
+        whole representation, so a client can verify the reassembled result.
+        """
+        algorithm = _digest.choose_algorithm(self.headers.get("Want-Repr-Digest"))
+        if algorithm is None:
+            return
+        value = _digest.field_value_for_file(path, algorithm)
+        if value is not None:
+            self.send_header("Repr-Digest", value)
+
     def _if_range_ok(self, etag: str, mtime: float) -> bool:
         condition = self.headers.get("If-Range")
         if condition is None:
@@ -793,12 +957,11 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             return None
         # The listing is generated HTML — always compressible (and Vary-keyed).
         self._vary_accept_encoding = True
-        encoding = None
-        if self._server.config.compress and _compress.accepts_gzip(
-            self.headers.get("Accept-Encoding", "")
-        ):
-            body = _compress.gzip_bytes(body)
-            encoding = "gzip"
+        encoding = _compress.negotiate(
+            self.headers.get("Accept-Encoding", ""), enabled=self._server.config.compress
+        )
+        if encoding is not None:
+            body = _compress.encode(body, encoding)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         if encoding is not None:

@@ -66,18 +66,18 @@ def error(status: int) -> tuple[int, _HeaderList, bytes]:
 
 
 def finalize_body(
-    headers: _HeaderList, ctype: str, body: bytes, *, gzip: bool
+    headers: _HeaderList, ctype: str, body: bytes, *, coding: str | None
 ) -> tuple[int, _HeaderList, bytes]:
-    """Append Vary (compressible), Content-Encoding (when ``gzip``), Content-Type/Length.
+    """Append Vary (compressible), Content-Encoding (when coded), Content-Type/Length.
 
-    The gzip *decision* is made by the caller via :func:`_compress.should_gzip` (so it
-    can agree with the ETag variant); this just assembles the body + headers.
+    The coding *decision* is made by the caller via :func:`_compress.choose_encoding`
+    (so it can agree with the ETag variant); this just assembles the body + headers.
     """
     if _compress.compressible(ctype):
         headers.append((b"vary", b"accept-encoding"))
-    if gzip:
-        body = _compress.gzip_bytes(body)
-        headers.append((b"content-encoding", b"gzip"))
+    if coding is not None:
+        body = _compress.encode(body, coding)
+        headers.append((b"content-encoding", coding.encode("ascii")))
     headers.append((b"content-type", ctype.encode("latin-1")))
     headers.append((b"content-length", str(len(body)).encode("ascii")))
     return 200, headers, body
@@ -119,21 +119,19 @@ def build_static(
             # "default-src 'none'" alone renders it unstyled.
             headers.append((b"content-security-policy", _CSP.encode("latin-1")))
             headers.append((b"referrer-policy", b"no-referrer"))
-        gzip = _compress.should_gzip(
-            _LISTING_TYPE, len(body), accept_encoding, enabled=config.compress
-        )
-        return finalize_body(headers, _LISTING_TYPE, body, gzip=gzip)
+        coding = _compress.negotiate(accept_encoding, enabled=config.compress)
+        return finalize_body(headers, _LISTING_TYPE, body, coding=coding)
     try:
         stat = os.stat(fs_path)  # noqa: PTH116 - os-level by design
     except OSError:
         return error(404)
     ctype = guess_type(fs_path)
-    # Decide gzip from the identity size (no read needed) so the ETag for the
+    # Decide the coding from the identity size (no read needed) so the ETag for the
     # representation the client would get is known before any conditional check.
-    gzip = _compress.should_gzip(ctype, stat.st_size, accept_encoding, enabled=config.compress)
-    etag = _conditional.make_etag(stat)
-    if gzip:
-        etag = _conditional.gzip_variant(etag)
+    coding = _compress.choose_encoding(
+        ctype, stat.st_size, accept_encoding, enabled=config.compress
+    )
+    etag = _conditional.coding_variant(_conditional.make_etag(stat), coding)
     last_modified = _http1.format_http_date(stat.st_mtime)
     headers.append((b"etag", etag.encode("ascii")))
     headers.append((b"last-modified", last_modified.encode("latin-1")))
@@ -146,4 +144,4 @@ def build_static(
             body = handle.read()
     except OSError:
         return error(404)
-    return finalize_body(headers, ctype, body, gzip=gzip)
+    return finalize_body(headers, ctype, body, coding=coding)

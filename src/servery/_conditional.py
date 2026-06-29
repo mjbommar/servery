@@ -26,6 +26,20 @@ def gzip_variant(etag: str) -> str:
     return etag[:-1] + '-gz"'
 
 
+#: Per-coding ETag suffix — a distinct strong validator per representation.
+_CODING_SUFFIX = {"gzip": "-gz", "zstd": "-zst"}
+
+
+def coding_variant(etag: str, coding: str | None) -> str:
+    """The distinct ETag for a content-coded representation (RFC 9110 §8.8.3.3).
+
+    ``coding`` is ``"gzip"``, ``"zstd"``, or ``None`` (identity → the tag unchanged).
+    """
+    if coding is None:
+        return etag
+    return etag[:-1] + _CODING_SUFFIX[coding] + '"'
+
+
 def _unweak(tag: str) -> str:
     return tag[2:] if tag.startswith("W/") else tag
 
