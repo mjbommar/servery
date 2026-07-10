@@ -4,18 +4,14 @@ from __future__ import annotations
 
 import contextlib
 import http.client
+import importlib.util
 import ssl
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 
-try:
-    import aioquic  # noqa: F401
-
-    _HAVE_AIOQUIC = True
-except ImportError:  # pragma: no cover - lean/free-threaded test jobs
-    _HAVE_AIOQUIC = False
+_HAVE_AIOQUIC = importlib.util.find_spec("aioquic") is not None
 
 
 @unittest.skipUnless(_HAVE_AIOQUIC, "HTTP/3 e2e needs the optional aioquic extra")
