@@ -503,10 +503,14 @@ class TftpServer:
                 reply = _pack_ack(expected)
                 expected = (expected + 1) & 0xFFFF
                 if last:
-                    sock.sendto(reply, addr)  # final ACK
                     tmp.close()
                     os.replace(tmp.name, fs_path)
                     committed = True
+                    # Commit before acknowledging completion.  Besides making the
+                    # ACK truthful, this is required on Windows where the client
+                    # can otherwise observe (or try to open) the still-live temp
+                    # file before the rename has completed.
+                    sock.sendto(reply, addr)  # final ACK
                     return
         finally:
             if not committed:

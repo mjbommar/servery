@@ -68,7 +68,16 @@ class ConcurrentWriteTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
-        self.cfg = Config.create(self.root, host="127.0.0.1", port=0, quiet=True, upload=True)
+        self.cfg = Config.create(
+            self.root,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            upload=True,
+            # Both 512 KiB contenders should receive an HTTP decision.  Production
+            # users can keep the lower default to cap rejection-drain work.
+            keepalive_drain_limit=1024 * 1024,
+        )
 
     def tearDown(self):
         self._tmp.cleanup()

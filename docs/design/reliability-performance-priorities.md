@@ -63,10 +63,10 @@ because the implementation has a number in it.
 | Priority | Shipped decision and evidence |
 | --- | --- |
 | 1 | `_response.ResponseBody` keeps `bytes` for files at or below `max_buffered_response` (1 MiB by default) and returns `FileBody` above it. HTTP/2 schedules bounded file reads against both flow-control windows; HTTP/3 reads in worker threads and bounds queued QUIC stream bytes. HTTP/1.1 retains its `sendfile`/streaming path. A zero threshold forces streaming. |
-| 2 | `_body.parse_framing` is the shared duplicate-length and transfer-encoding policy. Sync adapters reject chunked bodies; ASGI decodes them incrementally. `max_request_body` and `keepalive_drain_limit` are configurable, and every early/unread path either drains exactly or closes. Raw pipelining tests prove rejected or ignored bodies cannot become a second request. |
+| 2 | `_body.parse_framing` is the shared duplicate-length and transfer-encoding policy. Sync adapters reject chunked bodies; ASGI decodes them incrementally. `max_request_body` and `keepalive_drain_limit` are configurable, and every early/unread path either drains exactly or closes. Rejected PUT responses are flushed before a bounded drain so Windows clients receive the decision; larger bodies still close rather than imposing unbounded read work. Raw pipelining tests prove rejected or ignored bodies cannot become a second request. |
 | 3 | HTTP/2 tracks active streams from HEADERS through response completion, advertises and enforces `max_h2_streams`, applies active `INITIAL_WINDOW_SIZE` changes, validates stream IDs/CONTINUATION/window arithmetic, budgets rapid resets and CONTINUATION/SETTINGS/PING floods, and writes with a non-recursive fair scheduler. Protocol-negative and large/small interleave tests cover the state machine. |
 | 4 | `http3`, `http3_only`, and `http3_port` are part of `Config`. Normal `--http3` starts TCP and UDP together, shares certificate material and the compression cache, advertises the actual live UDP port through `Alt-Svc`, and shuts both down under one owner. Real aioquic tests cover streaming, fallback, advertisement, and clean stop. |
-| 5 | `max_connections` defaults to 256 across threaded HTTP, ASGI, and HTTP/3; `max_workers`, `max_h2_streams`, and `max_tftp_transfers` remain distinct policies. Saturation rejects immediately and recovery is tested. TFTP netascii is stateful and streaming across read/block boundaries. |
+| 5 | `max_connections` defaults to 256 across threaded HTTP, ASGI, and HTTP/3; `max_workers`, `max_h2_streams`, and `max_tftp_transfers` remain distinct policies. Saturation rejects immediately and recovery is tested. TFTP netascii is stateful and streaming across read/block boundaries, and a write's final ACK is sent only after its same-directory temporary file has been closed and atomically committed. |
 | 6 | `_writecoord.TargetLocks` serializes canonical targets across multipart, resumable PUT, WebDAV, archive entries, and TFTP. `write_lock_timeout` controls reject-versus-wait; writes and extraction commit from same-directory temporary files. `partial_upload_ttl` expires stale sidecars lazily and `max_partial_uploads` bounds their count after a lazy first-use inventory. Concurrent no-overwrite and resumable tests prove one winner without corruption. |
 | 7 | Each `AccessLog` owns and closes one handler; construction occurs only after successful handler setup and bind. Independent-server, close-order, failed-bind, and end-to-end tests cover ownership. |
 | 8 | `dav_lock_mode` is `class1`, `compat`, or `enforced` (default for writable DAV). Enforced mode stores exclusive depth-infinity locks, refreshes/expires tokens, and checks affected ancestors/descendants on writes. Compat warns at startup. Read-only DAV honestly advertises class 1. |
@@ -84,7 +84,7 @@ The pre-release Linux run on 2026-07-10 produced the following evidence. Absolut
 performance numbers are machine-specific; the scheduled workflow retains comparable
 JSON for trend analysis.
 
-- The complete quality gate passed: ruff, ty, Bandit, 666 functional tests (six
+- The complete quality gate passed: ruff, ty, Bandit, 668 functional tests (six
   environment-specific skips), 90% combined line/branch coverage, wheel/sdist build,
   and the zero-runtime-dependency check.
 - The full 663-test matrix before the final three HTTP/2 abuse cases passed on

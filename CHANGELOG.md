@@ -39,7 +39,9 @@ All notable changes to servery are documented here. The format follows
 
 - **Request framing is consistent and desynchronization-safe.** All adapters share
   duplicate `Content-Length` / `Transfer-Encoding` validation and body limits;
-  unread bodies are drained only within policy or force connection close.
+  unread bodies are drained only within policy or force connection close. Rejected
+  PUT responses remain observable across platforms while the configured drain cap
+  still bounds work and controls whether the connection can be reused.
 - **Concurrent writes no longer race.** Canonical per-target locks cover uploads,
   resumable PUT, WebDAV, extraction, and TFTP; atomic replacement preserves the old
   file on failure. Resumable sidecars gain lazy TTL cleanup and a configurable
@@ -54,8 +56,9 @@ All notable changes to servery are documented here. The format follows
   owned and tested without leaked daemon threads.
 - **Access logs own their handlers.** Multiple server instances no longer mutate a
   shared logger or close one another's file handles; failed startup rolls back.
-- **TFTP netascii conversion is streaming and stateful** across source-read and
-  protocol-block boundaries, with bounded transfer admission and recovery.
+- **TFTP writes commit before their final ACK**, including on Windows, and netascii
+  conversion is streaming and stateful across source-read and protocol-block
+  boundaries, with bounded transfer admission and recovery.
 
 ### Performance
 

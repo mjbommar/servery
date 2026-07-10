@@ -10,7 +10,7 @@ from pathlib import Path
 
 from servery import _resumable
 from servery.config import Config
-from tests._harness import serving
+from tests._harness import raw_exchange, serving
 
 
 class ParseContentRangeTest(unittest.TestCase):
@@ -140,6 +140,46 @@ class WholePutTest(_ServerCase):
             status, _, _ = _put(host, port, "/x.txt", b"new")
         self.assertEqual(status, 409)
         self.assertEqual((self.root / "x.txt").read_bytes(), b"old")
+
+    def test_small_rejected_body_is_drained_for_keepalive(self):
+        (self.root / "x.txt").write_bytes(b"old")
+        cfg = Config.create(
+            self.root,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            upload=True,
+            keepalive_drain_limit=4,
+        )
+        with serving(cfg) as (host, port):
+            response = raw_exchange(
+                host,
+                port,
+                b"PUT /x.txt HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nDATA"
+                b"GET /x.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+        self.assertEqual(response.count(b"HTTP/1.1 409"), 1)
+        self.assertEqual(response.count(b"HTTP/1.1 200 OK"), 1)
+
+    def test_large_rejected_body_closes_at_configured_drain_limit(self):
+        (self.root / "x.txt").write_bytes(b"old")
+        cfg = Config.create(
+            self.root,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            upload=True,
+            keepalive_drain_limit=3,
+        )
+        with serving(cfg) as (host, port):
+            response = raw_exchange(
+                host,
+                port,
+                b"PUT /x.txt HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nDATA"
+                b"GET /x.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+        self.assertEqual(response.count(b"HTTP/1.1 409"), 1)
+        self.assertNotIn(b"HTTP/1.1 200 OK", response)
 
     def test_directory_target_rejected(self):
         (self.root / "sub").mkdir()

@@ -673,9 +673,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if cr.length != length:
             self._put_reject(HTTPStatus.BAD_REQUEST, "Content-Length must match Content-Range")
             return
-        if cr.start != stored:  # a gap/overlap: the body is unread, so close and resync
-            self.close_connection = True
-            self._put_incomplete(stored, status=HTTPStatus.CONFLICT)
+        if cr.start != stored:  # a gap/overlap: its body still needs a disposition
+            self._put_incomplete(stored, status=HTTPStatus.CONFLICT, unread_body=True)
             return
         if stored + cr.length > config.max_upload_size:
             self._put_reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Upload exceeds the size limit")
@@ -691,7 +690,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         except OSError:
             if not os.path.exists(part):
                 self._server.partial_uploads.release(part)
-            self._put_reject(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not write upload")
+            self._put_reject(
+                HTTPStatus.INTERNAL_SERVER_ERROR, "Could not write upload", drain_body=False
+            )
             return
         if reader.drain():
             self._body_consumed()
@@ -713,7 +714,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         try:
             _resumable.write_whole(target, reader, length)
         except OSError:
-            self._put_reject(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not write upload")
+            self._put_reject(
+                HTTPStatus.INTERNAL_SERVER_ERROR, "Could not write upload", drain_body=False
+            )
             return
         if reader.drain():
             self._body_consumed()
@@ -741,18 +744,39 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def _put_incomplete(self, offset: int, *, status: int = 308) -> None:
+    def _put_incomplete(self, offset: int, *, status: int = 308, unread_body: bool = False) -> None:
         """A 308 'Resume Incomplete' (Google convention) reporting bytes stored."""
         self.send_response(status, "Resume Incomplete")
         if offset > 0:
             self.send_header("Range", f"bytes=0-{offset - 1}")
         self.send_header("Content-Length", "0")
         self.end_headers()
+        if unread_body:
+            self._drain_rejected_put_body()
 
-    def _put_reject(self, code: int, message: str) -> None:
-        # The request body was not consumed; close so keep-alive can't desync.
-        self.close_connection = True
+    def _put_reject(self, code: int, message: str, *, drain_body: bool = True) -> None:
+        # Send the decision promptly, then apply the configurable keep-alive drain
+        # policy.  Large or partially consumed bodies still close fail-safe.
         self.send_error(code, message)
+        if drain_body:
+            self._drain_rejected_put_body()
+
+    def _drain_rejected_put_body(self) -> bool:
+        """Drain a small rejected PUT body so its response and connection are reusable."""
+        length = self._body_plan.length or 0
+        limit = self._server.config.keepalive_drain_limit
+        if length > limit:
+            return False
+        try:
+            # A client may start reading as soon as it has finished sending.  Make
+            # the rejection visible before spending time on the bounded drain.
+            self.wfile.flush()
+            if not _body.LimitedReader(self.rfile, length).drain(limit):
+                return False
+        except (OSError, TimeoutError):
+            return False
+        self._body_consumed()
+        return True
 
     def _reject_unread_body(self, code: int, message: str) -> None:
         """Send an error and close because the declared request body remains unread."""
