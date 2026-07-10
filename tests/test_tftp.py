@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import socket
 import struct
 import tempfile
+import threading
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
+from unittest import mock
 
 from servery import _tftp
 
@@ -51,6 +54,25 @@ class NetasciiTest(unittest.TestCase):
 
     def test_crlf_decodes_to_lf(self):
         self.assertEqual(_tftp.from_netascii(b"a\r\nb"), b"a\nb")
+
+    def test_encoder_and_decoder_preserve_cr_state_across_chunks(self):
+        encoder = _tftp._NetasciiEncoder()
+        encoded = encoder.feed(b"a\r") + encoder.feed(b"\nb\r") + encoder.feed(b"", final=True)
+        self.assertEqual(encoded, b"a\r\nb\r\0")
+        decoder = _tftp._NetasciiDecoder()
+        decoded = decoder.feed(b"a\r") + decoder.feed(b"\nb\r") + decoder.feed(b"", final=True)
+        self.assertEqual(decoded, b"a\nb\r")
+
+    def test_reader_streams_across_internal_64k_boundary(self):
+        source = b"x" * (64 * 1024 - 1) + b"\r\nend"
+        reader = _tftp._NetasciiReader(io.BytesIO(source))
+        try:
+            chunks: list[bytes] = []
+            while chunk := reader.read(777):
+                chunks.append(chunk)
+            self.assertEqual(b"".join(chunks), _tftp.to_netascii(source))
+        finally:
+            reader.close()
 
 
 class NegotiateTest(unittest.TestCase):
@@ -96,6 +118,40 @@ class ResolveTest(unittest.TestCase):
     def test_timeout_garbage_and_out_of_range_default(self):
         self.assertEqual(self.srv._resolve({"timeout": "x"})[1], _tftp._DEFAULT_TIMEOUT)
         self.assertEqual(self.srv._resolve({"timeout": "9999"})[1], _tftp._DEFAULT_TIMEOUT)
+
+
+class TransferBudgetTest(unittest.TestCase):
+    def test_saturation_returns_busy_and_capacity_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "f.txt").write_text("x")
+            server = _tftp.TftpServer(os.path.realpath(tmp), "127.0.0.1", 0, max_transfers=1)
+            entered = threading.Event()
+            release = threading.Event()
+            finished = threading.Event()
+
+            def blocked(_payload, _addr):
+                entered.set()
+                release.wait(5)
+                finished.set()
+
+            request = _build_request(_RRQ, "f.txt", "octet", None)
+            with mock.patch.object(server, "_dispatch", side_effect=blocked):
+                server.start()
+                first = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    first.sendto(request, ("127.0.0.1", server.port))
+                    self.assertTrue(entered.wait(2))
+                    reply = _raw_reply("127.0.0.1", server.port, request)
+                    self.assertEqual(struct.unpack("!H", reply[:2])[0], _ERROR)
+                    self.assertIn(b"server busy", reply)
+                    release.set()
+                    self.assertTrue(finished.wait(2))
+                    self.assertTrue(server._transfer_slots.acquire(timeout=2))
+                    server._transfer_slots.release()
+                finally:
+                    first.close()
+                    release.set()
+                    server.stop()
 
 
 # --- a tiny in-test TFTP client over real UDP -----------------------------

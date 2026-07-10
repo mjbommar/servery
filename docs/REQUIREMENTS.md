@@ -681,8 +681,11 @@ auth/upload/TLS.
 
 ### 2.2 Flag table
 
-This table matches the shipped `servery.cli.build_parser` (1.0) exactly. The
-positional `directory` (default `.`) is the served root.
+This table records the original 1.0 baseline. The complete current 1.5 CLI,
+including resource-policy flags added after 1.0, is maintained in
+[`docs/reference/cli.md`](reference/cli.md) and generated `--help`; those are the
+authoritative operator references. The positional `directory` (default `.`) is
+the served root.
 
 | Long | Short | Arg | Default | Description |
 |------|-------|-----|---------|-------------|
@@ -694,15 +697,24 @@ positional `directory` (default `.`) is the served root.
 | `--auth` | | `USER:PASS` | none | Enable Basic Auth (single shared credential). Pre-hashed: `USER:sha256:<hex>` / `USER:sha512:<hex>`. |
 | `--upload` | | flag | off | Enable file upload (POST `multipart/form-data` into the served tree). |
 | `--max-upload-size` | | `BYTES` | `104857600` (100 MiB) | Maximum accepted upload size. |
+| `--max-request-body` | | `BYTES` | `104857600` | Maximum app/proxy/WebDAV request body. |
+| `--keepalive-drain-limit` | | `BYTES` | `65536` | Drain this much unread accepted input before closing instead of reusing. |
 | `--allow-overwrite` | | flag | off | Allow uploads to overwrite existing files. |
+| `--write-lock-timeout` | | `SECONDS` | `0` | Bounded wait for a same-target in-process write lock. |
+| `--partial-upload-ttl` | | `SECONDS` | `86400` | Stale resumable sidecar lifetime; `0` disables. |
+| `--max-partial-uploads` | | `COUNT` | `128` | Outstanding resumable sidecar cap; `0` disables. |
 | `--cors` | | flag | off | Send permissive CORS headers (`Access-Control-Allow-Origin: *`). |
 | `--spa` | | flag | off | SPA fallback: serve `/index.html` for unknown paths (internal rewrite). |
 | `--cache` | | `SECONDS` | none (`no-cache`) | `Cache-Control: max-age=SECONDS` for file responses (dest `cache_max_age`); default is no-cache. |
 | `--no-security-headers` | | flag | off (headers ON) | Disable servery's default security response headers. |
 | `--timeout` | | `SECONDS` | `30` | Per-connection socket timeout (Slowloris mitigation). |
 | `--max-workers` | | `N` | unbounded | Bound concurrency to N worker threads (default: unbounded, thread-per-connection). |
+| `--max-connections` | | `N` | `256` | Bound admitted HTTP connections / QUIC sessions. |
 | `--http2` | | flag | off | Enable HTTP/2 (ALPN `h2` over TLS, and h2c prior-knowledge cleartext). Pure-stdlib backend; see `docs/TRANSPORTS.md`. |
-| `--http3` | | flag | off | Serve HTTP/3 over QUIC (requires TLS and the `servery[http3]` extra). |
+| `--max-h2-streams` | | `N` | `100` | Advertised/enforced active HTTP/2 streams per connection. |
+| `--http3` | | flag | off | Serve HTTP/3 beside TCP (requires TLS and `servery[http3]`). |
+| `--http3-only` | | flag | off | Expert mode without TCP fallback. |
+| `--http3-port` | | `PORT` | TCP port | Separate UDP/advertised HTTP/3 port. |
 | `--tls-cert` | | `PATH` | none | TLS certificate chain (PEM); enables HTTPS. |
 | `--tls-key` | | `PATH` | none | TLS private key (PEM). |
 | `--tls-password-file` | | `PATH` | none | File containing the TLS private-key passphrase. |
@@ -723,7 +735,8 @@ Notes:
   out cleanly if the extra is absent). Both are off by default. See
   `docs/TRANSPORTS.md` for the tiered transport model.
 - Security headers default **ON** (FR-SEC-04/05); `--no-security-headers` is the
-  escape hatch. `--max-workers` defaults to unbounded (NFR-PERF-04).
+  escape hatch. Blocking workers remain optionally pooled, while admitted
+  connections/sessions default to a finite 256 (NFR-PERF-04).
 - **Not in 1.0 / future.** Several flags discussed elsewhere in this document are
   **not** in the shipped 1.0 CLI and remain future/optional ideas: `--index`,
   `--no-listing`, `--sort`, `--order`, `--ignore-client-sort`,
@@ -826,20 +839,17 @@ same file succeeds via the buffered fallback without attempting `sendfile`; a
 non-regular source (e.g. a pipe) falls back to the buffered copy. (`socket.py`
 `sendfile`; `BEST-PRACTICES.md` §2.1.)
 
-**NFR-PERF-04 — Default socket timeout (Slowloris mitigation) + optional bounded concurrency.**
-servery sets a per-request socket timeout (`ServeryHandler.timeout`, default e.g.
-**30 s**, configurable via `--timeout`; `0`/`None` disables) so a stalled
-read/write raises `TimeoutError` instead of pinning a worker indefinitely. It
-optionally bounds concurrency via a `concurrent.futures.ThreadPoolExecutor`
-(`--max-workers`); the **default is unbounded** (matching the stdlib
-`ThreadingMixIn` and NFR-PERF-01), with the cap available for network-exposed
-deployments. This is a mitigation, not a production-hardening promise
-(NFR-SEC-03).
-*Acceptance:* a client that connects and sends no request bytes is dropped after
-the timeout rather than holding the worker forever; with `--max-workers N`, no
-more than `N` request handlers run concurrently (excess connections queue);
-without the flag, concurrency is unbounded as today. (`socketserver` timeout;
-`concurrent.futures`; `BEST-PRACTICES.md` §5.1, §5.2.)
+**NFR-PERF-04 — Default socket timeout plus cross-transport resource budgets.**
+servery sets a per-request socket timeout (default **30 s**, configurable with a
+positive `--timeout`) so a stalled
+read/write raises `TimeoutError` instead of pinning a worker indefinitely. It admits
+at most `max_connections` HTTP/TLS/ASGI connections or HTTP/3 sessions (256 by
+default); `max_workers` separately bounds blocking HTTP work;
+`max_h2_streams` and `max_tftp_transfers` bound logical streams/transfers. Capacity
+checks reject quickly rather than blocking accept or growing an unbounded queue.
+*Acceptance:* idle clients time out; saturation tests observe controlled rejection
+and recovery for threaded HTTP, ASGI, and TFTP; HTTP/2 advertises exactly the limit
+it enforces. (`socketserver`; `asyncio`; `concurrent.futures`.)
 
 **NFR-STD-01 — HTTP/1.1 core (9110/9111/9112); HTTP/2 & HTTP/3 are opt-in tiers.**
 servery's **core** is a conformant HTTP/1.1 origin server under RFC 9110/9111/9112,
@@ -850,14 +860,15 @@ tiered model). **HTTP/2 (RFC 9113)** ships in the box as a **pure-stdlib** backe
 `--http2` (ALPN `h2` over TLS plus h2c prior-knowledge cleartext). **HTTP/3 (RFC
 9114)** cannot be pure stdlib (QUIC needs AEAD ciphers the stdlib lacks), so it
 ships as the optional **`servery[http3]`** aioquic extra, enabled via `--http3`
-(requires TLS). The zero-dependency core is never burdened: with no transport flag,
+(requires TLS). It runs beside TCP by default, shares certificate material, and
+advertises its actual UDP port; `--http3-only` is explicit. The zero-dependency core is never burdened: with no transport flag,
 the TLS `SSLContext` advertises **only `http/1.1`**, and `h2`/`h3` are advertised
 (via ALPN or `Alt-Svc`) **only** when the corresponding tier is enabled.
 *Acceptance:* with no transport flag, the TLS ALPN list is exactly `["http/1.1"]`
 and no `h2`/`h3` is advertised; with `--http2`, an ALPN client offered `h2` gets an
 HTTP/2 connection (stdlib backend) and a non-h2 client falls back to `http/1.1`;
-with `--http3` and the extra installed, an HTTP/3-over-QUIC listener is served and
-advertised via `Alt-Svc`; `--http3` without the extra fails cleanly (exit 2) rather
+with `--http3` and the extra installed, TCP remains live while HTTP/3 is served and
+advertised via an accurate `Alt-Svc`; `--http3` without the extra fails cleanly (exit 2) rather
 than crashing. (RFC 9113, RFC 9114; `docs/TRANSPORTS.md`; `STANDARDS.md` §1.2.)
 
 **NFR-PORT-01 — Cross-platform (Linux / macOS / Windows).**
@@ -1015,8 +1026,7 @@ memory-safe.
 system); the smallest credential model that meets the "gate it behind a password"
 use case.
 
-**DEC-TLS — Two zero-dep cert paths (user-provided + ad-hoc self-signed); ACME is
-the optional-extra boundary.** *(updated — self-signed shipped)*
+**DEC-TLS — Three zero-dep cert paths (user-provided, ad-hoc, and ACME).**
 Original framing assumed pure stdlib could not mint a self-signed cert. That
 proved **false**: the stdlib `ssl` module has no X.509/keygen API, but pure-Python
 RSA+DER+PKCS#1 (`_certgen.py`) fills the gap with **zero dependencies**. So servery
@@ -1024,12 +1034,10 @@ now offers two zero-dep TLS paths: **user-provided** cert/key (`--tls-cert`/`--t
 with `--tls-help` printing an `openssl` recipe for those who want to mint their
 own), and **ad-hoc self-signed** generated at startup (`--tls-self-signed`,
 FR-TLS-05) for opportunistic encryption on a dev box / LAN — not a trust anchor.
-Only keygen + signing-our-own-cert is hand-rolled; the TLS handshake stays in
-OpenSSL via `ssl`. The boundary that *would* warrant a dependency is
-**publicly-trusted / auto-renewed (ACME / Let's Encrypt)** certs — a future
-optional **`servery[acme]`** extra, mirroring how HTTP/3 is the optional
-`servery[http3]` = aioquic extra; **not implemented**. Optional mTLS via
-`--tls-client-ca` is a nice-to-have, off by default.
+Only keygen/signing/JWS/CSR construction is pure Python; TLS stays in OpenSSL via
+`ssl`. `--acme DOMAIN` ships a narrow zero-dependency Let's Encrypt HTTP-01 path,
+uses staging by default, and caches account/certificate material. Optional mTLS via
+`--tls-client-ca` remains a nice-to-have, off by default.
 
 **DEC-CONFIG — CLI is the only configuration surface in v1.**
 No env/config-file layer. Reserved future precedence (if added):

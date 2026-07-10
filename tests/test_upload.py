@@ -4,6 +4,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from servery import upload
 
@@ -47,7 +48,7 @@ class SaveTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _save(self, body: bytes, **kwargs: bool) -> list[upload.SavedFile]:
+    def _save(self, body: bytes, **kwargs: Any) -> list[upload.SavedFile]:
         return upload.save(io.BytesIO(body), b"B", str(self.dir), **kwargs)
 
     def test_single_file(self):

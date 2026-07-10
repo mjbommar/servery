@@ -13,10 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import socket
 import tempfile
 import threading
-import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -33,7 +31,9 @@ from servery.config import Config
 
 
 @contextlib.contextmanager
-def http3_server(tree: Path) -> Iterator[tuple[str, int, str]]:
+def http3_server(
+    tree: Path, *, max_buffered_response: int = 1024 * 1024
+) -> Iterator[tuple[str, int, str]]:
     """Run ``serve_http3`` on an ephemeral UDP port; yield (host, port, cafile)."""
     cert_pem, key_pem = _certgen.generate(["localhost", "127.0.0.1"])
     tmp = Path(tempfile.mkdtemp(prefix="bench-h3-"))
@@ -41,26 +41,20 @@ def http3_server(tree: Path) -> Iterator[tuple[str, int, str]]:
     cert.write_text(cert_pem)
     key.write_text(key_pem)
 
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    probe.bind(("127.0.0.1", 0))
-    port = int(probe.getsockname()[1])
-    probe.close()  # serve_http3 rebinds it (small race, fine on loopback)
-
     config = Config.create(
-        str(tree), host="127.0.0.1", port=port, quiet=True, tls_cert=str(cert), tls_key=str(key)
+        str(tree),
+        host="127.0.0.1",
+        port=0,
+        quiet=True,
+        tls_cert=str(cert),
+        tls_key=str(key),
+        max_buffered_response=max_buffered_response,
     )
-
-    def run() -> None:
-        with contextlib.suppress(BaseException):
-            _http3.serve_http3(config)  # asyncio.run(...) — blocks; no clean stop
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    time.sleep(0.6)  # let aioquic bind the UDP socket
+    handle = _http3.start_http3(config)
     try:
-        yield "127.0.0.1", port, str(cert)
+        yield "127.0.0.1", handle.port, str(cert)
     finally:
-        pass  # serve_http3 has no stop hook; the daemon thread dies with the process
+        handle.close()
 
 
 class _H3Client(QuicConnectionProtocol):

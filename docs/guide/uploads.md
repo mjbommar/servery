@@ -17,12 +17,19 @@ servery --upload
 - **Bounded** — `--max-upload-size BYTES` (default 100 MiB) rejects anything larger.
 - **Non-destructive by default** — an upload that would overwrite an existing file is
   refused unless you pass `--allow-overwrite`.
+- **Serialized per canonical target** — the existence decision, streaming write, and
+  atomic commit share an in-process lock with resumable PUT, WebDAV, archive
+  extraction, and TFTP. Concurrent no-overwrite requests therefore produce one
+  winner and an explicit conflict.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--upload` | off | enable uploads |
 | `--max-upload-size` | 100 MiB | maximum accepted body size |
 | `--allow-overwrite` | off | let uploads replace existing files |
+| `--write-lock-timeout` | `0` | wait for a same-target write; `0` rejects immediately |
+| `--partial-upload-ttl` | `86400` | expire a stale resumable sidecar on its next locked access; `0` disables |
+| `--max-partial-uploads` | `128` | maximum outstanding sidecars; `0` disables this budget |
 | `--upload-extract` | off | expand uploaded `zip`/`tar` archives in place |
 
 ### Auto-extracting archives
@@ -59,6 +66,16 @@ Partial data accumulates in a hidden sidecar next to the target and is committed
 atomically only when the final byte arrives — a half-finished upload never appears
 in the listing. Chunks must arrive in order; a gap returns `409` so the client
 re-queries. The same `--max-upload-size` / `--allow-overwrite` limits apply.
+The hidden partial is checked and updated while holding the target lock, so two
+chunks cannot append at the same offset. The lock is process-local: it does not stop
+an unrelated local program or a second servery process from changing the directory.
+
+Stale sidecars are removed lazily on the next operation for that target; servery does
+not sweep a large tree on every startup. The first ranged write lazily inventories
+existing sidecars and `--max-partial-uploads` bounds how many may remain outstanding.
+The default count cap plus the per-upload byte cap gives a finite disk bound without
+adding a database or background crawler. Set the count to `0` only when external
+storage quotas or cleanup already provide that protection.
 
 !!! note "WebDAV owns `PUT`"
 

@@ -30,6 +30,9 @@ Run `servery --help` for the same list inline, or `servery --version`.
 | `--upload` | off | accept `POST multipart/form-data` uploads, and **resumable `Content-Range` `PUT`** uploads, into the tree |
 | `--max-upload-size BYTES` | 100 MiB | maximum accepted upload size |
 | `--allow-overwrite` | off | let uploads overwrite existing files |
+| `--write-lock-timeout SECONDS` | `0` | wait this long for another in-process write to the same canonical target; `0` rejects immediately |
+| `--partial-upload-ttl SECONDS` | `86400` | discard a resumable sidecar older than this before its next locked operation; `0` disables expiry |
+| `--max-partial-uploads COUNT` | `128` | maximum outstanding resumable sidecars; `0` disables the count budget |
 | `--upload-extract` | off | safely expand uploaded zip/tar archives (requires `--upload`) |
 
 → [Uploads & authentication](../guide/uploads.md)
@@ -61,6 +64,8 @@ Run `servery --help` for the same list inline, or `servery --version`.
 | --- | --- | --- |
 | `--dav` | off | enable a (read-only) WebDAV endpoint, mountable as a drive |
 | `--dav-write` | off | allow WebDAV writes (requires `--dav`; use with `--auth`) |
+| `--dav-lock-mode {class1,compat,enforced}` | `enforced` | writable-DAV lock policy; read-only DAV always advertises honest class 1 |
+| `--max-propfind-entries N` | `10000` | maximum children in `PROPFIND Depth: 1`; over-limit requests receive `507` |
 
 → [WebDAV](../guide/webdav.md)
 
@@ -81,6 +86,12 @@ Run `servery --help` for the same list inline, or `servery --version`.
 | `--cors` | off | send permissive CORS headers (`Access-Control-Allow-Origin: *`) |
 | `--spa` | off | serve `/index.html` for unknown paths (single-page apps) |
 | `--no-compress` | (on) | disable on-the-fly compression (zstd on 3.14+, else gzip) of text-like responses |
+| `--max-compress-size BYTES` | 10 MiB | largest static file compressed in memory; `0` disables static-file compression |
+| `--compression-cache-size BYTES` | `0` | byte budget for encoded static representations; `0` disables the cache |
+| `--max-buffered-response BYTES` | 1 MiB | largest HTTP/2/3 file kept on the buffered fast path; larger files stream, and `0` streams every nonempty file |
+| `--max-listing-entries N` | `100000` | maximum entries considered by an HTML directory listing |
+| `--listing-page-size N` | `1000` | rows rendered per listing page |
+| `--listing-details-threshold N` | `10000` | above this count, omit expensive listing metadata, metrics, and timeline |
 | `--no-security-headers` | (on) | disable servery's default security response headers |
 | `--access-log PATH` | — | write an access log to PATH |
 | `--access-log-format {clf,combined,json}` | `clf` | access log format |
@@ -92,8 +103,14 @@ Run `servery --help` for the same list inline, or `servery --version`.
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--http2` | off | HTTP/2 (ALPN `h2` over TLS, or `h2c` cleartext) |
-| `--http3` | off | HTTP/3 over QUIC (needs TLS + `servery[http3]`) |
+| `--max-h2-streams N` | `100` | advertised and enforced active-stream limit per HTTP/2 connection |
+| `--http3` | off | HTTP/3 over QUIC alongside TCP fallback (needs TLS + `servery[http3]`) |
+| `--http3-only` | off | expert mode with no TCP fallback; requires `--http3` |
+| `--http3-port PORT` | TCP port | UDP listener/advertised port; use `0` for an ephemeral test port |
+| `--max-connections N` | `256` | simultaneous HTTP/TLS/ASGI connections or HTTP/3 sessions |
 | `--max-workers N` | unbounded | bound concurrency to N worker threads |
+| `--max-request-body BYTES` | 100 MiB | accepted app/proxy/WebDAV request body (separate from file-upload size) |
+| `--keepalive-drain-limit BYTES` | 64 KiB | drain at most this much unread accepted body to reuse a connection; otherwise close |
 
 → [HTTP/2, HTTP/3 & concurrency](../guide/protocols.md)
 
@@ -108,6 +125,7 @@ only. Read-only unless `--tftp-write`.
 | `--tftp` | off | also serve the directory over TFTP on UDP (read-only) |
 | `--tftp-port PORT` | `69` | UDP port for TFTP (below 1024 needs privileges) |
 | `--tftp-write` | off | allow anonymous TFTP uploads (`WRQ`); requires `--tftp` |
+| `--max-tftp-transfers N` | `32` | active TFTP transfer sockets/workers; saturation returns a busy error |
 
 → [HTTP/2, HTTP/3 & concurrency](../guide/protocols.md#tftp)
 
@@ -135,7 +153,7 @@ require `--auth`.
 | `inbox` | bind `0.0.0.0` + TLS + `--upload` *(requires `--auth`)* |
 | `public-readonly` | bind `0.0.0.0` + TLS + 1-hour cache |
 | `public-readwrite` | bind `0.0.0.0` + TLS + `--upload` *(requires `--auth`)* |
-| `cdn` | bind `0.0.0.0` + TLS + 1-year cache + CORS + HTTP/2 |
+| `cdn` | bind `0.0.0.0` + TLS + 1-year cache + CORS + HTTP/2 + 32 MiB compression cache |
 | `dev` | `127.0.0.1` + SPA fallback + CORS |
 | `app` | bind `0.0.0.0` + TLS + `--max-workers` = CPU count |
 

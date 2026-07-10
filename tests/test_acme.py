@@ -227,15 +227,16 @@ class ChallengeServerTest(unittest.TestCase):
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
         try:
-            resp = urllib.request.urlopen(
+            with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/.well-known/acme-challenge/tok123", timeout=5
-            )
-            self.assertEqual(resp.read(), b"tok123.thumbprint")
+            ) as response:
+                self.assertEqual(response.read(), b"tok123.thumbprint")
             with self.assertRaises(urllib.error.HTTPError) as cm:  # unknown token -> 404
                 urllib.request.urlopen(
                     f"http://127.0.0.1:{port}/.well-known/acme-challenge/nope", timeout=5
                 )
             self.assertEqual(cm.exception.code, 404)
+            cm.exception.close()
         finally:
             httpd.shutdown()
             httpd.server_close()

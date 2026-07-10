@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 
 _FORMATS = ("clf", "combined", "json")
@@ -36,14 +37,9 @@ class AccessLog:
         if fmt not in _FORMATS:
             raise ValueError(f"access-log format must be one of {_FORMATS}, got {fmt!r}")
         self._fmt = fmt
-        self._logger = logging.getLogger("servery.access")
-        self._logger.setLevel(logging.INFO)
-        self._logger.propagate = False  # never leak access lines into the stderr logger
-        for handler in list(self._logger.handlers):
-            self._logger.removeHandler(handler)
-        file_handler = logging.FileHandler(path, encoding="utf-8")
-        file_handler.setFormatter(logging.Formatter("%(message)s"))
-        self._logger.addHandler(file_handler)
+        self._handler: logging.FileHandler | None = logging.FileHandler(path, encoding="utf-8")
+        self._handler.setFormatter(logging.Formatter("%(message)s"))
+        self._lock = threading.Lock()
 
     def close(self) -> None:
         """Detach and close the file handler, releasing the OS file handle.
@@ -51,9 +47,10 @@ class AccessLog:
         Called on server shutdown; without it the open handle would leak (and on
         Windows would block deleting the directory the log lives in).
         """
-        for handler in list(self._logger.handlers):
-            self._logger.removeHandler(handler)
-            handler.close()
+        with self._lock:
+            handler, self._handler = self._handler, None
+            if handler is not None:
+                handler.close()
 
     def record(
         self,
@@ -87,4 +84,7 @@ class AccessLog:
             line = f'{client} - - [{_clf_time(when)}] "{requestline}" {status} {size}'
             if self._fmt == "combined":
                 line += f' "{referer}" "{user_agent}"'
-        self._logger.info(line)
+        record = logging.LogRecord("servery.access", logging.INFO, "", 0, line, (), None)
+        with self._lock:
+            if self._handler is not None:
+                self._handler.emit(record)

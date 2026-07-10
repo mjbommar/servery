@@ -23,7 +23,6 @@ in a worker thread, matching the RFC's connection model.
 from __future__ import annotations
 
 import contextlib
-import io
 import os
 import socket
 import struct
@@ -31,7 +30,7 @@ import tempfile
 import threading
 from typing import BinaryIO
 
-from servery import _log, security
+from servery import _log, _writecoord, security
 
 # Opcodes (RFC 1350 §5) and the OACK extension (RFC 2347).
 _RRQ, _WRQ, _DATA, _ACK, _ERROR, _OACK = 1, 2, 3, 4, 5, 6
@@ -139,6 +138,120 @@ def from_netascii(data: bytes) -> bytes:
     return bytes(out)
 
 
+class _NetasciiEncoder:
+    def __init__(self) -> None:
+        self._pending_cr = False
+
+    def feed(self, data: bytes, *, final: bool = False) -> bytes:
+        out = bytearray()
+        offset = 0
+        if self._pending_cr:
+            if data.startswith(b"\n"):
+                out += b"\r\n"
+                offset = 1
+            else:
+                out += b"\r\0"
+            self._pending_cr = False
+        while offset < len(data):
+            byte = data[offset]
+            if byte == 0x0D:
+                if offset + 1 >= len(data):
+                    self._pending_cr = True
+                    offset += 1
+                elif data[offset + 1] == 0x0A:
+                    out += b"\r\n"
+                    offset += 2
+                else:
+                    out += b"\r\0"
+                    offset += 1
+            elif byte == 0x0A:
+                out += b"\r\n"
+                offset += 1
+            else:
+                out.append(byte)
+                offset += 1
+        if final and self._pending_cr:
+            out += b"\r\0"
+            self._pending_cr = False
+        return bytes(out)
+
+
+class _NetasciiDecoder:
+    def __init__(self) -> None:
+        self._pending_cr = False
+
+    def feed(self, data: bytes, *, final: bool = False) -> bytes:
+        out = bytearray()
+        for byte in data:
+            if self._pending_cr:
+                if byte == 0x0A:
+                    out += b"\n"
+                    self._pending_cr = False
+                    continue
+                if byte == 0x00:
+                    out += b"\r"
+                    self._pending_cr = False
+                    continue
+                out += b"\r"
+                self._pending_cr = False
+            if byte == 0x0D:
+                self._pending_cr = True
+            else:
+                out.append(byte)
+        if final and self._pending_cr:
+            out += b"\r"
+            self._pending_cr = False
+        return bytes(out)
+
+
+class _NetasciiReader:
+    """Stream a local file as netascii without materializing the representation."""
+
+    def __init__(self, source: BinaryIO) -> None:
+        self._source = source
+        self._encoder = _NetasciiEncoder()
+        self._buffer = bytearray()
+        self._eof = False
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            while not self._eof:
+                self._fill()
+            data = bytes(self._buffer)
+            self._buffer.clear()
+            return data
+        while len(self._buffer) < size and not self._eof:
+            self._fill()
+        data = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return data
+
+    def _fill(self) -> None:
+        raw = self._source.read(64 * 1024)
+        if raw:
+            self._buffer += self._encoder.feed(raw)
+        else:
+            self._buffer += self._encoder.feed(b"", final=True)
+            self._eof = True
+
+    def wire_size(self) -> int:
+        position = self._source.tell()
+        self._source.seek(0)
+        encoder = _NetasciiEncoder()
+        total = 0
+        while raw := self._source.read(64 * 1024):
+            total += len(encoder.feed(raw))
+        total += len(encoder.feed(b"", final=True))
+        self._source.seek(position)
+        return total
+
+    def close(self) -> None:
+        self._source.close()
+
+
+type _ReadSource = BinaryIO | _NetasciiReader
+
+
 def _negotiate(options: dict[str, str], *, tsize_value: int | None) -> dict[str, str]:
     """Pick the subset of client options we accept, in OACK reply form."""
     accepted: dict[str, str] = {}
@@ -172,10 +285,17 @@ class TftpServer:
         *,
         allow_write: bool = False,
         max_write_size: int = 100 * 1024 * 1024,
+        max_transfers: int = 32,
+        target_locks: _writecoord.TargetLocks | None = None,
+        write_lock_timeout: float = 0.0,
     ) -> None:
         self.root_real = root_real
         self.allow_write = allow_write
         self.max_write_size = max_write_size
+        self.max_transfers = max_transfers
+        self.target_locks = target_locks or _writecoord.TargetLocks()
+        self.write_lock_timeout = write_lock_timeout
+        self._transfer_slots = threading.BoundedSemaphore(max_transfers)
         self._family = socket.AF_INET6 if ":" in host else socket.AF_INET
         self._sock = socket.socket(self._family, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -206,7 +326,20 @@ class TftpServer:
                 continue
             except OSError:
                 break  # socket closed by stop()
-            threading.Thread(target=self._dispatch, args=(payload, addr), daemon=True).start()
+            if len(payload) < 2 or struct.unpack("!H", payload[:2])[0] not in (_RRQ, _WRQ):
+                continue
+            if not self._transfer_slots.acquire(blocking=False):
+                self._send_to(addr, _pack_error(_ERR_UNDEFINED, "server busy"))
+                continue
+            threading.Thread(
+                target=self._dispatch_limited, args=(payload, addr), daemon=True
+            ).start()
+
+    def _dispatch_limited(self, payload: bytes, addr: tuple) -> None:
+        try:
+            self._dispatch(payload, addr)
+        finally:
+            self._transfer_slots.release()
 
     def _dispatch(self, payload: bytes, addr: tuple) -> None:
         if len(payload) < 2:
@@ -258,14 +391,15 @@ class TftpServer:
         with contextlib.suppress(OSError):
             data.close()
 
-    def _read_source(self, fs_path: str, mode: str) -> BinaryIO:
+    def _read_source(self, fs_path: str, mode: str) -> _ReadSource:
         if mode == "netascii":
-            with open(fs_path, "rb") as handle:
-                return io.BytesIO(to_netascii(handle.read()))
+            return _NetasciiReader(open(fs_path, "rb"))
         return open(fs_path, "rb")
 
     @staticmethod
-    def _size_of(data: BinaryIO) -> int | None:
+    def _size_of(data: _ReadSource) -> int | None:
+        if isinstance(data, _NetasciiReader):
+            return data.wire_size()
         try:
             current = data.tell()
             size = data.seek(0, os.SEEK_END)
@@ -275,7 +409,7 @@ class TftpServer:
             return None
 
     def _send_blocks(
-        self, sock: socket.socket, addr: tuple, data: BinaryIO, blksize: int, timeout: float
+        self, sock: socket.socket, addr: tuple, data: _ReadSource, blksize: int, timeout: float
     ) -> None:
         block = 1
         while True:
@@ -315,15 +449,19 @@ class TftpServer:
         if not os.path.isdir(os.path.dirname(fs_path)):
             self._send_to(addr, _pack_error(_ERR_NOT_FOUND, "directory not found"))
             return
-        if os.path.exists(fs_path):
-            self._send_to(addr, _pack_error(_ERR_EXISTS, "file already exists"))
-            return
-        with self._transfer_socket() as sock:
-            blksize, timeout = self._resolve(options)
-            accepted = _negotiate(options, tsize_value=self._wrq_tsize(options))
-            blksize = int(accepted.get("blksize", blksize))
-            reply = _pack_oack(accepted) if accepted else _pack_ack(0)
-            self._receive_blocks(sock, addr, fs_path, mode, blksize, timeout, reply)
+        with self.target_locks.hold(fs_path, self.write_lock_timeout) as acquired:
+            if not acquired:
+                self._send_to(addr, _pack_error(_ERR_EXISTS, "another write is active"))
+                return
+            if os.path.exists(fs_path):
+                self._send_to(addr, _pack_error(_ERR_EXISTS, "file already exists"))
+                return
+            with self._transfer_socket() as sock:
+                blksize, timeout = self._resolve(options)
+                accepted = _negotiate(options, tsize_value=self._wrq_tsize(options))
+                blksize = int(accepted.get("blksize", blksize))
+                reply = _pack_oack(accepted) if accepted else _pack_ack(0)
+                self._receive_blocks(sock, addr, fs_path, mode, blksize, timeout, reply)
 
     def _wrq_tsize(self, options: dict) -> int | None:
         if "tsize" not in options:
@@ -349,6 +487,7 @@ class TftpServer:
         reply = first_reply
         expected = 1
         committed = False
+        decoder = _NetasciiDecoder() if mode == "netascii" else None
         try:
             while True:
                 packet = self._send_and_wait_data(sock, addr, reply, expected, timeout)
@@ -359,9 +498,9 @@ class TftpServer:
                 if total > self.max_write_size:
                     sock.sendto(_pack_error(_ERR_DISK_FULL, "upload exceeds the size limit"), addr)
                     return
-                tmp.write(from_netascii(payload) if mode == "netascii" else payload)
-                reply = _pack_ack(expected)
                 last = len(payload) < blksize
+                tmp.write(decoder.feed(payload, final=last) if decoder is not None else payload)
+                reply = _pack_ack(expected)
                 expected = (expected + 1) & 0xFFFF
                 if last:
                     sock.sendto(reply, addr)  # final ACK

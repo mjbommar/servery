@@ -8,11 +8,13 @@ is loaded from ``--tls-cert`` or generated ad-hoc (pure-stdlib, never persisted)
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import os
 import shutil
 import ssl
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -63,6 +65,13 @@ def _load_self_signed(config: Config, context: ssl.SSLContext) -> None:
     The cert/key are written to a private temp dir (0600), loaded by OpenSSL, then
     removed — nothing persists on disk past startup.
     """
+    with self_signed_files(config) as (cert_path, key_path):
+        context.load_cert_chain(cert_path, key_path)
+
+
+@contextlib.contextmanager
+def self_signed_files(config: Config) -> Iterator[tuple[str, str]]:
+    """Materialize an ad-hoc cert/key for consumers that require filenames."""
     from servery import _certgen
 
     hosts = ["localhost", "127.0.0.1", "::1"]
@@ -77,6 +86,6 @@ def _load_self_signed(config: Config, context: ssl.SSLContext) -> None:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="ascii") as handle:
                 handle.write(data)
-        context.load_cert_chain(cert_path, key_path)
+        yield os.fspath(cert_path), os.fspath(key_path)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

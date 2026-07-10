@@ -31,6 +31,21 @@ scripts/run_benchmarks.sh --http3
 
 `run_benchmarks.sh` writes a timestamped JSON to `benchmarks/artifacts/` and an autosave
 under `.benchmarks/` (both gitignored — they embed per-round timings and the hostname).
+It also records a concurrent-load JSON with throughput, p50/p95/p99 latency, errors,
+and sampled peak/delta RSS. The RSS scope is the in-process server plus its client
+workers, so use deltas and before/after comparisons rather than treating it as an
+isolated server-process measurement. Client workers drain bodies in bounded 64 KiB
+chunks so a large-file sample does not allocate one whole response per worker and
+swamp the server-side memory signal.
+`listing_scale.py` separately records render time, page bytes, and Python peak
+allocation at 1,000, 10,000, and 100,000 real directory entries; file creation is
+outside each timed sample.
+
+The weekly/manual `Performance trends` GitHub Actions workflow runs both tiers,
+including HTTP/3, and retains the JSON artifacts for 30 days. These results are trend
+evidence rather than a strict pull-request gate: hosted-runner noise makes small
+percentage thresholds misleading. Deterministic bounded-memory, race, and overload
+recovery behavior remains enforced by the functional suite on every CI build.
 
 ## HTTP/3 note
 
@@ -113,7 +128,9 @@ pytest-benchmark measures single-call latency. For **concurrent throughput** (re
 load, MB/s, tail latency) on the HTTP/1.1 file path, use the load tools:
 
 ```bash
-python scripts/bench.py --requests 5000 --concurrency 16        # in-process
+python scripts/bench.py --requests 5000 --concurrency 16        # table
+python scripts/bench.py --requests 5000 --concurrency 16 \
+  --json benchmarks/artifacts/load-local.json                   # retained evidence
 python -m servery /some/dir -p 8000 -q                          # one shell
 python scripts/loadgen.py http://127.0.0.1:8000/file -c 64 -d 5 # another shell
 ```

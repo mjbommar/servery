@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from servery import _compress, _conditional, _http1, listing
@@ -23,6 +24,17 @@ if TYPE_CHECKING:
 
 _HeaderList = list[tuple[bytes, bytes]]
 _LISTING_TYPE = "text/html; charset=utf-8"
+
+
+@dataclass(frozen=True, slots=True)
+class FileBody:
+    """A contained identity file response that transports must stream."""
+
+    path: str
+    size: int
+
+
+type ResponseBody = bytes | FileBody
 
 
 def guess_type(fs_path: str) -> str:
@@ -66,7 +78,12 @@ def error(status: int) -> tuple[int, _HeaderList, bytes]:
 
 
 def finalize_body(
-    headers: _HeaderList, ctype: str, body: bytes, *, coding: str | None
+    headers: _HeaderList,
+    ctype: str,
+    body: bytes,
+    *,
+    coding: str | None,
+    already_encoded: bool = False,
 ) -> tuple[int, _HeaderList, bytes]:
     """Append Vary (compressible), Content-Encoding (when coded), Content-Type/Length.
 
@@ -76,7 +93,8 @@ def finalize_body(
     if _compress.compressible(ctype):
         headers.append((b"vary", b"accept-encoding"))
     if coding is not None:
-        body = _compress.encode(body, coding)
+        if not already_encoded:
+            body = _compress.encode(body, coding)
         headers.append((b"content-encoding", coding.encode("ascii")))
     headers.append((b"content-type", ctype.encode("latin-1")))
     headers.append((b"content-length", str(len(body)).encode("ascii")))
@@ -92,7 +110,8 @@ def build_static(
     tls: bool,
     if_none_match: str | None = None,
     if_modified_since: str | None = None,
-) -> tuple[int, _HeaderList, bytes]:
+    compression_cache: _compress.CompressionCache | None = None,
+) -> tuple[int, _HeaderList, ResponseBody]:
     """Resolve an already-contained path to a buffered (status, headers, body).
 
     ``fs_path`` must already have passed the transport's containment check (an empty
@@ -110,7 +129,12 @@ def build_static(
             return 301, [(b"location", (display + "/").encode("latin-1"))], b""
         try:
             body = listing.render(
-                fs_path, display, show_hidden=config.show_hidden, per_page=listing.DEFAULT_PAGE_SIZE
+                fs_path,
+                display,
+                show_hidden=config.show_hidden,
+                per_page=config.listing_page_size,
+                max_entries=config.max_listing_entries,
+                details_threshold=config.listing_details_threshold,
             )
         except OSError:
             return error(404)
@@ -129,7 +153,11 @@ def build_static(
     # Decide the coding from the identity size (no read needed) so the ETag for the
     # representation the client would get is known before any conditional check.
     coding = _compress.choose_encoding(
-        ctype, stat.st_size, accept_encoding, enabled=config.compress
+        ctype,
+        stat.st_size,
+        accept_encoding,
+        enabled=config.compress,
+        max_size=min(config.max_compress_size, config.max_buffered_response),
     )
     etag = _conditional.coding_variant(_conditional.make_etag(stat), coding)
     last_modified = _http1.format_http_date(stat.st_mtime)
@@ -139,6 +167,24 @@ def build_static(
         etag, stat.st_mtime, if_none_match=if_none_match, if_modified_since=if_modified_since
     ):
         return 304, headers, b""  # revalidated — no body, no file read
+    if stat.st_size > config.max_buffered_response:
+        if _compress.compressible(ctype):
+            headers.append((b"vary", b"accept-encoding"))
+        headers.append((b"content-type", ctype.encode("latin-1")))
+        headers.append((b"content-length", str(stat.st_size).encode("ascii")))
+        return 200, headers, FileBody(fs_path, stat.st_size)
+    if coding is not None and compression_cache is not None:
+        key = _compress.cache_key(fs_path, stat, coding)
+        try:
+
+            def encode_file() -> bytes:
+                with open(fs_path, "rb") as handle:  # noqa: PTH123 - os-level by design
+                    return _compress.encode(handle.read(), coding)
+
+            body = compression_cache.get_or_compute(key, encode_file)
+        except OSError:
+            return error(404)
+        return finalize_body(headers, ctype, body, coding=coding, already_encoded=True)
     try:
         with open(fs_path, "rb") as handle:  # noqa: PTH123 - os-level by design
             body = handle.read()

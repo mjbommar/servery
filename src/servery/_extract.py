@@ -15,10 +15,12 @@ Supports zip and tar (gz/bz2/xz). Extracts into the destination directory.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tarfile
+import tempfile
 import zipfile
-from typing import IO
+from typing import IO, Protocol
 
 from servery import security
 
@@ -42,6 +44,15 @@ class ExtractError(Exception):
     """The archive was unsafe (traversal / bomb) or unsupported."""
 
 
+class _TargetLocks(Protocol):
+    def hold(self, path: str, timeout: float = 0.0): ...
+
+
+def _enforce_total(total: int, max_total: int) -> None:
+    if total > max_total:
+        raise ExtractError("archive expands beyond the size limit (possible zip bomb)")
+
+
 def is_archive(name: str) -> bool:
     """True if ``name`` looks like a supported archive."""
     return name.lower().endswith(_ARCHIVE_SUFFIXES)
@@ -55,39 +66,94 @@ def _resolve(dest_real: str, dest_dir: str, name: str) -> str:
     return target
 
 
-def _write(src: IO[bytes], target: str, total: int, max_total: int) -> int:
-    """Stream ``src`` to ``target``; return the running uncompressed total."""
+def _write(
+    src: IO[bytes],
+    target: str,
+    total: int,
+    max_total: int,
+    *,
+    display_name: str,
+    overwrite: bool,
+    target_locks: _TargetLocks | None,
+    lock_timeout: float,
+) -> int:
+    """Stream one entry to a temporary file and atomically commit it."""
     os.makedirs(os.path.dirname(target), exist_ok=True)
-    with open(target, "wb") as dst:
-        while True:
-            chunk = src.read(_CHUNK)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_total:
-                raise ExtractError("archive expands beyond the size limit (possible zip bomb)")
-            dst.write(chunk)
+
+    @contextlib.contextmanager
+    def unlocked():
+        yield True
+
+    guard = target_locks.hold(target, lock_timeout) if target_locks is not None else unlocked()
+    with guard as acquired:
+        if not acquired:
+            raise ExtractError(f"target is busy: {display_name!r}")
+        if not overwrite and os.path.exists(target):
+            raise ExtractError(f"refusing to overwrite {display_name!r}")
+        tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 (closed before replace)
+            dir=os.path.dirname(target), delete=False
+        )
+        try:
+            while True:
+                chunk = src.read(_CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                _enforce_total(total, max_total)
+                tmp.write(chunk)
+            tmp.close()
+            os.replace(tmp.name, target)
+        except BaseException:
+            tmp.close()
+            with contextlib.suppress(OSError):
+                os.unlink(tmp.name)
+            raise
     return total
 
 
 def extract(
-    archive_path: str, dest_dir: str, *, allow_overwrite: bool = False, max_total: int = MAX_TOTAL
+    archive_path: str,
+    dest_dir: str,
+    *,
+    allow_overwrite: bool = False,
+    max_total: int = MAX_TOTAL,
+    target_locks: _TargetLocks | None = None,
+    lock_timeout: float = 0.0,
 ) -> list[str]:
     """Securely extract ``archive_path`` into ``dest_dir``; return extracted names."""
     dest_real = os.path.realpath(dest_dir)
     if zipfile.is_zipfile(archive_path):
         return _extract_zip(
-            archive_path, dest_dir, dest_real, overwrite=allow_overwrite, max_total=max_total
+            archive_path,
+            dest_dir,
+            dest_real,
+            overwrite=allow_overwrite,
+            max_total=max_total,
+            target_locks=target_locks,
+            lock_timeout=lock_timeout,
         )
     if tarfile.is_tarfile(archive_path):
         return _extract_tar(
-            archive_path, dest_dir, dest_real, overwrite=allow_overwrite, max_total=max_total
+            archive_path,
+            dest_dir,
+            dest_real,
+            overwrite=allow_overwrite,
+            max_total=max_total,
+            target_locks=target_locks,
+            lock_timeout=lock_timeout,
         )
     raise ExtractError("not a supported archive (zip or tar)")
 
 
 def _extract_zip(
-    path: str, dest_dir: str, dest_real: str, *, overwrite: bool, max_total: int
+    path: str,
+    dest_dir: str,
+    dest_real: str,
+    *,
+    overwrite: bool,
+    max_total: int,
+    target_locks: _TargetLocks | None,
+    lock_timeout: float,
 ) -> list[str]:
     extracted: list[str] = []
     total = 0
@@ -100,16 +166,30 @@ def _extract_zip(
             if info.is_dir():
                 os.makedirs(target, exist_ok=True)
                 continue
-            if not overwrite and os.path.exists(target):
-                raise ExtractError(f"refusing to overwrite {info.filename!r}")
             with zf.open(info) as src:  # open() below never creates a symlink
-                total = _write(src, target, total, max_total)
+                total = _write(
+                    src,
+                    target,
+                    total,
+                    max_total,
+                    display_name=info.filename,
+                    overwrite=overwrite,
+                    target_locks=target_locks,
+                    lock_timeout=lock_timeout,
+                )
             extracted.append(info.filename)
     return extracted
 
 
 def _extract_tar(
-    path: str, dest_dir: str, dest_real: str, *, overwrite: bool, max_total: int
+    path: str,
+    dest_dir: str,
+    dest_real: str,
+    *,
+    overwrite: bool,
+    max_total: int,
+    target_locks: _TargetLocks | None,
+    lock_timeout: float,
 ) -> list[str]:
     extracted: list[str] = []
     total = 0
@@ -126,11 +206,18 @@ def _extract_tar(
             if member.isdir():
                 os.makedirs(target, exist_ok=True)
                 continue
-            if not overwrite and os.path.exists(target):
-                raise ExtractError(f"refusing to overwrite {member.name!r}")
             src = tf.extractfile(member)
             if src is None:
                 continue
-            total = _write(src, target, total, max_total)
+            total = _write(
+                src,
+                target,
+                total,
+                max_total,
+                display_name=member.name,
+                overwrite=overwrite,
+                target_locks=target_locks,
+                lock_timeout=lock_timeout,
+            )
             extracted.append(member.name)
     return extracted

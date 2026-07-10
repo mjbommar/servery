@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,6 +51,38 @@ class ParseContentRangeTest(unittest.TestCase):
             with self.assertRaises(_resumable.ResumableError, msg=bad):
                 _resumable.parse_content_range(bad)
 
+    def test_short_whole_write_never_commits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = str(Path(directory) / "short.bin")
+            with self.assertRaises(OSError):
+                _resumable.write_whole(target, io.BytesIO(b"short"), 10)
+            self.assertFalse(Path(target).exists())
+            self.assertFalse(Path(_resumable.part_path(target)).exists())
+
+    def test_partial_budget_disabled_and_external_cleanup_reclaims_capacity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = str(Path(directory) / f".first{_resumable.PART_SUFFIX}")
+            second = str(Path(directory) / f".second{_resumable.PART_SUFFIX}")
+            Path(first).write_bytes(b"x")
+            budget = _resumable.PartialUploadBudget(directory, 1)
+            self.assertFalse(budget.claim(second))
+            Path(first).unlink()
+            self.assertTrue(budget.claim(second))
+            budget.release(second)
+
+            disabled = _resumable.PartialUploadBudget(directory, 0)
+            self.assertTrue(disabled.claim(first))
+            disabled.release(first)
+
+    def test_stale_sidecar_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            part = Path(directory) / f".old{_resumable.PART_SUFFIX}"
+            self.assertFalse(_resumable.discard_stale(str(part), 0))
+            self.assertFalse(_resumable.discard_stale(str(part), 10, now=100))
+            part.write_bytes(b"x")
+            self.assertFalse(_resumable.discard_stale(str(part), 10, now=part.stat().st_mtime + 5))
+            self.assertTrue(_resumable.discard_stale(str(part), 10, now=part.stat().st_mtime + 11))
+
 
 def _put(host: str, port: int, path: str, body: bytes, headers: dict | None = None):
     conn = http.client.HTTPConnection(host, port, timeout=5)
@@ -91,6 +124,15 @@ class WholePutTest(_ServerCase):
         self.assertEqual(status, 201)
         self.assertEqual(headers.get("location"), "/new.txt")
         self.assertEqual((self.root / "new.txt").read_bytes(), b"hello world")
+
+    def test_whole_put_supersedes_old_partial_sidecar(self):
+        part = self.root / f".new.txt{_resumable.PART_SUFFIX}"
+        part.write_bytes(b"stale partial")
+        with serving(self.cfg) as (host, port):
+            status, _, _ = _put(host, port, "/new.txt", b"complete")
+        self.assertEqual(status, 201)
+        self.assertEqual((self.root / "new.txt").read_bytes(), b"complete")
+        self.assertFalse(part.exists())
 
     def test_overwrite_refused_by_default(self):
         (self.root / "x.txt").write_bytes(b"old")
@@ -197,6 +239,33 @@ class SizeLimitTest(_ServerCase):
         with serving(self.cfg) as (host, port):
             status, _, _ = _put(host, port, "/big.bin", b"x", {"Content-Range": "bytes 0-0/99"})
         self.assertEqual(status, 413)
+
+
+class PartialUploadLimitTest(_ServerCase):
+    def setUp(self):
+        super().setUp()
+        self.cfg = Config.create(
+            str(self.root),
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            upload=True,
+            max_partial_uploads=1,
+        )
+
+    def test_completion_releases_capacity(self):
+        with serving(self.cfg) as (host, port):
+            first, _, _ = _put(host, port, "/one.bin", b"a", {"Content-Range": "bytes 0-0/2"})
+            blocked, _, _ = _put(host, port, "/two.bin", b"a", {"Content-Range": "bytes 0-0/2"})
+            completed, _, _ = _put(host, port, "/one.bin", b"b", {"Content-Range": "bytes 1-1/2"})
+            admitted, _, _ = _put(host, port, "/two.bin", b"a", {"Content-Range": "bytes 0-0/2"})
+        self.assertEqual((first, blocked, completed, admitted), (308, 507, 201, 308))
+
+    def test_existing_sidecar_counts_against_limit(self):
+        (self.root / f".existing.bin{_resumable.PART_SUFFIX}").write_bytes(b"a")
+        with serving(self.cfg) as (host, port):
+            status, _, _ = _put(host, port, "/new.bin", b"a", {"Content-Range": "bytes 0-0/2"})
+        self.assertEqual(status, 507)
 
 
 class UploadDisabledTest(_ServerCase):

@@ -29,6 +29,23 @@ It's RFC 9110-correct:
 A typical directory listing compresses ~18×. Compression is applied across HTTP/1.1,
 HTTP/2, and HTTP/3.
 
+Compression is intentionally a bounded policy rather than "always stream" or
+"always `read()`": `--max-compress-size` (10 MiB) caps one in-memory static-file
+compression, while HTTP/2/3 also require the file to fit
+`--max-buffered-response`. Larger files stay identity and stream efficiently. A
+byte-bounded `--compression-cache-size` can reuse hot encoded representations; it
+is off by default to preserve the minimal-memory posture, while the `cdn` profile
+sets 32 MiB. Cache keys include canonical path, mtime, size, coding, and level, and
+concurrent misses are coalesced.
+
+## Large directory policy
+
+Pagination bounds rendered HTML, and three separate limits bound the work before
+rendering: `--max-listing-entries` (100,000), `--listing-page-size` (1,000), and
+`--listing-details-threshold` (10,000). Above the detail threshold servery keeps
+basic name/type rows but omits per-entry size/date work, facets, aggregate metrics,
+and the timeline. A capped listing says so visibly; it never pretends to be complete.
+
 ## Integrity digests (RFC 9530)
 
 A client that wants to verify a download can send `Want-Repr-Digest`; servery answers
@@ -91,7 +108,9 @@ Writes one line per response to a file, separate from the stderr request log:
 | `combined` | CLF + `"referer" "user-agent"` |
 | `json` | one JSON object per line (method, path, status, size, …) |
 
-It's thread-safe and records the real status and response size.
+It's thread-safe and records the real status and response size. Each server instance
+owns its own file handler, so embedded servers may log to separate destinations and
+close in either order without detaching one another.
 
 ## See also
 

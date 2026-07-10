@@ -11,6 +11,7 @@ import gzip
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from servery import _compress, _response
 from servery.config import Config
@@ -100,6 +101,19 @@ class HeaderAndBuildTest(unittest.TestCase):
             self.assertEqual(status_dir, 301)
             self.assertEqual(_headers_dict(headers_dir)[b"location"], b"/sub/")
 
+    def test_listing_error_and_disabled_page_security_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(_response.listing, "render", side_effect=OSError):
+                status, _headers, _body = _response.build_static(
+                    self.cfg, directory, "/", "", tls=False
+                )
+            self.assertEqual(status, 404)
+
+            config = Config.create(directory, quiet=True, security_headers=False)
+            status, headers, _body = _response.build_static(config, directory, "/", "", tls=False)
+            self.assertEqual(status, 200)
+            self.assertNotIn(b"content-security-policy", _headers_dict(headers))
+
     def test_build_static_conditional_304(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "a.txt").write_text("hello world")
@@ -131,6 +145,72 @@ class HeaderAndBuildTest(unittest.TestCase):
             # The gzip representation carries a distinct ETag (RFC 9110 §8.8.3.3).
             self.assertNotEqual(_headers_dict(h_plain)[b"etag"], _headers_dict(h_gz)[b"etag"])
             self.assertTrue(_headers_dict(h_gz)[b"etag"].endswith(b'-gz"'))
+
+    def test_large_file_uses_identity_file_body_above_buffer_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "large.txt")
+            path.write_bytes(b"x" * 4096)
+            cfg = Config.create(
+                tmp,
+                quiet=True,
+                max_buffered_response=1024,
+                max_compress_size=10_000,
+            )
+            status, headers, body = _response.build_static(
+                cfg, str(path), "/large.txt", "gzip", tls=True
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body, _response.FileBody(str(path), 4096))
+            mapped = _headers_dict(headers)
+            self.assertEqual(mapped[b"content-length"], b"4096")
+            self.assertNotIn(b"content-encoding", mapped)
+            self.assertEqual(mapped[b"vary"], b"accept-encoding")
+
+    def test_zero_threshold_forces_nonempty_file_streaming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "one.bin")
+            path.write_bytes(b"x")
+            cfg = Config.create(tmp, quiet=True, max_buffered_response=0)
+            _status, _headers, body = _response.build_static(
+                cfg, str(path), "/one.bin", "", tls=False
+            )
+            self.assertIsInstance(body, _response.FileBody)
+
+    def test_large_binary_stream_has_no_accept_encoding_vary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "large.bin")
+            path.write_bytes(b"x" * 10)
+            cfg = Config.create(tmp, quiet=True, max_buffered_response=1)
+            _status, headers, body = _response.build_static(
+                cfg, str(path), "/large.bin", "gzip", tls=False
+            )
+            self.assertIsInstance(body, _response.FileBody)
+            self.assertNotIn(b"vary", _headers_dict(headers))
+
+    def test_file_disappearing_after_stat_returns_404(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            small = Path(tmp, "small.txt")
+            small.write_bytes(b"x")
+            cfg = Config.create(tmp, quiet=True)
+            with mock.patch("builtins.open", side_effect=OSError):
+                status, _headers, _body = _response.build_static(
+                    cfg, str(small), "/small.txt", "", tls=False
+                )
+            self.assertEqual(status, 404)
+
+            encoded = Path(tmp, "encoded.txt")
+            encoded.write_bytes(b"x" * (_compress.GZIP_MIN + 100))
+            cache = _compress.CompressionCache(1024 * 1024)
+            with mock.patch("builtins.open", side_effect=OSError):
+                status, _headers, _body = _response.build_static(
+                    cfg,
+                    str(encoded),
+                    "/encoded.txt",
+                    "gzip",
+                    tls=False,
+                    compression_cache=cache,
+                )
+            self.assertEqual(status, 404)
 
 
 if __name__ == "__main__":

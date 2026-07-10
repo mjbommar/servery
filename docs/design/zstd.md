@@ -44,5 +44,6 @@ gzip as the universal fallback and changing nothing on Python 3.13.
 
 ## Out of scope (now)
 - Precompressed `.zst`/`.gz` sidecar serving (`gzip_static`-style).
-- A `zstd` content-coding for files above `GZIP_MAX` (kept identity + sendfile).
+- Streaming zstd for files above the configured in-memory compression/buffering
+  thresholds (kept identity and streamed/sendfile).
 - The `backports.zstd` PyPI shim on 3.13 (a dependency — out).

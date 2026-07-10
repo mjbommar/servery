@@ -57,6 +57,7 @@ class Http3HelpersTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn((b"content-encoding", b"gzip"), headers)
         self.assertIn((b"vary", b"accept-encoding"), headers)
+        assert isinstance(body, bytes)
         self.assertEqual(gzip.decompress(body), b"z" * 4000)
         # Same file without gzip acceptance: identity, but still Vary-keyed.
         _, headers2, body2 = http3.build_response(

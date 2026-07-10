@@ -71,6 +71,15 @@ class ExtractZipTest(unittest.TestCase):
             ["big.txt"],
         )
 
+    def test_failed_overwrite_keeps_old_complete_file(self):
+        target = Path(self.dest, "big.txt")
+        target.write_bytes(b"old complete value")
+        archive = self._write_archive(_zip_bytes({"big.txt": b"x" * 5000}))
+        with self.assertRaises(_extract.ExtractError):
+            _extract.extract(archive, self.dest, max_total=1000, allow_overwrite=True)
+        self.assertEqual(target.read_bytes(), b"old complete value")
+        self.assertEqual({path.name for path in Path(self.dest).iterdir()}, {"a.zip", "big.txt"})
+
 
 class ExtractTarTest(unittest.TestCase):
     def setUp(self):

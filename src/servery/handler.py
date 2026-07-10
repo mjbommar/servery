@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, BinaryIO, ClassVar, cast, overload
 
 from servery import (
     __version__,
+    _body,
     _compress,
     _conditional,
     _digest,
@@ -176,6 +177,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     _access_status: int | str = "-"  # captured per response for the access log
     _access_size: int | str = "-"
     _capture_len: bool = False  # set per response: is an access log configured?
+    _body_plan = _body.BodyPlan(0)
+    _body_forced_close: bool = False
+    _body_original_close: bool = True
     _version_string_cache: ClassVar[str | None] = None  # the Server header is constant
     # Our parse_request() populates these (replacing the email-based parser).
     headers: _RequestHeaders
@@ -232,6 +236,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         self.command = None  # set in case of error on the first line
         self.request_version = version = self.default_request_version
         self.close_connection = True
+        self._body_forced_close = False
+        self._body_original_close = True
         requestline = str(self.raw_requestline, "iso-8859-1").rstrip("\r\n")
         self.requestline = requestline
         words = requestline.split()
@@ -254,6 +260,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, f"Bad HTTP/0.9 request type ({command!r})")
                 return False
             self.command, self.path, self.headers = command, path, _RequestHeaders([])
+            self._body_plan = _body.BodyPlan(0)
             return True
         self.command, self.path = command, path
 
@@ -268,11 +275,22 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE, str(err))
             return False
 
+        try:
+            self._body_plan = _body.parse_framing(
+                self.headers.get_all("Content-Length"),
+                self.headers.get_all("Transfer-Encoding"),
+            )
+        except _body.FramingError as err:
+            self.close_connection = True
+            self.send_error(err.status, str(err))
+            return False
+
         conntype = self.headers.get("Connection", "")
         if conntype.lower() == "close":
             self.close_connection = True
         elif conntype.lower() == "keep-alive" and self.protocol_version >= "HTTP/1.1":
             self.close_connection = False
+        self._body_original_close = self.close_connection
         expect = self.headers.get("Expect", "")
         if (
             expect.lower() == "100-continue"
@@ -433,11 +451,13 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
     def _proxy_or_unsupported(self) -> None:
         if not self._maybe_proxy():
+            self._require_body_disposition()
             self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command})")
 
     def do_GET(self) -> None:
         if self._maybe_proxy():
             return
+        self._require_body_disposition()
         f = self.send_head()
         if f is None:
             return
@@ -449,6 +469,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     def do_HEAD(self) -> None:
         if self._maybe_proxy():
             return
+        self._require_body_disposition()
         f = self.send_head()
         if f is not None:
             f.close()
@@ -457,6 +478,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
     def _dav(self, op: str, *, write: bool) -> None:
         """Dispatch a WebDAV method, gated by --dav / --dav-write and auth."""
+        self._require_body_disposition()
         config = self._server.config
         if not config.dav:
             self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command})")
@@ -498,6 +520,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             return
         if self._maybe_proxy():
             return
+        self._require_body_disposition()
         if config.upload:  # resumable Content-Range PUT (the --upload write API)
             self._resumable_put()
             return
@@ -517,43 +540,43 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
         if self._maybe_proxy():
             return
+        self._require_body_disposition()
         self._generated_page = False
         if not self._authorized():
             return
         config = self._server.config
         if not config.upload:
-            self.send_error(HTTPStatus.NOT_FOUND, "Upload is not enabled")
+            self._reject_unread_body(HTTPStatus.NOT_FOUND, "Upload is not enabled")
             return
         dest_dir = self.translate_path(self.path)
         if not os.path.isdir(dest_dir) or not security.is_contained(
             self._server.root_real, dest_dir
         ):
-            self.send_error(HTTPStatus.NOT_FOUND, "Upload directory not found")
+            self._reject_unread_body(HTTPStatus.NOT_FOUND, "Upload directory not found")
             return
 
         content_type = self.headers.get("Content-Type", "")
         if not content_type.startswith("multipart/form-data"):
-            self.send_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Expected multipart/form-data")
+            self._reject_unread_body(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Expected multipart/form-data"
+            )
             return
         boundary = upload.extract_boundary(content_type)
         if boundary is None:
-            self.send_error(HTTPStatus.BAD_REQUEST, "Missing multipart boundary")
+            self._reject_unread_body(HTTPStatus.BAD_REQUEST, "Missing multipart boundary")
             return
 
         raw_length = self.headers.get("Content-Length")
         if raw_length is None:
-            self.send_error(HTTPStatus.LENGTH_REQUIRED, "Content-Length required for upload")
+            self._reject_unread_body(
+                HTTPStatus.LENGTH_REQUIRED, "Content-Length required for upload"
+            )
             return
-        try:
-            length = int(raw_length)
-        except ValueError:
-            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
-            return
-        if length < 0:
-            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
-            return
+        length = self._body_plan.length or 0
         if length > config.max_upload_size:
-            self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Upload exceeds the size limit")
+            self._reject_unread_body(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Upload exceeds the size limit"
+            )
             return
 
         reader = upload.BoundedReader(self.rfile, length)
@@ -565,14 +588,19 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 allow_overwrite=config.allow_overwrite,
                 extract=config.upload_extract,
                 max_upload_size=config.max_upload_size,
+                target_locks=self._server.target_locks,
+                lock_timeout=config.write_lock_timeout,
             )
         except upload.UploadConflictError:
+            self.close_connection = True
             self.send_error(HTTPStatus.CONFLICT, "A file with that name already exists")
             return
         except upload.UploadError:
+            self.close_connection = True
             self.send_error(HTTPStatus.BAD_REQUEST, "Malformed upload")
             return
-        reader.drain()  # keep the connection aligned for keep-alive
+        if reader.drain():  # keep the connection aligned for keep-alive
+            self._body_consumed()
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", self.path)
         self.send_header("Content-Length", "0")
@@ -607,16 +635,20 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self._put_reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Upload exceeds the size limit")
             return
 
-        range_header = self.headers.get("Content-Range")
-        if range_header is None:  # a plain PUT writes the whole body
-            self._put_whole(target, length)
-            return
-        try:
-            content_range = _resumable.parse_content_range(range_header)
-        except _resumable.ResumableError as exc:
-            self._put_reject(HTTPStatus.BAD_REQUEST, str(exc))
-            return
-        self._put_ranged(target, content_range, length)
+        with self._server.target_locks.hold(target, config.write_lock_timeout) as acquired:
+            if not acquired:
+                self._put_reject(HTTPStatus.CONFLICT, "Another write to this target is active")
+                return
+            range_header = self.headers.get("Content-Range")
+            if range_header is None:  # a plain PUT writes the whole body
+                self._put_whole(target, length)
+                return
+            try:
+                content_range = _resumable.parse_content_range(range_header)
+            except _resumable.ResumableError as exc:
+                self._put_reject(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._put_ranged(target, content_range, length)
 
     def _put_content_length(self) -> int | None:
         """Parse a required, non-negative Content-Length, or send an error and return None."""
@@ -624,14 +656,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if raw is None:
             self._put_reject(HTTPStatus.LENGTH_REQUIRED, "Content-Length required for upload")
             return None
-        try:
-            length = int(raw)
-        except ValueError:
-            length = -1
-        if length < 0:
-            self._put_reject(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
-            return None
-        return length
+        return self._body_plan.length or 0
 
     def _put_ranged(self, target: str, cr: _resumable.ContentRange, length: int) -> None:
         config = self._server.config
@@ -639,6 +664,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self._put_reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Upload exceeds the size limit")
             return
         part = _resumable.part_path(target)
+        if config.partial_upload_ttl and _resumable.discard_stale(part, config.partial_upload_ttl):
+            self._server.partial_uploads.release(part)
         stored = _resumable.stored_bytes(part)
         if cr.is_query:  # "bytes */total": report how far we got, no body to read
             self._put_incomplete(stored)
@@ -653,13 +680,21 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if stored + cr.length > config.max_upload_size:
             self._put_reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Upload exceeds the size limit")
             return
+        if not self._server.partial_uploads.claim(part):
+            self._put_reject(
+                HTTPStatus.INSUFFICIENT_STORAGE, "Too many partial uploads are outstanding"
+            )
+            return
         reader = upload.BoundedReader(self.rfile, length)
         try:
             written = _resumable.append(part, reader, length)
         except OSError:
+            if not os.path.exists(part):
+                self._server.partial_uploads.release(part)
             self._put_reject(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not write upload")
             return
-        reader.drain()
+        if reader.drain():
+            self._body_consumed()
         new_offset = stored + written
         if cr.total is not None and new_offset >= cr.total:
             self._put_commit(part, target)
@@ -671,13 +706,17 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if existed and not self._server.config.allow_overwrite:
             self._put_reject(HTTPStatus.CONFLICT, "A file with that name already exists")
             return
+        part = _resumable.part_path(target)
+        _resumable.discard(part)
+        self._server.partial_uploads.release(part)
         reader = upload.BoundedReader(self.rfile, length)
         try:
             _resumable.write_whole(target, reader, length)
         except OSError:
             self._put_reject(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not write upload")
             return
-        reader.drain()
+        if reader.drain():
+            self._body_consumed()
         self._put_created(existed)
 
     def _put_commit(self, part: str, target: str) -> None:
@@ -692,6 +731,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         except OSError:
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not finalize upload")
             return
+        self._server.partial_uploads.release(part)
         self._put_created(existed)
 
     def _put_created(self, existed: bool) -> None:
@@ -713,6 +753,24 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         # The request body was not consumed; close so keep-alive can't desync.
         self.close_connection = True
         self.send_error(code, message)
+
+    def _reject_unread_body(self, code: int, message: str) -> None:
+        """Send an error and close because the declared request body remains unread."""
+        self.close_connection = True
+        self.send_error(code, message)
+
+    def _require_body_disposition(self) -> None:
+        """Pessimistically close unless this request's declared body is consumed."""
+        if (self._body_plan.length or 0) > 0 and not self._body_forced_close:
+            self._body_original_close = self.close_connection
+            self._body_forced_close = True
+            self.close_connection = True
+
+    def _body_consumed(self) -> None:
+        """Restore the request's original keep-alive policy after exact consumption."""
+        if self._body_forced_close:
+            self.close_connection = self._body_original_close
+            self._body_forced_close = False
 
     def _serve_file(self, path: str) -> BinaryIO | None:
         try:
@@ -752,6 +810,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                     size,
                     self.headers.get("Accept-Encoding", ""),
                     enabled=self._server.config.compress,
+                    max_size=self._server.config.max_compress_size,
                 )
             )
             # The coded representation needs a distinct (still strong) ETag (§8.8.3.3);
@@ -768,7 +827,10 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 return None
 
             if coding is not None:
-                body = _compress.encode(f.read(), coding)
+                key = _compress.cache_key(path, stat, coding)
+                body = self._server.compression_cache.get_or_compute(
+                    key, lambda: _compress.encode(f.read(), coding)
+                )
                 f.close()
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", ctype)
@@ -936,7 +998,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         # fall back to the cookie, then "auto". No JavaScript involved.
         theme_param = params.get("theme", [None])[0]
         set_theme_cookie = theme_param in {"auto", "light", "dark"}
-        theme = theme_param if set_theme_cookie else self._theme_cookie()
+        theme = theme_param if theme_param in {"auto", "light", "dark"} else self._theme_cookie()
         display = urllib.parse.unquote(parts.path, errors="surrogatepass")
         try:
             body = listing.render(
@@ -948,9 +1010,11 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 query=query,
                 ext=ext,
                 page=page,
-                per_page=listing.DEFAULT_PAGE_SIZE,
+                per_page=self._server.config.listing_page_size,
                 theme=theme,
                 upload=self._server.config.upload,
+                max_entries=self._server.config.max_listing_entries,
+                details_threshold=self._server.config.listing_details_threshold,
             )
         except OSError:
             self.send_error(HTTPStatus.NOT_FOUND, "No permission to list directory")
@@ -1005,6 +1069,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Strict-Transport-Security", "max-age=63072000")
         if config.cors:
             self.send_header("Access-Control-Allow-Origin", "*")
+        if self._server.http3_port is not None:
+            self.send_header("Alt-Svc", f'h3=":{self._server.http3_port}"; ma=86400')
         if self._vary_accept_encoding:
             self.send_header("Vary", "Accept-Encoding")
         super().end_headers()
@@ -1039,6 +1105,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         if self._maybe_proxy():
             return
+        self._require_body_disposition()
         self._generated_page = False
         config = self._server.config
         # Preflight must succeed without auth, or the real request never happens.
@@ -1049,10 +1116,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if config.dav:
             from servery import _webdav
 
-            # Class 2 (with the stub lock) so Finder/Windows mount read-write.
-            self.send_header("DAV", "1, 2")
+            self.send_header("DAV", _webdav.dav_class(config))
             self.send_header("MS-Author-Via", "DAV")
-            self.send_header("Allow", _webdav._ALLOW_RW if config.dav_write else _webdav._ALLOW_RO)
+            self.send_header("Allow", _webdav.allow_header(config))
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -1111,6 +1177,10 @@ class _RequestHeaders:
 
     def items(self) -> list[tuple[str, str]]:
         return list(self._pairs)
+
+    def get_all(self, name: str) -> list[str]:
+        key = name.lower()
+        return [value for field, value in self._pairs if field.lower() == key]
 
 
 def _read_request_headers(rfile: io.BufferedIOBase) -> _RequestHeaders:

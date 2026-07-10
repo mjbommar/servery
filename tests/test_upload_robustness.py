@@ -111,7 +111,7 @@ class UploadServerTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_chunked_upload_rejected_cleanly(self):
-        # We require Content-Length; a chunked body must be refused (411), not hang.
+        # The sync HTTP adapters deliberately do not decode chunked request bodies.
         with serving(self.cfg) as (host, port):
             request = (
                 b"POST / HTTP/1.1\r\nHost: x\r\n"
@@ -121,7 +121,7 @@ class UploadServerTest(unittest.TestCase):
             )
             resp = raw_exchange(host, port, request)
             status = int(resp.split(b"\r\n", 1)[0].split(b" ")[1])
-            self.assertEqual(status, 411)
+            self.assertEqual(status, 501)
 
     @unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
     def test_httpx_multipart_upload(self):

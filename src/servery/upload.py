@@ -65,13 +65,22 @@ class BoundedReader:
         self._remaining -= len(chunk)
         return chunk
 
-    def drain(self) -> None:
+    @property
+    def remaining(self) -> int:
+        return self._remaining
+
+    def drain(self) -> bool:
         while self.read(_CHUNK):
             pass
+        return self._remaining == 0
 
 
 class _ReadableStream(Protocol):
     def read(self, size: int, /) -> bytes: ...
+
+
+class _TargetLocks(Protocol):
+    def hold(self, path: str, timeout: float = 0.0): ...
 
 
 class _Stream:
@@ -177,27 +186,56 @@ def _safe_name(filename: str) -> str | None:
     return name
 
 
-def _save_part(stream: _Stream, marker: bytes, dest_dir: str, name: str, *, overwrite: bool) -> int:
+def _save_part(
+    stream: _Stream,
+    marker: bytes,
+    dest_dir: str,
+    name: str,
+    *,
+    overwrite: bool,
+    target_locks: _TargetLocks | None = None,
+    lock_timeout: float = 0.0,
+) -> int:
     final = os.path.join(dest_dir, name)
-    if os.path.exists(final) and not overwrite:
-        # Drain this part so the stream stays aligned, then signal the conflict.
-        stream.read_until(marker, _Discard())
-        raise UploadConflictError(name)
-    tmp = tempfile.NamedTemporaryFile(dir=dest_dir, delete=False)  # noqa: SIM115 (closed before os.replace)
-    try:
-        written = stream.read_until(marker, tmp)
-        tmp.close()
-        os.replace(tmp.name, final)
-    except BaseException:
-        tmp.close()
-        with contextlib.suppress(OSError):
-            os.unlink(tmp.name)
-        raise
-    return written
+
+    @contextlib.contextmanager
+    def unlocked():
+        yield True
+
+    guard = target_locks.hold(final, lock_timeout) if target_locks is not None else unlocked()
+    with guard as acquired:
+        if not acquired:
+            stream.read_until(marker, _Discard())
+            raise UploadConflictError(name)
+        if os.path.exists(final) and not overwrite:
+            # Drain this part so the stream stays aligned, then signal the conflict.
+            stream.read_until(marker, _Discard())
+            raise UploadConflictError(name)
+        tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 (closed before os.replace)
+            dir=dest_dir, delete=False
+        )
+        try:
+            written = stream.read_until(marker, tmp)
+            tmp.close()
+            # The existence decision and replace are serialized for this server.
+            os.replace(tmp.name, final)
+        except BaseException:
+            tmp.close()
+            with contextlib.suppress(OSError):
+                os.unlink(tmp.name)
+            raise
+        return written
 
 
 def _maybe_extract(
-    name: str, dest_dir: str, written: int, *, overwrite: bool, max_upload_size: int
+    name: str,
+    dest_dir: str,
+    written: int,
+    *,
+    overwrite: bool,
+    max_upload_size: int,
+    target_locks: _TargetLocks | None,
+    lock_timeout: float,
 ) -> SavedFile:
     """If ``name`` is an archive, expand it into ``dest_dir`` and remove the archive."""
     from servery import _extract
@@ -210,7 +248,14 @@ def _maybe_extract(
     # compression and the absolute MAX_TOTAL as the ceiling.
     cap = min(_extract.MAX_TOTAL, max(max_upload_size, 100 * written))
     try:
-        names = _extract.extract(final, dest_dir, allow_overwrite=overwrite, max_total=cap)
+        names = _extract.extract(
+            final,
+            dest_dir,
+            allow_overwrite=overwrite,
+            max_total=cap,
+            target_locks=target_locks,
+            lock_timeout=lock_timeout,
+        )
     except _extract.ExtractError as exc:
         with contextlib.suppress(OSError):
             os.unlink(final)
@@ -228,6 +273,8 @@ def save(
     allow_overwrite: bool = False,
     extract: bool = False,
     max_upload_size: int = 100 * 1024 * 1024,
+    target_locks: _TargetLocks | None = None,
+    lock_timeout: float = 0.0,
 ) -> list[SavedFile]:
     """Parse a multipart body and write its file parts into ``dest_dir``.
 
@@ -252,7 +299,15 @@ def save(
             name = _safe_name(filename)
             if name is None:
                 raise UploadError("unsafe upload filename")
-            written = _save_part(stream, marker, dest_dir, name, overwrite=allow_overwrite)
+            written = _save_part(
+                stream,
+                marker,
+                dest_dir,
+                name,
+                overwrite=allow_overwrite,
+                target_locks=target_locks,
+                lock_timeout=lock_timeout,
+            )
             if extract:
                 saved.append(
                     _maybe_extract(
@@ -261,6 +316,8 @@ def save(
                         written,
                         overwrite=allow_overwrite,
                         max_upload_size=max_upload_size,
+                        target_locks=target_locks,
+                        lock_timeout=lock_timeout,
                     )
                 )
             else:

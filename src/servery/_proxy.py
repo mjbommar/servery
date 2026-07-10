@@ -15,7 +15,7 @@ import ssl
 import urllib.parse
 from typing import TYPE_CHECKING
 
-from servery import _http1, _log
+from servery import _body, _http1, _log
 
 if TYPE_CHECKING:
     from servery.handler import ServeryHandler
@@ -45,17 +45,14 @@ def target_for(path: str, routes: tuple[tuple[str, str], ...]) -> str | None:
 
 def forward(handler: ServeryHandler, target: str) -> None:
     """Forward the current request to ``target`` and stream the response back."""
+    handler._require_body_disposition()
     config = handler._server.config
     parsed = urllib.parse.urlsplit(target)
-    try:
-        length = max(0, int(handler.headers.get("content-length") or 0))  # never read(-1)
-    except ValueError:
-        handler.send_error(400, "Invalid Content-Length")
+    length = handler._body_plan.length or 0
+    if length > config.max_request_body:
+        handler._reject_unread_body(413, "Request body too large to proxy")
         return
-    if length > config.max_upload_size:
-        handler.send_error(413, "Request body too large to proxy")
-        return
-    body = handler.rfile.read(length) if length else None
+    body = _body.LimitedReader(handler.rfile, length) if length else None
 
     scheme = "https" if isinstance(handler.connection, ssl.SSLSocket) else "http"
     # When servery did its own --auth, the client's Authorization is servery's
@@ -79,6 +76,8 @@ def forward(handler: ServeryHandler, target: str) -> None:
     upstream_path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
     try:
         conn.request(handler.command or "GET", upstream_path, body=body, headers=out_headers)
+        if body is not None and body.remaining == 0:
+            handler._body_consumed()
         response = conn.getresponse()
         relay_headers = [(k, v) for k, v in response.getheaders() if k.lower() not in _HOP_BY_HOP]
         _relay(handler, response.status, response.reason, relay_headers, response)
@@ -87,6 +86,9 @@ def forward(handler: ServeryHandler, target: str) -> None:
         with contextlib.suppress(OSError):
             handler.send_error(502, "Bad gateway")
     finally:
+        if body is not None and body.remaining:
+            # The upstream failed before consuming the accepted client body.
+            handler.close_connection = True
         conn.close()
 
 

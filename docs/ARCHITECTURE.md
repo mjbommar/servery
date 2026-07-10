@@ -49,7 +49,7 @@ base class *is* the boring path).
 
 | Base member | Disposition | Rationale |
 |---|---|---|
-| `parse_request`, `handle_one_request`, `handle` | **reuse** | HTTP plumbing; never touch. |
+| `parse_request`, `handle_one_request`, `handle` | **targeted override / reuse** | Keep the stdlib request loop, but parse headers into a small HTTP-specific structure and apply shared anti-smuggling framing before dispatch; `handle` also recognizes HTTP/2. |
 | `translate_path` | **reuse as the core, wrap with a containment check** | Already strips query/fragment, `posixpath.normpath`s, drops `..`/drive components. servery wraps it in `security.py` to add `realpath` containment + symlink policy (§5) — it does not weaken it. |
 | `send_response`/`send_header`/`end_headers`/`send_error` | **reuse** | Response framing. |
 | `guess_type` | **reuse, retargeted** | Keep the method; ensure it routes through `mimetypes.guess_file_type` (the 3.13 path-aware API) rather than the soft-deprecated `guess_type(url)`. |
@@ -59,7 +59,7 @@ base class *is* the boring path).
 | `protocol_version` | **override (class attr)** | Set to `"HTTP/1.1"` to enable persistent connections + framing guarantees (FR-CONN-01). |
 | `timeout` | **override (class attr)** | Set a per-request socket timeout (default 30 s) so `StreamRequestHandler.setup` calls `settimeout` — Slowloris mitigation (NFR-PERF-04). |
 | `log_message` / `log_request` | **override** | Route through `logging.getLogger("servery")` (with a library `NullHandler`) instead of writing straight to `sys.stderr`; track the real byte count for access logs (FR-LOG-05/06; `_log.py`). |
-| `process_request` (server) | **override (conditional)** | When `config.max_workers` is set, submit `process_request_thread` to a bounded `concurrent.futures.ThreadPoolExecutor` instead of an unbounded thread (NFR-PERF-04; `server.py`). |
+| `process_request` (server) | **override** | Admit at most `max_connections` (256 by default), then use the normal connection thread or an optional bounded `max_workers` executor/queue. Saturation rejects without blocking accept indefinitely. |
 | `do_GET` / `do_HEAD` | **reuse** | They already just call `send_head`; all our logic lands in `send_head`. |
 | `do_POST` | **add** | Upload (§6). Absent in the base class. |
 | `do_OPTIONS` | **add (conditional)** | CORS preflight when `--cors` is set. |
@@ -85,7 +85,7 @@ Subclassing inherits the base's correct HTTP plumbing — and four of its 2026-e
 |---|---|---|
 | **HTTP/1.0 default, keep-alive off.** `protocol_version = "HTTP/1.0"` gates off persistent connections; a listing of N assets means N connections. | Set `protocol_version = "HTTP/1.1"` to flip keep-alive on via the base's existing logic; honor `Connection: close`; frame every streamed (`Content-Length`-less) body with chunked or `Connection: close` so a reused socket never hangs. (FR-CONN-01, NFR-STD-01) | `server.py`/`handler.py` (class attr); framing audit across `ranges`/`archive` |
 | **No zero-copy.** `copyfile` is a userspace `shutil.copyfileobj` read/write loop; never calls `sendfile`. | Override `copyfile` to use `socket.sendfile()` (kernel `os.sendfile`, internal fallback) on the full-file `200` path, with a bounded `copyfileobj` fallback — and **skip sendfile for `ssl.SSLSocket`** (TLS must encrypt in userspace). (NFR-PERF-03) | `handler.py` (override), TLS guard in `server.py` |
-| **No timeout, unbounded threads.** `socketserver` `timeout = None`; `ThreadingMixIn` spawns an uncapped thread per connection → Slowloris + thread/FD exhaustion exposure. | Set a per-request socket `timeout` (default 30 s) so stalled I/O raises `TimeoutError`; offer an optional `concurrent.futures.ThreadPoolExecutor` cap via `--max-workers` (default still unbounded). A mitigation, not a hardening promise (NFR-SEC-03). (NFR-PERF-04) | `handler.py` (`timeout` attr); `server.py` (`process_request`) |
+| **No timeout, unbounded threads.** `socketserver` `timeout = None`; `ThreadingMixIn` spawns an uncapped thread per connection → Slowloris + thread/FD exhaustion exposure. | Set a 30 s socket timeout and a default 256-connection admission ceiling; retain a separate optional `max_workers` pool for blocking work. ASGI, HTTP/3, HTTP/2 streams, and TFTP have corresponding but distinct budgets. | `handler.py`; `server.py`; `asgi.py`; `http3.py`; `_tftp.py` |
 | **Logs straight to `sys.stderr`.** `log_message` writes to stderr with no level/handler; an embedder cannot redirect or silence it; access logs always show `-` for size. | Route through `logging.getLogger("servery")` with a library `NullHandler` (library quiet, CLI loud); track the real byte count and status; swallow expected client disconnects without tracebacks; optional CLF/Combined access log. (FR-LOG-05/06/07) | `_log.py`; `handler.py` (`log_message`/`log_request`) |
 
 These are additive overrides at named seams — never a fork of the base. Each is
@@ -109,6 +109,8 @@ servery/
 │       ├── __main__.py       # `python -m servery` → cli.main()
 │       ├── py.typed          # PEP 561 marker (typed package)
 │       ├── _version.py       # __version__ (single source of the version string)
+│       ├── _body.py          # shared framing rules + bounded readers
+│       ├── _writecoord.py    # leak-free per-canonical-target lock registry
 │       ├── cli.py            # argparse → Config; main(); startup banner + warnings; --http2/--http3 wiring
 │       ├── config.py         # frozen Config dataclass (the single source of truth)
 │       ├── server.py         # ServeryHTTPServer / ServeryHTTPSServer, dual-stack, make_server(), TLS wrap
@@ -192,16 +194,17 @@ touching the file-serving core. The request-handling pipeline (`send_head` /
   the line-based HTTP/1.1 loop. `H2Connection` owns the binary framing
   (`http2.frames`), HPACK (`http2.hpack`), the stream state machine, flow control,
   and the required DoS limits (Rapid-Reset / CONTINUATION-flood / HPACK-bomb caps —
-  `docs/TRANSPORTS.md` §6); each request stream is dispatched back into the **same**
-  `send_head`/`do_POST` pipeline. No client picks `h2` → graceful fallback to
+  `docs/TRANSPORTS.md` §6). Supported GET/HEAD requests use the shared static
+  response builder: small bodies stay buffered and larger files become a streamed
+  `FileBody`. No client picks `h2` → graceful fallback to
   HTTP/1.1 on the same socket. This tier adds **no** dependency: TLS+ALPN are stdlib
   `ssl`, and HPACK/framing are pure code.
-- **HTTP/3 — `http3.py` (optional `servery[http3]` extra, `--http3`).** A separate
-  UDP/QUIC listener backed by `aioquic`; it is imported lazily by `cli.main` only
-  when `--http3` is given (raising `Http3UnavailableError` → a clean exit if the
-  extra is absent), and requires TLS. When live, the TCP tiers advertise it via
-  `Alt-Svc`. QUIC + QPACK + h3 framing come from `aioquic`; servery drives the loop
-  and dispatches into the shared handler.
+- **HTTP/3 — `http3.py` (optional `servery[http3]` extra, `--http3`).** The unified
+  `serve()` owner starts an aioquic UDP listener beside TCP unless `http3_only` is
+  explicit, shares resolved/generated certificate material and the compression
+  cache, advertises the actual bound UDP port via `Alt-Svc`, and stops both paths.
+  Filesystem/compression work leaves the QUIC callback; large files stream with a
+  bounded sender queue. Unsupported app/proxy combinations fail configuration.
 - **`_oscrypto.py` (ctypes crypto).** A thin, isolated `ctypes` binding to OS crypto
   already loaded in-process (OpenSSL `libssl`/`libcrypto`, or Windows CNG) — the
   vetted high-level AEAD/QUIC primitives, never hand-rolled crypto. It exists for the
@@ -268,7 +271,7 @@ do_POST() (servery, only defined if config.upload)
   ├─[1] feature gate ......... if not config.upload → 405 Method Not Allowed
   ├─[2] auth gate ............ auth.check(...) (same as GET) → 401 on fail
   ├─[3] target dir ........... security.resolve(self, self.path) → must be a dir in root
-  ├─[4] size precheck ........ Content-Length > config.max_upload → 413, drain/close
+  ├─[4] size precheck ........ Content-Length > config.max_upload_size → 413, drain/close
   ├─[5] parse body ........... upload.parse(self.rfile, content_type, content_length, ...)
   │        └─ multipart: stream each part to tempfile.NamedTemporaryFile in target dir,
   │           enforcing running byte cap; sanitize filename (basename only, no traversal)
@@ -433,7 +436,7 @@ hashed with `hashlib` and compared digest-to-digest, again via
 
 - Off unless `config.upload`. Enforced by method-absence (§4), so a default
   build cannot write.
-- A **running** byte cap (`config.max_upload`) is enforced *while streaming*, not
+- A **running** byte cap (`config.max_upload_size`) is enforced *while streaming*, not
   just via the (spoofable) `Content-Length` — the parser aborts and deletes the
   temp file on overrun.
 - Filenames are reduced to `os.path.basename` and re-validated through
@@ -451,12 +454,11 @@ All four concerns are reviewable in `security.py` + `auth.py` + the top of
 
 ### Concurrency model
 
-`ServeryHTTPServer(ThreadingHTTPServer)` (and the `…HTTPSServer` variant) inherit
-`socketserver.ThreadingMixIn` with `daemon_threads = True`: one thread per
-connection, no event loop, no async framework (`PRINCIPLES.md` §0). This is
-sufficient for a dev/LAN tool and matches the base class. An optional
-connection/worker cap can gate upload concurrency, but the default is the stdlib
-behavior unchanged.
+`ServeryHTTPServer(ThreadingHTTPServer)` uses one thread per **admitted** connection
+by default, capped at 256. `max_workers` optionally puts blocking handlers behind a
+separate executor and bounded queue. ASGI uses an async connection semaphore;
+HTTP/3 caps QUIC sessions; HTTP/2 advertises/enforces streams per connection; TFTP
+caps full transfer lifetimes. One number does not conflate these different costs.
 
 ### Large-file download streaming
 
@@ -469,7 +471,10 @@ def copyfile(self, source, outputfile):
 ```
 
 The file object from `open(path, "rb")` is streamed straight to `self.wfile`; RAM
-use is one buffer regardless of file size.
+use is one buffer regardless of file size. HTTP/2 and HTTP/3 use a hybrid shared
+response: `bytes` at or below `max_buffered_response`, `FileBody` above it. HTTP/2
+schedules reads against both flow-control windows; HTTP/3 reads off-loop and bounds
+the QUIC sender buffer.
 
 ### Range / resumable (servery-built — stdlib has none)
 
@@ -506,7 +511,7 @@ simplicity:
 
 | Approach | How | Memory | When acceptable |
 |---|---|---|---|
-| **`email.parser.BytesParser`** | Read the whole body, prepend a synthetic `Content-Type: multipart/form-data; boundary=…` header, `email.message_from_bytes`, walk `msg.iter_parts()`, `part.get_payload(decode=True)`. | **Buffers entire body in RAM.** | Small/bounded uploads where `max_upload` is comfortably below available RAM. Simple, obviously-correct, ~15 lines. |
+| **`email.parser.BytesParser`** | Read the whole body, prepend a synthetic `Content-Type: multipart/form-data; boundary=…` header, `email.message_from_bytes`, walk `msg.iter_parts()`, `part.get_payload(decode=True)`. | **Buffers entire body in RAM.** | Small/bounded uploads where `max_upload_size` is comfortably below available RAM. Simple, obviously-correct, ~15 lines. |
 | **Hand-rolled streaming boundary parser** | Read `rfile` in fixed chunks, scan for the `--boundary` delimiter across chunk seams, write part bodies directly to a tempfile as they arrive, parse per-part headers with `email.parser` on just the (small) header block. | **One buffer; constant memory.** | The general case — large files, the "stream to disk" property the old `make_file()` hook gave us. |
 
 **Recommendation: ship the streaming boundary parser as the default**, writing to
@@ -514,7 +519,7 @@ simplicity:
 `os.replace` for atomicity. It preserves the bounded-memory and atomic-write
 properties that make upload safe on a small host, and it is the honest answer to
 losing `cgi`. The `email.parser` in-memory path is documented as the simpler
-fallback and is acceptable only when `max_upload` is small by configuration.
+fallback and is acceptable only when `max_upload_size` is small by configuration.
 
 Design details of the streaming parser:
 
@@ -526,7 +531,7 @@ Design details of the streaming parser:
   (in-memory is fine — it is bytes of headers, not the payload).
 - The body scanner must handle the delimiter straddling a read boundary: keep a
   tail of `len(boundary)+4` bytes between chunks.
-- On any overrun of `max_upload`, on a missing final boundary, or on a traversal
+- On any overrun of `max_upload_size`, on a missing final boundary, or on a traversal
   filename, abort: delete the temp file, send `413`/`400`, and stop reading.
 - `urllib.parse.parse_qsl` handles non-multipart `application/x-www-form-urlencoded`
   bodies (e.g. simple form fields).
@@ -591,7 +596,7 @@ root pointing outside it.
   appears) — guarding the constant-time property structurally.
 - **Upload** — POST multipart to an `--upload` server: file lands in target,
   correct bytes, atomicity (no partial on mid-stream abort), `413` on
-  over-`max_upload`, traversal filename rejected. A separate unit test feeds
+  over-`max_upload_size`, traversal filename rejected. A separate unit test feeds
   crafted multipart bytes straight to `upload.parse_multipart` (no server).
 - **TLS** — start `ServeryHTTPSServer` with a throwaway cert/key generated into a
   `tempfile` (via the `ssl`/`cryptography`-free path: ship a tiny fixture cert, or
@@ -621,7 +626,7 @@ requires-python = ">=3.13"
 dependencies = []                       # the core — empty, forever
 
 [project.optional-dependencies]
-http3 = ["aioquic"]                     # opt-in HTTP/3 tier only; imported under --http3
+http3 = ["aioquic>=1.0,<2"]             # opt-in HTTP/3 tier only; imported under --http3
 
 [project.scripts]
 servery = "servery.cli:main"            # console script
@@ -641,8 +646,9 @@ Three entry points, one behavior (`PRINCIPLES.md` §4):
 - **`import servery`** → `serve(config)`, `Config`, `make_server(config)`,
   `ServeryHandler` exposed from `__init__.py`.
 
-`cli.main()` does exactly: `argparse` → `Config` (`config.from_args`) →
-`make_server(config)` → print banner/warnings → `serve_forever()`. The CLI is a
+`cli.main()` does exactly: `argparse` → validated `Config` → `serve(config)`.
+`serve()` resolves certificate material once and owns TCP, optional HTTP/3/TFTP,
+mDNS, startup rollback, and shutdown. The CLI is a
 thin view over the library; everything the flags do is reachable by constructing
 a `Config` in Python.
 

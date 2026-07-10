@@ -7,11 +7,12 @@ import contextlib
 import logging
 import socket
 import threading
+import time
 import unittest
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
-from servery import asgi
+from servery import _body, asgi
 from servery.config import Config
 from tests._harness import capturing_logs, wait_for
 
@@ -25,7 +26,13 @@ except ImportError:  # pragma: no cover
 
 @contextlib.contextmanager
 def serving_asgi(
-    spec: str, *, tls: bool = False, auth: str | None = None, timeout: float = 30.0
+    spec: str,
+    *,
+    tls: bool = False,
+    auth: str | None = None,
+    timeout: float = 30.0,
+    max_request_body: int = 100 * 1024 * 1024,
+    max_connections: int | None = 256,
 ) -> Iterator[tuple[str, int]]:
     """Run the ASGI server for ``spec`` in a background event loop; yield (host, port)."""
     config = Config.create(
@@ -37,6 +44,8 @@ def serving_asgi(
         tls_self_signed=tls,
         auth=auth,
         timeout=timeout,
+        max_request_body=max_request_body,
+        max_connections=max_connections,
     )
     holder: dict[str, Any] = {}
     ready = threading.Event()
@@ -89,6 +98,124 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(cfg.uses_tls)
 
 
+class AsyncBodyUnitTest(unittest.TestCase):
+    @staticmethod
+    def _reader(data: bytes) -> asyncio.StreamReader:
+        reader = asyncio.StreamReader()
+        reader.feed_data(data)
+        reader.feed_eof()
+        return reader
+
+    def test_empty_body_finishes_then_disconnects(self):
+        async def exercise() -> None:
+            body = asgi._AsyncBody(self._reader(b""), _body.BodyPlan(0), max_body=10, timeout=1)
+            self.assertEqual(
+                await body.receive(),
+                {"type": "http.request", "body": b"", "more_body": False},
+            )
+            self.assertEqual(await body.receive(), {"type": "http.disconnect"})
+
+        asyncio.run(exercise())
+
+    def test_chunk_extensions_and_trailers_finish_cleanly(self):
+        async def exercise() -> None:
+            body = asgi._AsyncBody(
+                self._reader(b"1;name=value\r\nx\r\n0\r\nX-Test: yes\r\n\r\n"),
+                _body.BodyPlan(None, chunked=True),
+                max_body=10,
+                timeout=1,
+            )
+            self.assertEqual((await body.receive())["body"], b"x")
+            self.assertFalse((await body.receive())["more_body"])
+
+        asyncio.run(exercise())
+
+    def test_invalid_chunk_forms_and_limits_are_explicit(self):
+        cases = (
+            (b"z\r\n", 10, 400),
+            (b"4\r\ndata\r\n", 3, 413),
+            (b"1\r\nxXX", 10, 400),
+        )
+
+        async def exercise(data: bytes, maximum: int, status: int) -> None:
+            body = asgi._AsyncBody(
+                self._reader(data),
+                _body.BodyPlan(None, chunked=True),
+                max_body=maximum,
+                timeout=1,
+            )
+            with self.assertRaises(asgi._BodyReadError) as error:
+                await body.receive()
+            self.assertEqual(error.exception.status, status)
+
+        for data, maximum, status in cases:
+            with self.subTest(data=data):
+                asyncio.run(exercise(data, maximum, status))
+
+    def test_trailer_budget_is_enforced(self):
+        trailers = (b"x" * 1000 + b"\r\n") * 66
+
+        async def exercise() -> None:
+            body = asgi._AsyncBody(
+                self._reader(b"0\r\n" + trailers + b"\r\n"),
+                _body.BodyPlan(None, chunked=True),
+                max_body=10,
+                timeout=1,
+            )
+            with self.assertRaises(asgi._BodyReadError) as error:
+                await body.receive()
+            self.assertEqual(error.exception.status, 431)
+
+        asyncio.run(exercise())
+
+
+class ResponseStateUnitTest(unittest.TestCase):
+    class Writer:
+        def __init__(self) -> None:
+            self.data = bytearray()
+
+        def write(self, data: bytes) -> None:
+            self.data.extend(data)
+
+    def test_unknown_status_chunking_and_policy_deduplication(self):
+        async def exercise() -> bytes:
+            writer = self.Writer()
+            state = asgi._ResponseState(
+                cast(asyncio.StreamWriter, writer),
+                "GET",
+                True,
+                [(b"X-Policy", b"default")],
+                lambda: True,
+            )
+            await state.send(
+                {
+                    "type": "http.response.start",
+                    "status": 599,
+                    "headers": [(b"x-policy", b"app")],
+                }
+            )
+            await state.send({"type": "http.response.body", "body": b"data"})
+            return bytes(writer.data)
+
+        wire = asyncio.run(exercise())
+        self.assertIn(b"HTTP/1.1 599 \r\n", wire)
+        self.assertEqual(wire.lower().count(b"x-policy:"), 1)
+        self.assertIn(b"Transfer-Encoding: chunked", wire)
+        self.assertTrue(wire.endswith(b"4\r\ndata\r\n0\r\n\r\n"))
+
+    def test_head_without_length_closes_and_suppresses_body(self):
+        async def exercise() -> bytes:
+            writer = self.Writer()
+            state = asgi._ResponseState(cast(asyncio.StreamWriter, writer), "HEAD", True, [], True)
+            await state.send({"type": "http.response.start", "status": 200})
+            await state.send({"type": "http.response.body", "body": b"hidden"})
+            return bytes(writer.data)
+
+        wire = asyncio.run(exercise())
+        self.assertIn(b"Connection: close", wire)
+        self.assertNotIn(b"hidden", wire)
+
+
 @unittest.skipUnless(_HAVE_HTTPX, "httpx not installed")
 class ASGIServerTest(unittest.TestCase):
     def test_methods_and_body(self):
@@ -114,6 +241,66 @@ class ASGIServerTest(unittest.TestCase):
 
 
 class ASGIChunkedTest(unittest.TestCase):
+    def test_large_content_length_body_is_delivered_in_bounded_chunks(self):
+        payload = b"x" * 150_000
+        with serving_asgi("tests._asgiapp:body_shape") as (host, port):
+            sock = socket.create_connection((host, port), timeout=5)
+            try:
+                sock.sendall(
+                    f"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: {len(payload)}\r\n"
+                    "Connection: close\r\n\r\n".encode()
+                    + payload
+                )
+                response = _read_to_close(sock)
+            finally:
+                sock.close()
+        self.assertIn(b"3:65536:150000", response)
+
+    def test_oversized_content_length_gets_explicit_413(self):
+        with serving_asgi("tests._asgiapp:echo", max_request_body=3) as (host, port):
+            sock = socket.create_connection((host, port), timeout=5)
+            try:
+                sock.sendall(
+                    b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n"
+                    b"Connection: close\r\n\r\nDATA"
+                )
+                response = _read_to_close(sock)
+            finally:
+                sock.close()
+        self.assertIn(b"HTTP/1.1 413", response)
+
+    def test_duplicate_length_and_te_plus_length_are_rejected(self):
+        requests = (
+            b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\n"
+            b"Content-Length: 2\r\nConnection: close\r\n\r\nX",
+            b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n"
+            b"Content-Length: 1\r\nConnection: close\r\n\r\n0\r\n\r\n",
+        )
+        with serving_asgi("tests._asgiapp:echo") as (host, port):
+            for request in requests:
+                with self.subTest(request=request[:30]):
+                    sock = socket.create_connection((host, port), timeout=5)
+                    try:
+                        sock.sendall(request)
+                        response = _read_to_close(sock)
+                    finally:
+                        sock.close()
+                    self.assertIn(b"HTTP/1.1 400", response)
+
+    def test_app_that_ignores_body_forces_close_before_pipeline(self):
+        with serving_asgi("tests._asgiapp:ignores_body") as (host, port):
+            sock = socket.create_connection((host, port), timeout=5)
+            try:
+                sock.sendall(
+                    b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nDATA"
+                    b"GET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+                )
+                response = _read_to_close(sock)
+            finally:
+                sock.close()
+        self.assertEqual(response.count(b"HTTP/1.1 200 OK"), 1)
+        self.assertIn(b"Connection: close", response)
+
     def test_streaming_uses_chunked(self):
         with serving_asgi("tests._asgiapp:streaming") as (host, port):
             sock = socket.create_connection((host, port), timeout=5)
@@ -195,6 +382,33 @@ class WebSocketHandshakeTest(unittest.TestCase):
         )
 
 
+class ASGIConnectionBudgetTest(unittest.TestCase):
+    def test_saturation_rejects_quickly_and_recovers(self):
+        with serving_asgi("tests._asgiapp:echo", max_connections=1, timeout=2.0) as (host, port):
+            held = socket.create_connection((host, port), timeout=5)
+            held.sendall(b"GET / HTTP/1.1\r\n")  # keep the sole task in head parsing
+            time.sleep(0.1)
+            rejected = socket.create_connection((host, port), timeout=5)
+            try:
+                rejected.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                rejected.settimeout(2)
+                try:
+                    data = rejected.recv(4096)
+                except ConnectionResetError:
+                    data = b""
+                self.assertEqual(data, b"")
+            finally:
+                rejected.close()
+                held.close()
+            time.sleep(0.1)
+            recovered = socket.create_connection((host, port), timeout=5)
+            try:
+                recovered.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                self.assertIn(b"200 OK", _read_to_close(recovered))
+            finally:
+                recovered.close()
+
+
 def _ws_open(host: str, port: int, path: str = "/") -> tuple[socket.socket, bytes, bytes]:
     """Open a WebSocket: do the upgrade, return (sock, key, handshake_response)."""
     import base64
@@ -211,6 +425,16 @@ def _ws_open(host: str, port: int, path: str = "/") -> tuple[socket.socket, byte
     while b"\r\n\r\n" not in resp:
         resp += sock.recv(4096)
     return sock, key, resp
+
+
+def _read_to_close(sock: socket.socket) -> bytes:
+    sock.settimeout(5)
+    data = bytearray()
+    while True:
+        piece = sock.recv(65536)
+        if not piece:
+            return bytes(data)
+        data += piece
 
 
 def _ws_send_text(sock: socket.socket, text: str) -> None:

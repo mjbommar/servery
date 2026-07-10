@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import gzip
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from servery import _compress
+from servery import _compress, _response
 from servery.config import Config
 from tests._harness import raw_exchange, serving
 
@@ -88,6 +91,101 @@ class NegotiationTest(unittest.TestCase):
 
         data = b"servery " * 500
         self.assertEqual(zstd.decompress(_compress.zstd_bytes(data)), data)
+
+
+class CompressionCacheTest(unittest.TestCase):
+    @staticmethod
+    def _key(name: str) -> _compress.CacheKey:
+        return (name, 1, 1, "gzip", _compress.GZIP_LEVEL)
+
+    def test_byte_budget_and_lru_eviction(self):
+        cache = _compress.CompressionCache(5)
+        first, second, third = (self._key(name) for name in ("a", "b", "c"))
+        cache.put(first, b"aaa")
+        cache.put(second, b"bb")
+        self.assertEqual(cache.current_bytes, 5)
+        self.assertEqual(cache.get(first), b"aaa")  # promote first over second
+        cache.put(third, b"cc")
+        self.assertIsNone(cache.get(second))
+        self.assertEqual(cache.get(first), b"aaa")
+        self.assertEqual(cache.get(third), b"cc")
+        self.assertEqual(cache.current_bytes, 5)
+
+    def test_disabled_cache_has_no_retained_bytes(self):
+        cache = _compress.CompressionCache(0)
+        cache.put(self._key("a"), b"value")
+        self.assertEqual(cache.current_bytes, 0)
+        self.assertIsNone(cache.get(self._key("a")))
+        self.assertEqual(cache.get_or_compute(self._key("a"), lambda: b"fresh"), b"fresh")
+
+    def test_replacement_and_oversized_values_honor_byte_budget(self):
+        cache = _compress.CompressionCache(3)
+        key = self._key("a")
+        cache.put(key, b"a")
+        cache.put(key, b"bb")
+        self.assertEqual(cache.current_bytes, 2)
+        self.assertEqual(cache.get(key), b"bb")
+        cache.put(self._key("too-large"), b"four")
+        self.assertEqual(cache.current_bytes, 2)
+
+    def test_cache_key_respects_explicit_level(self):
+        with tempfile.NamedTemporaryFile() as handle:
+            stat = Path(handle.name).stat()
+            self.assertEqual(_compress.cache_key(handle.name, stat, "gzip", 1)[-1], 1)
+
+    def test_concurrent_miss_is_computed_once(self):
+        cache = _compress.CompressionCache(1024)
+        key = self._key("hot")
+        barrier = threading.Barrier(5)
+        calls = 0
+        calls_lock = threading.Lock()
+        results: list[bytes] = []
+
+        def factory() -> bytes:
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.05)
+            return b"encoded"
+
+        def worker() -> None:
+            barrier.wait()
+            results.append(cache.get_or_compute(key, factory))
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(2)
+        self.assertEqual(calls, 1)
+        self.assertEqual(results, [b"encoded"] * 4)
+
+    def test_shared_response_builder_reuses_and_invalidates_encoded_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "hot.txt")
+            path.write_bytes(b"x" * 4000)
+            config = Config.create(tmp, quiet=True, compression_cache_size=1024 * 1024)
+            cache = _compress.CompressionCache(config.compression_cache_size)
+            with mock.patch.object(_compress, "encode", wraps=_compress.encode) as encode:
+                first = _response.build_static(
+                    config, str(path), "/hot.txt", "gzip", tls=False, compression_cache=cache
+                )
+                second = _response.build_static(
+                    config, str(path), "/hot.txt", "gzip", tls=False, compression_cache=cache
+                )
+                self.assertEqual(encode.call_count, 1)
+                self.assertEqual(first[2], second[2])
+                path.write_bytes(b"y" * 5000)
+                _response.build_static(
+                    config, str(path), "/hot.txt", "gzip", tls=False, compression_cache=cache
+                )
+                self.assertEqual(encode.call_count, 2)
+
+    @unittest.skipIf(_compress.HAVE_ZSTD, "unavailable branch is specific to Python 3.13")
+    def test_zstd_encoder_fails_explicitly_when_unavailable(self):
+        with self.assertRaises(RuntimeError):
+            _compress.zstd_bytes(b"data")
 
 
 class _ServerCase(unittest.TestCase):

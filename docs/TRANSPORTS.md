@@ -206,15 +206,14 @@ table is only about minting/sourcing the certificate.
 |------|-------------|-----|---------------|---------|-------|--------|
 | **0a — Core: user-provided** | User's own cert/key (PEM) | `--tls-cert`/`--tls-key` (+ `--tls-password-file`); `--tls-help` prints an `openssl` one-liner for users who want to make one | **stdlib `ssl`** loads it (`load_cert_chain`) | `pip install servery` — **zero deps** | Whatever the user's cert is (can be publicly-trusted) | **Shipped** |
 | **0b — Core: ad-hoc self-signed** | Generated at servery startup | `--tls-self-signed`; `_certgen.py` mints RSA-2048 + self-signed X.509 in **pure Python**, writes to a 0600 temp dir, loads via OpenSSL, deletes | **stdlib only** — pure-Python `pow`/`hashlib`/`secrets` + hand-rolled DER + PKCS#1 v1.5; **no `cryptography`, no `openssl` binary, no `ctypes`** | `pip install servery` — **zero deps** | **Untrusted** — opportunistic encryption on a dev box / LAN; clients see an "untrusted certificate" warning; **not a trust anchor** | **Shipped** |
-| **1 — Optional extra: ACME / publicly-trusted** | A CA (Let's Encrypt) via the ACME protocol, auto-renewed | (future) `servery[acme]` extra — e.g. `cryptography` + an ACME client; needs a public domain reachable on :80/:443 | PyPI crypto (the one TLS capability that warrants a dep) | `pip install servery[acme]` | **Publicly trusted** | **Not implemented — documented as the boundary** |
+| **1 — Core: ACME / publicly-trusted** | A CA (Let's Encrypt) via ACME HTTP-01 | `--acme DOMAIN` (repeatable); `_acme.py` builds JWS/CSR using the existing pure-Python RSA/DER primitives; needs a public domain and reachable port 80 | **stdlib only** | `pip install servery` | **Publicly trusted** | **Shipped** (staging default; `--acme-production` opts into issuance) |
 
-**How to read this table.** Tiers 0a and 0b add **no PyPI dependency** — both are
-pure stdlib, exactly like Tier 0 of the transport model. Tier 1 (ACME) is the TLS
-analogue of the HTTP/3 `servery[http3]` extra: the full ACME protocol + robust
-long-lived-key crypto + a public domain on :80/:443 is production-public-web-server
-territory (Caddy's lane), at the edge of servery's dev/LAN scope, and is the one
-place a TLS dependency is justified. It is **not implemented**; it is recorded here
-as the boundary so it is not mistaken for a current feature.
+**How to read this table.** All three certificate sources add **no PyPI
+dependency**. ACME is intentionally narrow (Let's Encrypt HTTP-01, cached account
+and certificate material, explicit staging/production choice); it does not turn
+servery into a general certificate-management daemon. HTTP/3 remains the sole
+optional runtime dependency because QUIC packet protection and QPACK need a stack
+the standard library does not expose.
 
 **Validation.** The HTTPS surface (including the `_certgen.py` self-signed cert) is
 audited with [`testssl.sh`](https://testssl.sh), the industry-standard TLS scanner —

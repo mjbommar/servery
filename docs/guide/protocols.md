@@ -38,7 +38,29 @@ servery --http3 --tls-cert cert.pem --tls-key key.pem
 ```
 
 The core stays dependency-free; only HTTP/3 pulls in the reference QUIC stack
-(`aioquic`).
+(`aioquic>=1,<2`). By default `--http3` starts the QUIC/UDP listener **beside** the
+normal TCP listener. TCP responses advertise the actual live UDP port with
+`Alt-Svc`, so clients can upgrade while HTTP/1.1 or HTTP/2 remains a fallback:
+
+```bash
+servery --http3 --http3-port 8443 --tls-self-signed
+```
+
+`--http3-only` deliberately removes that fallback and is intended for controlled
+tests or expert deployments. Certificate acquisition/generation happens once and
+both listeners share the material. Unsupported combinations with WSGI, CGI, ASGI,
+or reverse proxying fail validation instead of silently ignoring an option.
+
+## Buffered versus streaming responses
+
+Small responses are faster as one `read()` plus one framed write, while buffering a
+large file multiplies memory by concurrent streams. `--max-buffered-response`
+(default 1 MiB) selects that tradeoff for HTTP/2 and HTTP/3: files at or below the
+threshold use the small-response fast path; larger files stream in bounded internal
+chunks. Set it to `0` to force file streaming on a memory-constrained host or in a
+test. HTTP/1.1 keeps its optimized identity path, including `sendfile` where the
+socket permits it. Chunk size is intentionally internal; the observable memory
+threshold is configurable.
 
 ## TFTP
 
@@ -69,23 +91,32 @@ containment check as the HTTP side, so a request can't escape the served root.
 | `--tftp` | off | serve the directory over TFTP (UDP), read-only |
 | `--tftp-port PORT` | `69` | UDP port for TFTP |
 | `--tftp-write` | off | allow anonymous TFTP uploads (`WRQ`); requires `--tftp` |
+| `--max-tftp-transfers N` | `32` | bound active transfer sockets/workers |
 
 ## Tuning concurrency
 
-servery runs one thread per connection by default. Under high concurrency that can
-thrash; bound it to a worker pool:
+servery accepts at most 256 simultaneous HTTP connections/sessions by default.
+HTTP/1.1 still uses one thread per admitted connection unless a worker pool is
+selected. Under CPU-heavy concurrency, bound blocking work separately:
 
 ```bash
 servery --max-workers 8
 ```
 
-Set `N` near your CPU core count to sharply lower tail latency under load. servery
-also runs cleanly on the **free-threaded** (no-GIL) CPython builds (3.13t/3.14t) —
-the configuration is immutable and there's no module-level mutable state.
+Set `N` near your CPU core count to lower tail latency under load. Connection,
+worker, HTTP/2-stream, and TFTP-transfer limits are separate because an idle socket
+is much cheaper than a CGI child or active compression. Capacity checks reject
+quickly instead of growing an unbounded queue. servery also runs cleanly on the
+**free-threaded** (no-GIL) CPython builds (3.13t/3.14t).
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--http2` | off | HTTP/2 (ALPN `h2` over TLS, or `h2c` cleartext) |
-| `--http3` | off | HTTP/3 over QUIC (needs TLS + `servery[http3]`) |
+| `--max-h2-streams N` | `100` | active streams per HTTP/2 connection |
+| `--http3` | off | HTTP/3 beside TCP (needs TLS + `servery[http3]`) |
+| `--http3-only` | off | HTTP/3 without TCP fallback |
+| `--http3-port PORT` | TCP port | separate UDP/advertised port |
+| `--max-connections N` | `256` | admitted HTTP connections or QUIC sessions |
 | `--max-workers N` | unbounded | bound concurrency to N worker threads |
+| `--max-buffered-response BYTES` | 1 MiB | HTTP/2/3 buffered fast-path threshold |
 | `--timeout SECONDS` | `30` | per-connection socket timeout (Slowloris bound) |

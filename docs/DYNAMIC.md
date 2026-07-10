@@ -1,15 +1,15 @@
 # Dynamic handlers
 
-servery is a **file server**. This document plans an *optional, opt-in* capability
-to also run dynamic handlers — CGI scripts, WSGI apps, ASGI apps — **using only
-the standard library**, on Python 3.14+.
+servery is a **file server**. This document records its *optional, opt-in*
+capability to run dynamic handlers — CGI scripts, WSGI apps, ASGI apps — **using
+only the standard library**, on every supported Python version.
 
-> **Status (shipped, [Unreleased]):** all three phases are implemented and tested.
+> **Status (shipped in 1.2.0):** all three phases are implemented and tested.
 > **D1 `--wsgi`** (`servery/wsgi.py`, lean HTTP/1.1 engine, `wsgiref.validate`-gated,
 > ~20k req/s). **D2 `--cgi`** (`servery/cgi.py`, RFC 3875 + the full security suite).
 > **D3 `--asgi`** (`servery/asgi.py`, asyncio "mini-uvicorn", lifespan, ~19k req/s,
-> verified against Starlette). Each is off by default; HTTP/1.1 only. The design
-> notes below are kept as the record and for future work (ASGI TLS/WebSocket).
+> verified against Starlette). Each is off by default; HTTP/1.1 only. ASGI also
+> supports TLS and WebSocket upgrades. The notes below remain the design record.
 
 ## 0. The boundary (read first)
 
@@ -71,7 +71,7 @@ thread-per-request handler. Per request:
    request-derived environ and the socket streams; wsgiref does the protocol.
 3. The app is imported once at startup (`module:callable`).
 
-Bounds: reuse the existing `--max-upload-size`-style request-body cap and the
+Bounds: use the separate `--max-request-body` request-body cap and the
 socket `--timeout`. Mounting model: app at `/` by default, optionally under a
 prefix (the prefix becomes `SCRIPT_NAME`); static files can still be served from
 other paths.
