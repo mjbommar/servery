@@ -51,6 +51,7 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(cfg.cache_max_age, 31536000)
         self.assertTrue(cfg.cors)
         self.assertTrue(cfg.http2)
+        self.assertEqual(cfg.compression_cache_size, 32 * 1024 * 1024)
 
     def test_dev_is_local(self):
         cfg = _config("--profile", "dev")

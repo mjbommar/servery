@@ -60,6 +60,8 @@ Config.create(
     auth="me:secret",        # --auth
     upload=True,             # --upload
     allow_overwrite=False,   # --allow-overwrite
+    partial_upload_ttl=86400,
+    max_partial_uploads=128,
     tls_self_signed=True,    # --tls-self-signed
     tls_cert="cert.pem",     # --tls-cert
     tls_key="key.pem",       # --tls-key
@@ -67,10 +69,22 @@ Config.create(
     spa=True,                # --spa
     cache_max_age=3600,      # --cache
     compress=True,           # gzip (on by default)
+    max_compress_size=10 * 1024 * 1024,
+    compression_cache_size=32 * 1024 * 1024,
+    max_buffered_response=1024 * 1024,
+    max_connections=256,
     http2=True,              # --http2
+    max_h2_streams=100,
     max_workers=8,           # --max-workers
 )
 ```
+
+The resource settings describe observable policy rather than internal chunk sizes.
+For example, lower `max_buffered_response` to trade a little small-file throughput
+for lower per-stream memory, set it to zero to force streaming, or keep the default
+1 MiB hybrid path. `max_connections`, `max_workers`, `max_h2_streams`, and
+`max_tftp_transfers` are deliberately independent because their resources have
+different costs.
 
 Invalid combinations (e.g. `--dav-write` without `--dav`) raise `ValueError` at
 `create()` time, not mid-request. See the [CLI reference](../reference/cli.md) for

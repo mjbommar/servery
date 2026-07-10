@@ -73,17 +73,16 @@ class WSGIServerTest(unittest.TestCase):
             self.assertEqual(status_of(resp), 200)
             self.assertIn(b"GET /static.txt", body_of(resp))  # app echo, not the file
 
-    def test_negative_content_length_is_clamped(self):
-        # Content-Length: -1 must NOT trigger an unbounded rfile.read(-1) (would
-        # hang reading the whole socket); clamped to 0 -> prompt empty-body reply.
+    def test_negative_content_length_is_rejected(self):
+        # Never normalize an invalid length: parser disagreement can desynchronize
+        # a persistent connection. Reject it and close before invoking the app.
         with serving(self.cfg) as (host, port):
             resp = raw_exchange(
                 host,
                 port,
                 b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\nConnection: close\r\n\r\n",
             )
-            self.assertEqual(status_of(resp), 200)
-            self.assertEqual(body_of(resp), b"POST /x ")
+            self.assertEqual(status_of(resp), 400)
 
     def test_content_length_response_keeps_connection_alive(self):
         # Two pipelined requests on one connection -> keep-alive works.
@@ -96,6 +95,55 @@ class WSGIServerTest(unittest.TestCase):
             self.assertEqual(resp.count(b"200 OK"), 2)
             self.assertIn(b"GET /a", resp)
             self.assertIn(b"GET /b", resp)
+
+
+class WSGIBodyDisposalTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _config(self, **kwargs):
+        return Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            wsgi_app="tests._wsgiapp:ignores_body",
+            **kwargs,
+        )
+
+    def test_small_unread_body_is_drained_before_next_request(self):
+        with serving(self._config(keepalive_drain_limit=4)) as (host, port):
+            response = raw_exchange(
+                host,
+                port,
+                b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nDATA"
+                b"GET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+        self.assertEqual(response.count(b"HTTP/1.1 200 OK"), 2)
+
+    def test_large_unread_body_closes_instead_of_parsing_follow_on_request(self):
+        with serving(self._config(keepalive_drain_limit=3)) as (host, port):
+            response = raw_exchange(
+                host,
+                port,
+                b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nDATA"
+                b"GET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+        self.assertEqual(response.count(b"HTTP/1.1 200 OK"), 1)
+
+    def test_oversized_body_is_rejected_and_connection_closed(self):
+        with serving(self._config(max_request_body=3)) as (host, port):
+            response = raw_exchange(
+                host,
+                port,
+                b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nDATA"
+                b"GET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+        self.assertEqual(status_of(response), 413)
+        self.assertNotIn(b"200 OK", response)
 
 
 class ChunkedTest(unittest.TestCase):

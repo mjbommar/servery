@@ -241,6 +241,45 @@ class ScanCapTest(unittest.TestCase):
         finally:
             listing._MAX_SCAN_ENTRIES = original
 
+    def test_custom_cap_is_visible_only_when_content_was_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(4):
+                Path(tmp, f"f{i}.txt").write_text(str(i))
+            truncated = listing.render(
+                tmp, "/", show_hidden=True, max_entries=3, details_threshold=3
+            ).decode()
+            self.assertIn("Listing limited to the first 3 entries", truncated)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(3):
+                Path(tmp, f"f{i}.txt").write_text(str(i))
+            exact = listing.render(
+                tmp, "/", show_hidden=True, max_entries=3, details_threshold=3
+            ).decode()
+            self.assertNotIn("Listing limited", exact)
+
+    def test_details_threshold_bounds_stat_work_and_degrades_expensive_sections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(5):
+                Path(tmp, f"f{i}.txt").write_text("x" * (i + 1))
+            entries = listing._scan(tmp, show_hidden=True, max_entries=10, details_threshold=2)
+            self.assertEqual(sum(entry.size is not None for entry in entries), 2)
+            rendered = listing.render(
+                tmp,
+                "/",
+                show_hidden=True,
+                sort="size",
+                max_entries=10,
+                details_threshold=2,
+            ).decode()
+            self.assertIn(
+                "Size, date, facets, metrics, and timeline are limited above 2 entries",
+                rendered,
+            )
+            self.assertNotIn('<nav class="facets"', rendered)
+            self.assertNotIn('<div class="metrics">', rendered)
+            self.assertNotIn('<figure class="timeline">', rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

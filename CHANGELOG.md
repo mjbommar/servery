@@ -6,6 +6,67 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-10
+
+### Added
+
+- **Explicit resource policies.** New limits cover admitted connections, HTTP/2
+  streams, TFTP transfers, request bodies, compression input/cache, buffered
+  responses, directory and PROPFIND entries, and outstanding resumable sidecars.
+  The corresponding `Config` fields and CLI flags keep workload tradeoffs under
+  operator control instead of hard-coding one deployment's answer.
+- **Real WebDAV lock modes.** Writable DAV can advertise class 1, issue
+  compatibility tokens, or enforce in-process exclusive depth-infinity locks
+  (the default), including token refresh, expiry, discovery, and ancestor checks.
+- **Repeatable performance evidence.** Concurrent load and 1k/10k/100k directory
+  scale runners now emit JSON with latency percentiles, throughput, errors, and
+  memory measurements; a weekly/manual workflow retains benchmark artifacts.
+
+### Changed
+
+- **Hybrid buffering and streaming.** HTTP/2 and HTTP/3 buffer small responses up
+  to `--max-buffered-response` and stream larger files in bounded chunks. ASGI
+  request bodies are delivered incrementally. HTTP/1.1 keeps its sendfile path.
+- **HTTP/3 has one explicit lifecycle.** Normal `--http3` starts a TCP fallback
+  beside QUIC, advertises the actual UDP port, shares certificate/cache ownership,
+  and stops cleanly; `--http3-only` is an explicit expert choice. The optional
+  aioquic dependency is constrained to the compatible `>=1.0,<2` range.
+- **Large listings degrade deliberately.** Entry count, page size, metadata work,
+  and WebDAV enumeration are separately configurable; expensive details/facets
+  are omitted above the configured threshold and truncation is reported.
+
+### Fixed
+
+- **Request framing is consistent and desynchronization-safe.** All adapters share
+  duplicate `Content-Length` / `Transfer-Encoding` validation and body limits;
+  unread bodies are drained only within policy or force connection close. Rejected
+  PUT responses remain observable across platforms while the configured drain cap
+  still bounds work and controls whether the connection can be reused.
+- **Concurrent writes no longer race.** Canonical per-target locks cover uploads,
+  resumable PUT, WebDAV, extraction, and TFTP; atomic replacement preserves the old
+  file on failure. Resumable sidecars gain lazy TTL cleanup and a configurable
+  count cap, and truncated whole-file PUTs are never committed.
+- **HTTP/2 state and flow control.** Active streams, stream IDs, CONTINUATION,
+  SETTINGS window changes, connection windows, refusal, GOAWAY, and fair response
+  scheduling are now explicitly tracked and protocol-tested. A 64 KiB advertised
+  and enforced header-list ceiling plus reset, CONTINUATION, and SETTINGS/PING
+  budgets reject known frame-flood patterns.
+- **HTTP/3 lifecycle and backpressure.** File reads leave the event loop, queued
+  QUIC bytes are bounded, request framing is checked, and task/listener shutdown is
+  owned and tested without leaked daemon threads.
+- **Access logs own their handlers.** Multiple server instances no longer mutate a
+  shared logger or close one another's file handles; failed startup rolls back.
+- **TFTP writes commit before their final ACK**, including on Windows, and netascii
+  conversion is streaming and stateful across source-read and protocol-block
+  boundaries, with bounded transfer admission and recovery.
+
+### Performance
+
+- Optional byte-bounded compression caching avoids repeated hot-file work and
+  serializes enabled-cache misses to prevent a compression stampede. Large files
+  remain identity-streamed above `--max-compress-size`; setting either threshold
+  or cache budget to zero selects the lower-memory policy.
+
 ## [1.4.0] - 2026-06-28
 
 ### Added
@@ -481,6 +542,10 @@ First stable release. A zero-dependency, pure-Python HTTP file server.
 - **Free-threading** support (3.13t/3.14t), full type hints (`ty`-checked), and a
   CI gate that enforces zero runtime dependencies in the core wheel.
 
+[Unreleased]: https://github.com/mjbommar/servery/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/mjbommar/servery/compare/v1.4.0...v1.5.0
+[1.4.0]: https://github.com/mjbommar/servery/compare/v1.3.2...v1.4.0
+[1.3.2]: https://github.com/mjbommar/servery/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/mjbommar/servery/releases/tag/v1.3.1
 [1.3.0]: https://github.com/mjbommar/servery/releases/tag/v1.3.0
 [1.2.0]: https://github.com/mjbommar/servery/releases/tag/v1.2.0

@@ -32,6 +32,15 @@ uv run --group bench pytest benchmarks/ \
   "${compare_args[@]}"
 echo ">> wrote $json"
 
+echo ">> concurrent load / tail-latency / RSS evidence"
+uv run python scripts/bench.py \
+  --requests 1000 --concurrency 16 --large-mib 8 \
+  --json="benchmarks/artifacts/load-${stamp}.json"
+
+echo ">> directory scale evidence (1k / 10k / 100k)"
+uv run python scripts/listing_scale.py \
+  --json="benchmarks/artifacts/listing-scale-${stamp}.json"
+
 if [[ "$http3" == 1 ]]; then
   echo ">> HTTP/3 e2e (aioquic, GIL build via --python 3.13 --extra http3)"
   uv run --python 3.13 --group bench --extra http3 pytest \

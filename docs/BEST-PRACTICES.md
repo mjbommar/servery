@@ -409,7 +409,7 @@ client-declared sizes.
 
 **Zero-dep servery recommendation** (already in `ARCHITECTURE.md` §5.4 — restated
 as best practice):
-- **Running** byte cap enforced *while streaming* (`config.max_upload`, default
+- **Running** byte cap enforced *while streaming* (`config.max_upload_size`, default
   100 MiB per `REQUIREMENTS.md` DEC-UPLOAD-CAP), not just the spoofable
   `Content-Length`. Abort + delete temp file on overrun → `413`.
 - Filenames reduced to `os.path.basename`, re-validated through `security.resolve`;
@@ -481,8 +481,7 @@ timeout is set* (`socketserver.py:808-809`), but nothing sets it.
 - **Caveat:** a *legitimate* very slow large-download client could trip a short
   read/write timeout. 30s of inactivity is a reasonable default; the timeout is
   per-`recv`/`send`, not per-request-total, so it tolerates slow-but-steady
-  transfers. Document it and make it configurable; allow `0`/`None` to disable for
-  power users on trusted LANs.
+  transfers. Document it and make a positive value configurable.
 
 ### 5.2 Bounded concurrency vs unbounded threads
 
@@ -493,22 +492,13 @@ timeout is set* (`socketserver.py:808-809`), but nothing sets it.
 `threading.Thread` per connection with **no cap** (`socketserver.py:687-707`).
 `daemon_threads=True` (servery sets it) only affects shutdown, not the count.
 
-**Zero-dep servery recommendation.** Two stdlib-only options, in order of
-preference:
-1. **A `concurrent.futures.ThreadPoolExecutor` connection cap.** Override
-   `process_request` to submit `process_request_thread` to a bounded
-   `ThreadPoolExecutor(max_workers=N)`. This caps live request-handlers at `N`;
-   excess connections queue. Pure stdlib, ~10 lines, and the bound is a single
-   `Config.max_workers`. This is the recommended approach — explicit, simple,
-   testable.
-2. **A `threading.Semaphore` gate** acquired at the top of `handle` and released
-   in `finally`. Simpler but rejects/blocks at handler entry rather than at
-   accept; the executor approach composes better with graceful shutdown.
-
-Keep the **default unbounded** (matches the stdlib and `NFR-PERF-01`, and a dev
-tool rarely needs the cap) but expose `--max-workers`/`Config.max_workers` so a
-network-exposed deployment can bound it. Honest posture: servery is not
-production-hardened (`PRINCIPLES.md` §1); the cap is a mitigation, not a promise.
+**Implemented zero-dep policy.** A non-blocking `BoundedSemaphore` admits at most
+`max_connections` sockets (256 by default). `max_workers` independently selects a
+`ThreadPoolExecutor` for blocking work; its accepted queue is bounded and rejects
+instead of making the accept loop wait forever. ASGI/HTTP3 sessions, HTTP/2 streams,
+and TFTP transfers have corresponding distinct limits because their costs differ.
+This composes a finite default without pretending one magic number fits idle
+sockets, CGI children, and multiplexed streams.
 
 ### 5.3 Graceful shutdown
 

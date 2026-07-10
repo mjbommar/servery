@@ -14,16 +14,13 @@ slow reference server.
 from __future__ import annotations
 
 import contextlib
-import io
 import ssl
 import sys
 import urllib.parse
 from typing import Any
 
-from servery import _appspec, _http1, _log
+from servery import _appspec, _body, _http1, _log
 from servery.handler import ServeryHandler, _ChunkedWriter
-
-_MAX_BODY = 100 * 1024 * 1024  # cap wsgi.input regardless of a lying Content-Length
 
 
 def load_app(spec: str) -> Any:
@@ -31,45 +28,22 @@ def load_app(spec: str) -> Any:
     return _appspec.load_app(spec, default_attr="application", label="--wsgi")
 
 
-class _BodyReader:
+class _BodyReader(_body.LimitedReader):
     """A read-bounded view of the request body for ``wsgi.input``.
 
     Reads never run past ``Content-Length`` into the next pipelined request.
     Implements just what PEP 3333 requires of ``wsgi.input``.
     """
 
-    def __init__(self, source: io.BufferedIOBase, length: int) -> None:
-        self._source = source
-        self._remaining = length
 
-    def read(self, size: int = -1) -> bytes:
-        if self._remaining <= 0:
-            return b""
-        want = self._remaining if size < 0 else min(size, self._remaining)
-        data = self._source.read(want)
-        self._remaining -= len(data)
-        return data
-
-    def readline(self, size: int = -1) -> bytes:
-        if self._remaining <= 0:
-            return b""
-        limit = self._remaining if size < 0 else min(size, self._remaining)
-        data = self._source.readline(limit)
-        self._remaining -= len(data)
-        return data
-
-    def readlines(self, hint: int = -1) -> list[bytes]:
-        return list(iter(self.readline, b""))
-
-    def __iter__(self) -> Any:
-        return iter(self.readline, b"")
-
-
-def build_environ(handler: ServeryHandler) -> dict[str, Any]:
+def build_environ(
+    handler: ServeryHandler, body_reader: _BodyReader | None = None
+) -> dict[str, Any]:
     """Build a PEP 3333 ``environ`` from servery's parsed request."""
     path, _, query = handler.path.partition("?")
     headers = handler.headers
-    length = max(0, min(int(headers.get("content-length") or 0), _MAX_BODY))
+    length = handler._body_plan.length or 0
+    body_reader = body_reader or _BodyReader(handler.rfile, length)
     server_host, server_port = handler.server.server_address[:2]  # ty: ignore[not-subscriptable]
     environ: dict[str, Any] = {
         "REQUEST_METHOD": handler.command,
@@ -85,7 +59,7 @@ def build_environ(handler: ServeryHandler) -> dict[str, Any]:
         "CONTENT_LENGTH": str(length) if length else "",
         "wsgi.version": (1, 0),
         "wsgi.url_scheme": "https" if isinstance(handler.connection, ssl.SSLSocket) else "http",
-        "wsgi.input": _BodyReader(handler.rfile, length),
+        "wsgi.input": body_reader,
         "wsgi.errors": sys.stderr,
         "wsgi.multithread": True,
         "wsgi.multiprocess": False,
@@ -171,8 +145,13 @@ class _Exchange:
 
     def run(self) -> None:
         h = self._handler
+        length = h._body_plan.length or 0
+        if length > h._server.config.max_request_body:
+            h._reject_unread_body(413, "Request body exceeds the size limit")
+            return
+        body_reader = _BodyReader(h.rfile, length)
         try:
-            result = self._app(build_environ(h), self._start_response)
+            result = self._app(build_environ(h, body_reader), self._start_response)
             try:
                 if isinstance(result, (list, tuple)):
                     self._send_materialized(b"".join(result))
@@ -197,6 +176,8 @@ class _Exchange:
                     h.wfile.write(_http1.INTERNAL_ERROR)
             h.close_connection = True
             return
+        if body_reader.remaining and not body_reader.drain(h._server.config.keepalive_drain_limit):
+            h.close_connection = True
         h.log_request(self._status.split(" ", 1)[0] if self._status else "-")
 
 

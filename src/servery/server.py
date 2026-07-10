@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from servery import _log, _tls, auth
+from servery import _compress, _log, _resumable, _tls, _writecoord, auth
 from servery.config import Config
 from servery.handler import ServeryHandler
 
@@ -35,21 +35,27 @@ class ServeryHTTPServer(ThreadingHTTPServer):
     wsgi_app: Any = None
     cgi_root: str = ""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self, config: Config, *, target_locks: _writecoord.TargetLocks | None = None
+    ) -> None:
         self.config = config
         self.root_real = os.path.realpath(config.directory)
         self.credential = auth.parse(config.auth)
         self.access_log = None
-        if config.access_log:
-            from servery import _accesslog
-
-            self.access_log = _accesslog.AccessLog(config.access_log, config.access_log_format)
-        self._executor = (
-            ThreadPoolExecutor(max_workers=config.max_workers) if config.max_workers else None
+        self._executor: ThreadPoolExecutor | None = None
+        self._slots = (
+            threading.BoundedSemaphore(config.max_workers * 4) if config.max_workers else None
         )
-        # Bound accepted-but-queued connections too, not just running workers, so
-        # a flood can't grow the executor queue (and held sockets) without limit.
-        self._slots = threading.Semaphore(config.max_workers * 4) if config.max_workers else None
+        self._connections = (
+            threading.BoundedSemaphore(config.max_connections) if config.max_connections else None
+        )
+        self.target_locks = target_locks or _writecoord.TargetLocks()
+        self.partial_uploads = _resumable.PartialUploadBudget(
+            self.root_real, config.max_partial_uploads
+        )
+        self.compression_cache = _compress.CompressionCache(config.compression_cache_size)
+        self.dav_locks: Any = None
+        self.http3_port: int | None = None
         if ":" in config.host:
             self.address_family = socket.AF_INET6
         # Opt-in dynamic handlers replace file serving entirely (loaded up front
@@ -68,15 +74,53 @@ class ServeryHTTPServer(ThreadingHTTPServer):
                 raise ValueError(f"--cgi: {config.cgi_dir!r} is not a directory")
             self._handler_cls = cgi.CGIHandler
         super().__init__((config.host, config.port), self._handler_cls)
+        try:
+            if config.access_log:
+                from servery import _accesslog
+
+                self.access_log = _accesslog.AccessLog(config.access_log, config.access_log_format)
+            if config.max_workers:
+                self._executor = ThreadPoolExecutor(max_workers=config.max_workers)
+            if config.dav:
+                from servery import _webdav
+
+                self.dav_locks = _webdav.DavLockManager()
+        except BaseException:
+            if self.access_log is not None:
+                self.access_log.close()
+            super().server_close()
+            raise
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        # Default: a thread per connection (ThreadingMixIn). With --max-workers,
-        # bound concurrency through a shared pool instead.
+        if self._connections is not None and not self._connections.acquire(blocking=False):
+            _log.logger.warning("connection limit reached; rejecting %s", client_address)
+            self.shutdown_request(request)
+            return
         if self._executor is not None and self._slots is not None:
-            self._slots.acquire()
-            self._executor.submit(self._process_request_pooled, request, client_address)
+            if not self._slots.acquire(blocking=False):
+                _log.logger.warning("worker queue limit reached; rejecting %s", client_address)
+                self._release_connection()
+                self.shutdown_request(request)
+                return
+            try:
+                self._executor.submit(self._process_request_pooled, request, client_address)
+            except RuntimeError:
+                self._slots.release()
+                self._release_connection()
+                self.shutdown_request(request)
+                raise
         else:
-            super().process_request(request, client_address)
+            try:
+                super().process_request(request, client_address)
+            except BaseException:
+                self._release_connection()
+                raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._release_connection()
 
     def _process_request_pooled(self, request: Any, client_address: Any) -> None:
         try:
@@ -87,6 +131,11 @@ class ServeryHTTPServer(ThreadingHTTPServer):
             self.shutdown_request(request)
             if self._slots is not None:
                 self._slots.release()
+            self._release_connection()
+
+    def _release_connection(self) -> None:
+        if self._connections is not None:
+            self._connections.release()
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         # A failed TLS handshake or a dropped connection is a client-side problem,
@@ -133,7 +182,12 @@ class ServeryHTTPServer(ThreadingHTTPServer):
         )
 
 
-def make_server(config: Config, *, port_scan: int = 64) -> ServeryHTTPServer:
+def make_server(
+    config: Config,
+    *,
+    port_scan: int = 64,
+    target_locks: _writecoord.TargetLocks | None = None,
+) -> ServeryHTTPServer:
     """Create (bind + activate) a server for ``config``.
 
     If ``config.port`` is already in use, scan forward for the next free port (up to
@@ -145,13 +199,13 @@ def make_server(config: Config, *, port_scan: int = 64) -> ServeryHTTPServer:
     import errno
 
     if config.port == 0:  # the OS already picks a free port — nothing to scan
-        return ServeryHTTPServer(config)
+        return ServeryHTTPServer(config, target_locks=target_locks)
     in_use = {errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", errno.EADDRINUSE)}
     last: OSError | None = None
     for port in range(config.port, min(config.port + port_scan + 1, 65536)):
         candidate = config if port == config.port else dataclasses.replace(config, port=port)
         try:
-            server = ServeryHTTPServer(candidate)
+            server = ServeryHTTPServer(candidate, target_locks=target_locks)
         except OSError as exc:
             if exc.errno not in in_use:
                 raise
@@ -258,7 +312,9 @@ def _ensure_acme(config: Config) -> tuple[str, str]:  # pragma: no cover - needs
     return str(cert_path), str(key_path)
 
 
-def _start_tftp(config: Config):  # pragma: no cover - needs a UDP socket
+def _start_tftp(
+    config: Config, target_locks: _writecoord.TargetLocks
+):  # pragma: no cover - needs a UDP socket
     """Start a TFTP listener serving the same directory; return the server handle."""
     from servery import _tftp
 
@@ -269,6 +325,9 @@ def _start_tftp(config: Config):  # pragma: no cover - needs a UDP socket
         config.tftp_port,
         allow_write=config.tftp_write,
         max_write_size=config.max_upload_size,
+        max_transfers=config.max_tftp_transfers,
+        target_locks=target_locks,
+        write_lock_timeout=config.write_lock_timeout,
     )
     server.start()
     if not config.quiet:
@@ -295,9 +354,44 @@ def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (C
             )
         cert_path, key_path = _ensure_acme(config)
         config = dataclasses.replace(config, tls_cert=cert_path, tls_key=key_path)
-    # TFTP is a separate UDP listener that runs alongside whichever HTTP path we take.
-    tftp_server = _start_tftp(config) if config.tftp else None
+    cert_context = (
+        _tls.self_signed_files(config)
+        if config.http3 and config.tls_self_signed
+        else contextlib.nullcontext(None)
+    )
+    with cert_context as generated:
+        if generated is not None:
+            import dataclasses
+
+            config = dataclasses.replace(
+                config, tls_cert=generated[0], tls_key=generated[1], tls_self_signed=False
+            )
+        _serve_prepared(config)
+
+
+def _serve_prepared(config: Config) -> None:  # pragma: no cover - lifecycle integration
+    """Run listeners after ACME/self-signed certificate material is prepared."""
+    target_locks = _writecoord.TargetLocks()
+    tftp_server = _start_tftp(config, target_locks) if config.tftp else None
     try:
+        if config.http3_only:
+            import time
+
+            from servery import http3
+
+            handle = http3.start_http3(config)
+            try:
+                if not config.quiet:
+                    print(
+                        f"servery: serving HTTP/3 only on {config.host}:{handle.port}/udp",
+                        file=sys.stderr,
+                    )
+                with contextlib.suppress(KeyboardInterrupt):
+                    while handle.is_alive:
+                        time.sleep(0.25)
+            finally:
+                handle.close()
+            return
         if config.asgi_app:  # ASGI runs its own asyncio event loop, not the threading server
             from servery import asgi
 
@@ -312,12 +406,31 @@ def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (C
                     print(f"servery: WARNING {warning}", file=sys.stderr)
             asgi.run(config)
             return
-        with make_server(config) as httpd:
-            port = httpd.server_address[1]
+        with make_server(config, target_locks=target_locks) as httpd:
+            port = int(httpd.server_address[1])
+            h3_handle = None
+            if config.http3:
+                import dataclasses
+
+                from servery import http3
+
+                h3_config = dataclasses.replace(
+                    config,
+                    port=port,
+                    http3_port=config.http3_port if config.http3_port is not None else port,
+                )
+                h3_handle = http3.start_http3(h3_config, compression_cache=httpd.compression_cache)
+                httpd.http3_port = h3_handle.port
             if not config.quiet:
                 print(
                     f"servery: serving {config.directory} at {server_url(httpd)}", file=sys.stderr
                 )
+                if h3_handle is not None:
+                    print(
+                        f"servery: HTTP/3 available on UDP {h3_handle.port} "
+                        "(advertised via Alt-Svc)",
+                        file=sys.stderr,
+                    )
                 for warning in config.startup_warnings():
                     print(f"servery: WARNING {warning}", file=sys.stderr)
                 if config.qr:
@@ -329,6 +442,8 @@ def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (C
             finally:
                 if responder is not None:
                     responder.stop()
+                if h3_handle is not None:
+                    h3_handle.close()
     finally:
         if tftp_server is not None:
             tftp_server.stop()

@@ -26,10 +26,67 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import os
+import threading
+import time
 from typing import Protocol
 
 _CHUNK = 64 * 1024
 PART_SUFFIX = ".servery-part"
+
+
+class PartialUploadBudget:
+    """Bound the resumable sidecars owned by one server process.
+
+    Discovery is intentionally lazy: recursively walking a large served tree at
+    startup would penalize every invocation, including the common read-only case.
+    The first ranged write inventories existing sidecars, then normal create,
+    commit, and discard operations keep the set current.
+    """
+
+    def __init__(self, root: str | os.PathLike[str], max_files: int) -> None:
+        self._root = os.path.realpath(root)
+        self._max_files = max_files
+        self._guard = threading.Lock()
+        self._known: set[str] | None = None
+
+    def _discover(self) -> set[str]:
+        found: set[str] = set()
+        for directory, _dirs, files in os.walk(self._root):
+            found.update(
+                os.path.realpath(os.path.join(directory, name))
+                for name in files
+                if name.startswith(".") and name.endswith(PART_SUFFIX)
+            )
+        return found
+
+    def claim(self, part: str) -> bool:
+        """Reserve ``part``; return false when the configured cap is exhausted."""
+        if self._max_files == 0:
+            return True
+        canonical = os.path.realpath(part)
+        with self._guard:
+            if self._known is None:
+                self._known = self._discover()
+            if canonical in self._known:
+                return True
+            if len(self._known) >= self._max_files:
+                # External cleanup must not leave a process permanently at its cap.
+                self._known.intersection_update(
+                    path for path in self._known if os.path.isfile(path)
+                )
+            if len(self._known) >= self._max_files:
+                return False
+            self._known.add(canonical)
+            return True
+
+    def release(self, part: str) -> None:
+        """Release a committed or discarded sidecar reservation."""
+        if self._max_files == 0:
+            return
+        canonical = os.path.realpath(part)
+        with self._guard:
+            if self._known is not None:
+                self._known.discard(canonical)
 
 
 class ResumableError(Exception):
@@ -119,6 +176,20 @@ def stored_bytes(part: str) -> int:
         return 0
 
 
+def discard_stale(part: str, ttl: float, *, now: float | None = None) -> bool:
+    """Discard a partial upload older than ``ttl``; return whether one was removed."""
+    if ttl <= 0:
+        return False
+    try:
+        mtime = os.path.getmtime(part)
+    except OSError:
+        return False
+    if (time.time() if now is None else now) - mtime <= ttl:
+        return False
+    discard(part)
+    return True
+
+
 def append(part: str, reader: _Reader, length: int) -> int:
     """Append exactly ``length`` bytes (or until EOF) from ``reader`` to ``part``."""
     written = 0
@@ -137,6 +208,9 @@ def write_whole(target: str, reader: _Reader, length: int) -> int:
     part = part_path(target)
     discard(part)
     written = append(part, reader, length)
+    if written != length:
+        discard(part)
+        raise OSError("upload ended before the declared Content-Length")
     os.replace(part, target)
     return written
 

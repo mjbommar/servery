@@ -1,6 +1,7 @@
 # Design: on-the-fly gzip content-coding
 
-Status: implemented. Scope: HTTP/1.1 handler (then HTTP/2). Zero-dep (stdlib `gzip`/`zlib`).
+Status: implemented across HTTP/1.1, HTTP/2, and HTTP/3. Zero-dep (stdlib
+`gzip`/`zlib`).
 
 ## Goal
 Transparently compress text-like responses when the client accepts gzip, for a
@@ -43,9 +44,10 @@ non-compressible content.
     `+xml`, and an explicit set (`application/json`, `application/javascript`,
     `image/svg+xml`, wasm, fonts ttf/otf, …). Already-compressed media (jpeg/png/
     mp4/zip/woff2/…) are never matched.
-  - `GZIP_MIN = 1024` (gzip framing ~18 B; tiny bodies don't benefit), `GZIP_MAX =
-    10 MiB` (above the cap we serve identity + sendfile — huge files are usually
-    media anyway, and this bounds per-request memory). `gzip_bytes(data)` →
+  - `GZIP_MIN = 1024` (gzip framing ~18 B; tiny bodies don't benefit) and
+    configurable `max_compress_size` (10 MiB default; above it serve identity).
+    HTTP/2/3 also require the file to fit `max_buffered_response`, keeping their
+    large response path streaming. `gzip_bytes(data)` →
     `gzip.compress(data, compresslevel=6, mtime=0)` (mtime=0 = deterministic output).
 - `handler.py`:
   - A `_vary_accept_encoding` instance flag (like `_generated_page`), reset in
@@ -58,10 +60,13 @@ non-compressible content.
     `Accept-Ranges`; return a `BytesIO` (sent through the existing in-memory body
     path). Else the existing identity/range path, now flagged for `Vary`.
   - `list_directory`: gzip the rendered HTML when accepted; always `Vary`.
-- HTTP/2 `_build_response` gets the same treatment in a second pass (it already
-  buffers the body, so it's a small addition; streams via DATA frames).
+- The shared response builder returns buffered bytes below the configured threshold
+  and a streamed `FileBody` above it. A byte-bounded optional compression cache is
+  keyed by canonical path, mtime, size, coding, and compression level. Concurrent
+  cache misses are serialized to avoid multiplying CPU and memory.
 
 ## Out of scope (now)
-- Streaming gzip for files > `GZIP_MAX` (kept identity + sendfile).
+- Streaming dynamic gzip for files above `max_compress_size` (kept identity and
+  streamed/sendfile instead).
 - Precomputed `.gz` sidecar serving (`gzip_static` model) with ranged gzip.
 - brotli / deflate.

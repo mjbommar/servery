@@ -10,6 +10,9 @@
 > tier via the `servery[http3]` aioquic extra (`--http3`). Read the milestones as
 > the delivered build sequence, not as pending work. The tiered transport model is
 > recorded in `docs/TRANSPORTS.md`.
+> Reliability/resource policy added in 1.5 is documented in
+> `docs/design/reliability-performance-priorities.md`; the historical v0.9 text
+> below intentionally describes the earlier optional-worker design.
 
 This roadmap is governed by `PRINCIPLES.md` (Principle 0 above all: **zero
 third-party dependencies in the core, pure Python stdlib, forever** — the opt-in

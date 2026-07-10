@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import ssl
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
 from servery import _log, _response, auth
 from servery.http2 import frames, hpack
@@ -26,12 +26,44 @@ from servery.http2.frames import ErrorCode, Flag, FrameType
 if TYPE_CHECKING:
     from servery.handler import ServeryHandler
 
-_MAX_CONCURRENT_STREAMS = 100
 _MAX_HEADER_BLOCK = 64 * 1024
+_MAX_HEADER_LIST = 64 * 1024
 _MAX_RST_STREAMS = 200
+_MAX_CONTINUATION_FRAMES = 128
+_MAX_CONTROL_FRAMES = 1000
 _OUR_MAX_FRAME = 16384
 
 _HeaderList = list[tuple[bytes, bytes]]
+
+
+class _Outbound:
+    """One bounded-memory response body scheduled across flow-control windows."""
+
+    def __init__(self, stream_id: int, body: _response.ResponseBody) -> None:
+        self.stream_id = stream_id
+        self.body = body
+        self.offset = 0
+        self.handle: BinaryIO | None = None
+        self.total = len(body) if isinstance(body, bytes) else body.size
+
+    @property
+    def remaining(self) -> int:
+        return self.total - self.offset
+
+    def read(self, size: int) -> bytes:
+        if isinstance(self.body, bytes):
+            chunk = self.body[self.offset : self.offset + size]
+        else:
+            if self.handle is None:
+                self.handle = open(self.body.path, "rb")  # noqa: SIM115 - closed by close()
+            chunk = self.handle.read(size)
+        self.offset += len(chunk)
+        return chunk
+
+    def close(self) -> None:
+        if self.handle is not None:
+            self.handle.close()
+            self.handle = None
 
 
 class H2Connection:
@@ -42,16 +74,24 @@ class H2Connection:
         self.rfile = handler.rfile
         self.sock = handler.connection
         self.config = handler._server.config
-        self.decoder = hpack.Decoder()
+        self.decoder = hpack.Decoder(max_header_list_size=_MAX_HEADER_LIST)
         self.encoder = hpack.Encoder()
         self.reader = frames.FrameReader(max_frame_size=_OUR_MAX_FRAME)
         self.blocks: dict[int, bytearray] = {}
+        self._header_end_stream: dict[int, bool] = {}
+        self._pending_headers: dict[int, _HeaderList] = {}
+        self._continuation_stream: int | None = None
+        self._continuation_frames = 0
+        self.active_streams: set[int] = set()
+        self.last_client_stream_id = 0
+        self.outbound: dict[int, _Outbound] = {}
         self.peer_window = (
             frames.SETTINGS_DEFAULTS[frames.SettingsParameter.INITIAL_WINDOW_SIZE] or 0
         )
         self.conn_window = 65535  # connection-level window default (RFC 9113 §6.9.2)
         self.stream_windows: dict[int, int] = {}
         self.rst_count = 0
+        self.control_count = 0
         self.running = True
 
     def _stream_window(self, stream_id: int) -> int:
@@ -75,9 +115,13 @@ class H2Connection:
                     self._handle_frame(frame)
                     if not self.running:
                         break
+                self._flush_outbound()
         except (OSError, frames.FrameError, hpack.HpackError) as exc:
             _log.logger.debug("HTTP/2 connection error: %r", exc)
             self._goaway(ErrorCode.PROTOCOL_ERROR)
+        finally:
+            for response in self.outbound.values():
+                response.close()
 
     def _read_exact(self, count: int) -> bytes:
         chunks: list[bytes] = []
@@ -92,8 +136,9 @@ class H2Connection:
 
     def _send_settings(self) -> None:
         settings = (
-            (frames.SettingsParameter.MAX_CONCURRENT_STREAMS, _MAX_CONCURRENT_STREAMS),
+            (frames.SettingsParameter.MAX_CONCURRENT_STREAMS, self.config.max_h2_streams),
             (frames.SettingsParameter.MAX_FRAME_SIZE, _OUR_MAX_FRAME),
+            (frames.SettingsParameter.MAX_HEADER_LIST_SIZE, _MAX_HEADER_LIST),
             (frames.SettingsParameter.ENABLE_PUSH, 0),
         )
         self.sock.sendall(frames.serialize(frames.SettingsFrame(0, Flag(0), settings)))
@@ -101,33 +146,60 @@ class H2Connection:
     # -- frame dispatch ---------------------------------------------------
 
     def _handle_frame(self, frame: frames.Frame) -> None:
+        if self._continuation_stream is not None and not (
+            isinstance(frame, frames.ContinuationFrame)
+            and frame.stream_id == self._continuation_stream
+        ):
+            self._goaway(ErrorCode.PROTOCOL_ERROR)
+            return
         if isinstance(frame, frames.SettingsFrame):
+            if not self._control_allowed():
+                return
             self._handle_settings(frame)
         elif isinstance(frame, (frames.HeadersFrame, frames.ContinuationFrame)):
             self._handle_header_block(frame)
         elif isinstance(frame, frames.WindowUpdateFrame):
             if frame.stream_id == 0:
-                self.conn_window += frame.window_size_increment
+                updated = self.conn_window + frame.window_size_increment
+                if updated > 0x7FFFFFFF:
+                    self._goaway(ErrorCode.FLOW_CONTROL_ERROR)
+                    return
+                self.conn_window = updated
             else:
-                self.stream_windows[frame.stream_id] = (
-                    self._stream_window(frame.stream_id) + frame.window_size_increment
-                )
+                if frame.stream_id not in self.active_streams:
+                    if frame.stream_id > self.last_client_stream_id:
+                        self._goaway(ErrorCode.PROTOCOL_ERROR)
+                    return  # WINDOW_UPDATE on a closed stream may be ignored
+                updated = self._stream_window(frame.stream_id) + frame.window_size_increment
+                if updated > 0x7FFFFFFF:
+                    self._goaway(ErrorCode.FLOW_CONTROL_ERROR)
+                    return
+                self.stream_windows[frame.stream_id] = updated
         elif isinstance(frame, frames.PingFrame):
+            if not self._control_allowed():
+                return
             if not frame.ack:
                 self.sock.sendall(frames.serialize(frames.ping_ack(frame.opaque_data)))
         elif isinstance(frame, frames.RstStreamFrame):
+            if frame.stream_id > self.last_client_stream_id:
+                self._goaway(ErrorCode.PROTOCOL_ERROR)
+                return
             self.rst_count += 1
-            self.blocks.pop(frame.stream_id, None)
-            self.stream_windows.pop(frame.stream_id, None)
+            self._drop_stream(frame.stream_id)
             if self.rst_count > _MAX_RST_STREAMS:
                 self._goaway(ErrorCode.ENHANCE_YOUR_CALM)
         elif isinstance(frame, frames.GoAwayFrame):
             self.running = False
-        elif isinstance(frame, frames.DataFrame) and frame.data and frame.stream_id:
-            # No request bodies on the GET/HEAD path: just keep the window open.
-            self.sock.sendall(
-                frames.serialize(frames.WindowUpdateFrame(0, Flag(0), len(frame.data)))
-            )
+        elif isinstance(frame, frames.DataFrame) and frame.stream_id:
+            self._handle_data(frame)
+
+    def _control_allowed(self) -> bool:
+        """Budget acknowledgement-triggering control frames on this connection."""
+        self.control_count += 1
+        if self.control_count > _MAX_CONTROL_FRAMES:
+            self._goaway(ErrorCode.ENHANCE_YOUR_CALM)
+            return False
+        return True
 
     def _handle_settings(self, frame: frames.SettingsFrame) -> None:
         if frame.ack:
@@ -137,30 +209,74 @@ class H2Connection:
                 if value > 0x7FFFFFFF:  # exceeds the flow-control max (RFC 9113 §6.5.2)
                     self._goaway(ErrorCode.FLOW_CONTROL_ERROR)
                     return
+                delta = value - self.peer_window
+                for stream_id, window in tuple(self.stream_windows.items()):
+                    updated = window + delta
+                    if not -(2**31) <= updated <= 0x7FFFFFFF:
+                        self._goaway(ErrorCode.FLOW_CONTROL_ERROR)
+                        return
+                    self.stream_windows[stream_id] = updated
                 self.peer_window = value
         self.sock.sendall(frames.serialize(frames.settings_ack()))
 
     def _handle_header_block(self, frame: frames.HeadersFrame | frames.ContinuationFrame) -> None:
         stream_id = frame.stream_id
+        if isinstance(frame, frames.ContinuationFrame):
+            self._continuation_frames += 1
+            if self._continuation_frames > _MAX_CONTINUATION_FRAMES:
+                self._goaway(ErrorCode.ENHANCE_YOUR_CALM)
+                return
         block = self.blocks.get(stream_id)
         if block is None:
             if isinstance(frame, frames.ContinuationFrame):
                 # CONTINUATION must immediately follow HEADERS (RFC 9113 §6.10).
                 self._goaway(ErrorCode.PROTOCOL_ERROR)
                 return
-            if len(self.blocks) >= _MAX_CONCURRENT_STREAMS:
+            if stream_id % 2 == 0 or stream_id <= self.last_client_stream_id:
+                self._goaway(ErrorCode.PROTOCOL_ERROR)
+                return
+            self.last_client_stream_id = stream_id
+            if len(self.active_streams) >= self.config.max_h2_streams:
                 self._reset(stream_id, ErrorCode.REFUSED_STREAM)
                 return
+            self.active_streams.add(stream_id)
             block = bytearray()
             self.blocks[stream_id] = block
+            self._header_end_stream[stream_id] = frame.end_stream
+            if not frame.end_headers:
+                self._continuation_stream = stream_id
+                self._continuation_frames = 0
         block += frame.header_block
         if len(block) > _MAX_HEADER_BLOCK:
             self._goaway(ErrorCode.ENHANCE_YOUR_CALM)
             return
         if frame.end_headers:
+            self._continuation_stream = None
+            self._continuation_frames = 0
             self.blocks.pop(stream_id, None)
             headers = self.decoder.decode(bytes(block))
-            self._dispatch(stream_id, headers)
+            if self._header_end_stream.pop(stream_id, False):
+                self._dispatch(stream_id, headers)
+            else:
+                self._pending_headers[stream_id] = headers
+
+    def _handle_data(self, frame: frames.DataFrame) -> None:
+        if frame.stream_id not in self.active_streams:
+            if frame.stream_id > self.last_client_stream_id:
+                self._goaway(ErrorCode.PROTOCOL_ERROR)
+            else:
+                self._reset(frame.stream_id, ErrorCode.STREAM_CLOSED)
+            return
+        if frame.data:
+            increment = len(frame.data)
+            self.sock.sendall(frames.serialize(frames.WindowUpdateFrame(0, Flag(0), increment)))
+            self.sock.sendall(
+                frames.serialize(frames.WindowUpdateFrame(frame.stream_id, Flag(0), increment))
+            )
+        if frame.end_stream:
+            headers = self._pending_headers.pop(frame.stream_id, None)
+            if headers is not None:
+                self._dispatch(frame.stream_id, headers)
 
     # -- request handling -------------------------------------------------
 
@@ -198,7 +314,7 @@ class H2Connection:
 
     def _build_response(
         self, url_path: str, accept_encoding: str, regular: dict[bytes, bytes]
-    ) -> tuple[int, _HeaderList, bytes]:
+    ) -> tuple[int, _HeaderList, _response.ResponseBody]:
         # translate_path() already ran the symlink-safe containment check and
         # returned "" for anything escaping the root (build_static maps that to a
         # 404) — re-checking would do a second realpath() on every file request.
@@ -216,73 +332,87 @@ class H2Connection:
             tls=tls,
             if_none_match=inm.decode("latin-1") if inm is not None else None,
             if_modified_since=ims.decode("latin-1") if ims is not None else None,
+            compression_cache=self.handler._server.compression_cache,
         )
 
     # -- response writing -------------------------------------------------
 
     def _respond(
-        self, stream_id: int, status: int, headers: _HeaderList, body: bytes | None
+        self,
+        stream_id: int,
+        status: int,
+        headers: _HeaderList,
+        body: _response.ResponseBody | None,
     ) -> None:
         block = self.encoder.encode([(b":status", str(status).encode("ascii")), *headers])
-        end_stream = not body
+        body_size = 0 if body is None else (len(body) if isinstance(body, bytes) else body.size)
+        end_stream = body_size == 0
         flags = Flag.END_HEADERS | (Flag.END_STREAM if end_stream else Flag(0))
         self.sock.sendall(
             frames.build_header9(len(block), FrameType.HEADERS, flags, stream_id) + block
         )
-        if body:
-            self._write_data(stream_id, body)
+        if end_stream:
+            self._complete_stream(stream_id)
+        elif body is not None:
+            self.stream_windows.setdefault(stream_id, self.peer_window)
+            self.outbound[stream_id] = _Outbound(stream_id, body)
+
+    def _flush_outbound(self) -> None:
+        """Send ready DATA fairly, at most one frame per stream per pass."""
+        made_progress = True
+        while made_progress and self.conn_window > 0:
+            made_progress = False
+            for stream_id, response in tuple(self.outbound.items()):
+                budget = min(
+                    _OUR_MAX_FRAME,
+                    response.remaining,
+                    max(self._stream_window(stream_id), 0),
+                    max(self.conn_window, 0),
+                )
+                if budget <= 0:
+                    continue
+                try:
+                    chunk = response.read(budget)
+                except OSError:
+                    self._reset(stream_id, ErrorCode.INTERNAL_ERROR)
+                    continue
+                if not chunk:
+                    self._reset(stream_id, ErrorCode.INTERNAL_ERROR)
+                    continue
+                last = response.remaining == 0
+                flags = Flag.END_STREAM if last else Flag(0)
+                self.sock.sendall(
+                    frames.build_header9(len(chunk), FrameType.DATA, flags, stream_id) + chunk
+                )
+                self.stream_windows[stream_id] -= len(chunk)
+                self.conn_window -= len(chunk)
+                made_progress = True
+                if last:
+                    self._complete_stream(stream_id)
+
+    def _complete_stream(self, stream_id: int) -> None:
+        response = self.outbound.pop(stream_id, None)
+        if response is not None:
+            response.close()
+        self.active_streams.discard(stream_id)
         self.stream_windows.pop(stream_id, None)
+        self._pending_headers.pop(stream_id, None)
 
-    def _write_data(self, stream_id: int, body: bytes) -> None:
-        offset = 0
-        total = len(body)
-        self.stream_windows.setdefault(stream_id, self.peer_window)
-        while offset < total:
-            budget = min(
-                _OUR_MAX_FRAME,
-                total - offset,
-                max(self._stream_window(stream_id), 0),
-                max(self.conn_window, 0),
-            )
-            if budget <= 0:
-                if not self._pump_for_window(stream_id):
-                    return  # peer never opened the window (socket timeout/stall budget hit)
-                continue
-            chunk = body[offset : offset + budget]
-            last = offset + budget >= total
-            flags = Flag.END_STREAM if last else Flag(0)
-            self.sock.sendall(
-                frames.build_header9(len(chunk), FrameType.DATA, flags, stream_id) + chunk
-            )
-            offset += budget
-            self.stream_windows[stream_id] -= budget
-            self.conn_window -= budget
-
-    def _pump_for_window(self, stream_id: int) -> bool:
-        """Blocked on flow control: read frames until this stream's window opens.
-
-        Honors both stream- and connection-level WINDOW_UPDATE. Bounded so a peer
-        that dribbles non-opening frames cannot pin the worker forever (the socket
-        timeout also applies to each read).
-        """
-        for _ in range(1000):
-            data = self.rfile.read1(65536)
-            if not data:
-                return False
-            self.reader.feed(data)
-            for frame in self.reader:
-                self._handle_frame(frame)
-                if not self.running:
-                    return False
-            if self._stream_window(stream_id) > 0 and self.conn_window > 0:
-                return True
-        return False
+    def _drop_stream(self, stream_id: int) -> None:
+        self.blocks.pop(stream_id, None)
+        self._header_end_stream.pop(stream_id, None)
+        self._complete_stream(stream_id)
 
     def _reset(self, stream_id: int, error: int) -> None:
         self.sock.sendall(frames.serialize(frames.RstStreamFrame(stream_id, Flag(0), error)))
+        self._drop_stream(stream_id)
 
     def _goaway(self, error: int) -> None:
         _log.logger.debug("HTTP/2 GOAWAY error=%s", error)
         with contextlib.suppress(OSError):
-            self.sock.sendall(frames.serialize(frames.GoAwayFrame(0, Flag(0), 0, error, b"")))
+            self.sock.sendall(
+                frames.serialize(
+                    frames.GoAwayFrame(0, Flag(0), self.last_client_stream_id, error, b"")
+                )
+            )
         self.running = False

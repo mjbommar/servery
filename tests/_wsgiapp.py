@@ -41,6 +41,14 @@ def plain_list(environ: dict[str, Any], start_response: Any) -> list[bytes]:
     return [b"materialized ", environ["REQUEST_METHOD"].encode()]
 
 
+def ignores_body(environ: dict[str, Any], start_response: Any) -> list[bytes]:
+    payload = b"ignored"
+    start_response(
+        "200 OK", [("Content-Type", "text/plain"), ("Content-Length", str(len(payload)))]
+    )
+    return [payload]
+
+
 # Validator-wrapped: each request checks compliance on both sides. (The wrapper
 # returns a non-list iterable, so these exercise the streaming/chunked path.)
 application = validator(_echo)

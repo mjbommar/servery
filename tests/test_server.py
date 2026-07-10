@@ -6,6 +6,7 @@ import http.client
 import io
 import logging
 import os
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -590,6 +591,51 @@ class FeatureFlagTest(unittest.TestCase):
                 resp, body = self._get(host, port, "/f.txt")
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(body, b"data")
+
+
+class ConnectionBudgetTest(unittest.TestCase):
+    def test_saturation_rejects_without_queueing_and_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "f.txt").write_text("ok")
+            cfg = Config.create(
+                tmp,
+                host="127.0.0.1",
+                port=0,
+                quiet=True,
+                max_connections=1,
+                timeout=2,
+            )
+            with _running(cfg) as (host, port):
+                held = socket.create_connection((host, port), timeout=5)
+                held.sendall(b"GET /f.txt HTTP/1.1\r\n")
+                time.sleep(0.1)
+                rejected = socket.create_connection((host, port), timeout=5)
+                try:
+                    rejected.sendall(b"GET /f.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    rejected.settimeout(2)
+                    try:
+                        data = rejected.recv(4096)
+                    except ConnectionResetError:
+                        data = b""
+                    self.assertEqual(data, b"")
+                finally:
+                    rejected.close()
+                    held.close()
+
+                deadline = time.monotonic() + 3
+                status = None
+                while time.monotonic() < deadline and status != 200:
+                    conn = http.client.HTTPConnection(host, port, timeout=2)
+                    try:
+                        conn.request("GET", "/f.txt", headers={"Connection": "close"})
+                        response = conn.getresponse()
+                        response.read()
+                        status = response.status
+                    except OSError:
+                        time.sleep(0.05)
+                    finally:
+                        conn.close()
+                self.assertEqual(status, 200)
 
 
 class TlsServerTest(unittest.TestCase):

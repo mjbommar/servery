@@ -5,6 +5,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 import servery
 from servery import cli
@@ -94,11 +95,80 @@ class CliParserTest(unittest.TestCase):
         _log._stderr_handler = None
 
     def test_hardening_flags(self):
-        args = cli.build_parser().parse_args(["--timeout", "10", "--max-workers", "4", "--http2"])
+        args = cli.build_parser().parse_args(
+            [
+                "--timeout",
+                "10",
+                "--max-workers",
+                "4",
+                "--max-connections",
+                "8",
+                "--http2",
+                "--max-h2-streams",
+                "12",
+                "--max-request-body",
+                "1000",
+                "--keepalive-drain-limit",
+                "100",
+                "--write-lock-timeout",
+                "0.5",
+                "--partial-upload-ttl",
+                "60",
+                "--max-partial-uploads",
+                "7",
+                "--max-compress-size",
+                "2000",
+                "--compression-cache-size",
+                "3000",
+                "--max-buffered-response",
+                "4000",
+                "--max-listing-entries",
+                "50",
+                "--listing-page-size",
+                "10",
+                "--listing-details-threshold",
+                "20",
+                "--max-propfind-entries",
+                "30",
+                "--max-tftp-transfers",
+                "2",
+            ]
+        )
         config = cli.config_from_args(args)
         self.assertEqual(config.timeout, 10.0)
         self.assertEqual(config.max_workers, 4)
+        self.assertEqual(config.max_connections, 8)
         self.assertTrue(config.http2)
+        self.assertEqual(config.max_h2_streams, 12)
+        self.assertEqual(config.max_request_body, 1000)
+        self.assertEqual(config.keepalive_drain_limit, 100)
+        self.assertEqual(config.write_lock_timeout, 0.5)
+        self.assertEqual(config.partial_upload_ttl, 60)
+        self.assertEqual(config.max_partial_uploads, 7)
+        self.assertEqual(config.max_compress_size, 2000)
+        self.assertEqual(config.compression_cache_size, 3000)
+        self.assertEqual(config.max_buffered_response, 4000)
+        self.assertEqual(config.max_listing_entries, 50)
+        self.assertEqual(config.listing_page_size, 10)
+        self.assertEqual(config.listing_details_threshold, 20)
+        self.assertEqual(config.max_propfind_entries, 30)
+        self.assertEqual(config.max_tftp_transfers, 2)
+
+    def test_http3_transport_flags(self):
+        config = cli.config_from_args(
+            cli.build_parser().parse_args(
+                [
+                    "--http3",
+                    "--http3-only",
+                    "--http3-port",
+                    "9443",
+                    "--tls-self-signed",
+                ]
+            )
+        )
+        self.assertTrue(config.http3)
+        self.assertTrue(config.http3_only)
+        self.assertEqual(config.http3_port, 9443)
 
     def test_startup_warnings(self):
         unsafe = servery.Config.create(".", host="0.0.0.0", auth="u:p")
@@ -147,6 +217,54 @@ class ConfigValidationTest(unittest.TestCase):
             Config.create(".", tftp_port=70000)
         with self.assertRaises(ValueError):
             Config.create(".", tftp_write=True)  # requires tftp
+
+        bad_numeric: tuple[dict[str, Any], ...] = (
+            {"max_request_body": 0},
+            {"keepalive_drain_limit": -1},
+            {"write_lock_timeout": -1},
+            {"partial_upload_ttl": -1},
+            {"max_partial_uploads": -1},
+            {"max_workers": 0},
+            {"max_connections": 0},
+            {"max_h2_streams": 0},
+            {"max_tftp_transfers": 0},
+            {"max_propfind_entries": 0},
+            {"max_compress_size": -1},
+            {"compression_cache_size": -1},
+            {"max_buffered_response": -1},
+            {"max_listing_entries": 0},
+            {"listing_page_size": 0},
+            {"listing_details_threshold": 0},
+            {"http3_port": 70000},
+        )
+        for values in bad_numeric:
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Config.create(".", **values)
+        with self.assertRaises(ValueError):
+            Config.create(".", dav_lock_mode="fake")
+        self.assertEqual(Config.create(".", max_listing_entries=5).max_listing_entries, 5)
+
+    def test_http3_combinations_are_explicit(self):
+        from servery.config import Config
+
+        with self.assertRaises(ValueError):
+            Config.create(".", http3=True)
+        with self.assertRaises(ValueError):
+            Config.create(".", http3_only=True)
+        with self.assertRaises(ValueError):
+            Config.create(".", http3=True, tls_self_signed=True, wsgi_app="m:a")
+        with self.assertRaises(ValueError):
+            Config.create(".", http3=True, tls_self_signed=True, proxy=["/=http://x"])
+        config = Config.create(
+            ".",
+            http3=True,
+            http3_only=True,
+            http3_port=0,
+            tls_self_signed=True,
+            tftp=True,
+        )
+        self.assertTrue(config.http3_only)
+        self.assertEqual(config.http3_port, 0)
 
     def test_accepts_ephemeral_port_zero(self):
         from servery.config import Config

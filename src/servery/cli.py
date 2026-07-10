@@ -10,6 +10,7 @@ from pathlib import Path
 
 from servery._version import __version__
 from servery.config import Config
+from servery.http3 import Http3UnavailableError
 from servery.server import serve
 
 # Launch presets: a profile sets defaults (keyed by argparse dest); any flag the
@@ -30,6 +31,7 @@ PROFILES: dict[str, dict[str, object]] = {
         "cache_max_age": 31536000,
         "cors": True,
         "http2": True,
+        "compression_cache_size": 32 * 1024 * 1024,
     },
     "dev": {"host": "127.0.0.1", "spa": True, "cors": True},
     "app": {"host": _ALL, "tls_self_signed": True, "max_workers": os.cpu_count() or 4},
@@ -112,9 +114,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum accepted upload size in bytes (default: 100 MiB)",
     )
     parser.add_argument(
+        "--max-request-body",
+        type=int,
+        default=100 * 1024 * 1024,
+        metavar="BYTES",
+        help="maximum request body for apps/proxy/WebDAV (default: 100 MiB)",
+    )
+    parser.add_argument(
+        "--keepalive-drain-limit",
+        type=int,
+        default=64 * 1024,
+        metavar="BYTES",
+        help="drain at most BYTES of unused accepted body before closing (default: 64 KiB)",
+    )
+    parser.add_argument(
         "--allow-overwrite",
         action="store_true",
         help="allow uploads to overwrite existing files",
+    )
+    parser.add_argument(
+        "--write-lock-timeout",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="wait for another write to the same target (default: 0, reject immediately)",
+    )
+    parser.add_argument(
+        "--partial-upload-ttl",
+        type=float,
+        default=24 * 60 * 60,
+        metavar="SECONDS",
+        help="discard stale resumable-upload sidecars after this age (default: 86400; 0 disables)",
+    )
+    parser.add_argument(
+        "--max-partial-uploads",
+        type=int,
+        default=128,
+        metavar="COUNT",
+        help="maximum outstanding resumable sidecars (default: 128; 0 disables)",
     )
     parser.add_argument(
         "--upload-extract",
@@ -153,6 +190,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable on-the-fly gzip of text-like responses",
     )
     parser.add_argument(
+        "--max-compress-size",
+        type=int,
+        default=10 * 1024 * 1024,
+        metavar="BYTES",
+        help="largest static file compressed in memory "
+        "(default: 10 MiB; 0 disables file compression)",
+    )
+    parser.add_argument(
+        "--compression-cache-size",
+        type=int,
+        default=0,
+        metavar="BYTES",
+        help="byte budget for cached compressed static responses (default: 0, disabled)",
+    )
+    parser.add_argument(
+        "--max-buffered-response",
+        type=int,
+        default=1024 * 1024,
+        metavar="BYTES",
+        help="largest h2/h3 file buffered as one response (default: 1 MiB; 0 streams all files)",
+    )
+    parser.add_argument(
+        "--max-listing-entries",
+        type=int,
+        default=100_000,
+        metavar="N",
+        help="maximum entries considered by a directory listing (default: 100000)",
+    )
+    parser.add_argument(
+        "--listing-page-size",
+        type=int,
+        default=1000,
+        metavar="N",
+        help="directory-listing rows per page (default: 1000)",
+    )
+    parser.add_argument(
+        "--listing-details-threshold",
+        type=int,
+        default=10_000,
+        metavar="N",
+        help="omit expensive listing metadata beyond N entries (default: 10000)",
+    )
+    parser.add_argument(
         "--dav",
         action="store_true",
         help="enable WebDAV so the share can be mounted as a network drive (read-only)",
@@ -161,6 +241,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--dav-write",
         action="store_true",
         help="allow WebDAV writes (PUT/DELETE/MKCOL/MOVE/COPY); requires --dav (use with --auth)",
+    )
+    parser.add_argument(
+        "--dav-lock-mode",
+        choices=("class1", "compat", "enforced"),
+        default="enforced",
+        help="WebDAV locking: class1 (none), compat (fake token), or enforced (default)",
+    )
+    parser.add_argument(
+        "--max-propfind-entries",
+        type=int,
+        default=10_000,
+        metavar="N",
+        help="maximum children returned by WebDAV PROPFIND Depth:1 (default: 10000)",
     )
     parser.add_argument(
         "--qr",
@@ -184,14 +277,28 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         metavar="N",
-        help="bound concurrency to N worker threads (default: unbounded, thread-per-connection); "
+        help="bound blocking work to N worker threads (default: thread-per-connection); "
         "set N near the CPU core count under high concurrency to avoid thread thrash "
         "(sharply lower tail latency)",
+    )
+    parser.add_argument(
+        "--max-connections",
+        type=int,
+        default=256,
+        metavar="N",
+        help="maximum simultaneous HTTP connections/sessions (default: 256)",
     )
     parser.add_argument(
         "--http2",
         action="store_true",
         help="enable HTTP/2 (ALPN 'h2' over TLS, and h2c prior-knowledge cleartext)",
+    )
+    parser.add_argument(
+        "--max-h2-streams",
+        type=int,
+        default=100,
+        metavar="N",
+        help="maximum active streams per HTTP/2 connection (default: 100)",
     )
     parser.add_argument(
         "--wsgi",
@@ -218,7 +325,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--http3",
         action="store_true",
-        help="serve HTTP/3 over QUIC (requires TLS and the 'servery[http3]' extra)",
+        help="serve HTTP/3 alongside TCP (requires TLS and the 'servery[http3]' extra)",
+    )
+    parser.add_argument(
+        "--http3-only",
+        action="store_true",
+        help="serve only HTTP/3/QUIC, without the normal TCP fallback; requires --http3",
+    )
+    parser.add_argument(
+        "--http3-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="UDP port for HTTP/3 (default: the TCP --port)",
     )
     parser.add_argument(
         "--tftp",
@@ -237,6 +356,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--tftp-write",
         action="store_true",
         help="allow anonymous TFTP uploads (WRQ); requires --tftp (use on trusted LANs only)",
+    )
+    parser.add_argument(
+        "--max-tftp-transfers",
+        type=int,
+        default=32,
+        metavar="N",
+        help="maximum simultaneous TFTP transfers (default: 32)",
     )
     parser.add_argument(
         "--tls-cert",
@@ -331,12 +457,25 @@ def config_from_args(args: argparse.Namespace) -> Config:
         auth=args.auth,
         upload=args.upload,
         max_upload_size=args.max_upload_size,
+        max_request_body=args.max_request_body,
+        keepalive_drain_limit=args.keepalive_drain_limit,
         allow_overwrite=args.allow_overwrite,
+        write_lock_timeout=args.write_lock_timeout,
+        partial_upload_ttl=args.partial_upload_ttl,
+        max_partial_uploads=args.max_partial_uploads,
         upload_extract=args.upload_extract,
         cors=args.cors,
         compress=args.compress,
+        max_compress_size=args.max_compress_size,
+        compression_cache_size=args.compression_cache_size,
+        max_buffered_response=args.max_buffered_response,
+        max_listing_entries=args.max_listing_entries,
+        listing_page_size=args.listing_page_size,
+        listing_details_threshold=args.listing_details_threshold,
         dav=args.dav,
         dav_write=args.dav_write,
+        dav_lock_mode=args.dav_lock_mode,
+        max_propfind_entries=args.max_propfind_entries,
         qr=args.qr,
         discoverable=args.discoverable,
         acme=tuple(args.acme or ()),
@@ -349,7 +488,12 @@ def config_from_args(args: argparse.Namespace) -> Config:
         security_headers=args.security_headers,
         timeout=args.timeout,
         max_workers=args.max_workers,
+        max_connections=args.max_connections,
         http2=args.http2,
+        max_h2_streams=args.max_h2_streams,
+        http3=args.http3,
+        http3_only=args.http3_only,
+        http3_port=args.http3_port,
         wsgi_app=args.wsgi,
         cgi_dir=args.cgi,
         asgi_app=args.asgi,
@@ -357,6 +501,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         tftp=args.tftp,
         tftp_port=args.tftp_port,
         tftp_write=args.tftp_write,
+        max_tftp_transfers=args.max_tftp_transfers,
     )
 
 
@@ -368,20 +513,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     try:
         config = config_from_args(parse_args(argv))
-        if args.http3:
-            from servery.http3 import Http3UnavailableError, serve_http3
-
-            try:
-                serve_http3(config)  # pragma: no cover - blocking server loop
-            except Http3UnavailableError as exc:
-                print(f"servery: error: {exc}", file=sys.stderr)
-                return 2
-        else:
-            serve(config)  # pragma: no cover - blocking server loop
+        serve(config)  # pragma: no cover - blocking server loop
     except KeyboardInterrupt:  # pragma: no cover
         return 0
     except (ValueError, OSError) as exc:
         # Bad --auth spec, unreadable --tls-password-file, etc.: fail cleanly.
+        print(f"servery: error: {exc}", file=sys.stderr)
+        return 2
+    except Http3UnavailableError as exc:
         print(f"servery: error: {exc}", file=sys.stderr)
         return 2
     return 0

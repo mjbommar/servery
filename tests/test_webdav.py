@@ -6,7 +6,9 @@ import http.client
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from servery import _webdav
 from servery.config import Config
 from tests._harness import serving
 
@@ -15,6 +17,8 @@ class _DavCase(unittest.TestCase):
     dav = True
     dav_write = True
     allow_overwrite = False
+    dav_lock_mode = "enforced"
+    max_propfind_entries = 10_000
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -29,6 +33,8 @@ class _DavCase(unittest.TestCase):
             dav=self.dav,
             dav_write=self.dav_write,
             allow_overwrite=self.allow_overwrite,
+            dav_lock_mode=self.dav_lock_mode,
+            max_propfind_entries=self.max_propfind_entries,
         )
 
     def tearDown(self):
@@ -175,16 +181,22 @@ class DavMethodTest(_DavCase):
             conn.close()
 
     def test_lock_returns_token(self):
-        status, hdrs, body = self._req(
-            "LOCK",
-            "/hello.txt",
-            body=b'<D:lockinfo xmlns:D="DAV:"><D:lockscope>'
-            b"<D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>",
-        )
-        self.assertEqual(status, 200)
-        self.assertTrue(hdrs.get("Lock-Token", "").startswith("<opaquelocktoken:"))
-        self.assertIn(b"activelock", body)
-        self.assertEqual(self._req("UNLOCK", "/hello.txt")[0], 204)
+        with serving(self.cfg) as (host, port):
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            body = (
+                b'<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope>'
+                b"<D:locktype><D:write/></D:locktype></D:lockinfo>"
+            )
+            conn.request("LOCK", "/hello.txt", body=body)
+            response = conn.getresponse()
+            payload = response.read()
+            token = response.getheader("Lock-Token")
+            self.assertEqual(response.status, 200)
+            self.assertTrue((token or "").startswith("<opaquelocktoken:"))
+            self.assertIn(b"activelock", payload)
+            conn.request("UNLOCK", "/hello.txt", headers={"Lock-Token": token or ""})
+            self.assertEqual(conn.getresponse().status, 204)
+            conn.close()
 
 
 class DavSecurityTest(_DavCase):
@@ -208,6 +220,126 @@ class DavSecurityTest(_DavCase):
         self.assertEqual((self.root / "hello.txt").read_text(), "hi")
 
 
+class DavEnforcedLockTest(_DavCase):
+    allow_overwrite = True
+
+    @staticmethod
+    def _request(host, port, method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        try:
+            conn.request(method, path, body=body, headers=headers or {})
+            response = conn.getresponse()
+            payload = response.read()
+            return response.status, dict(response.getheaders()), payload
+        finally:
+            conn.close()
+
+    def test_depth_infinity_lock_blocks_descendant_write_without_token(self):
+        lock_body = (
+            b'<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope>'
+            b"<D:locktype><D:write/></D:locktype></D:lockinfo>"
+        )
+        with serving(self.cfg) as (host, port):
+            status, headers, _ = self._request(host, port, "LOCK", "/", lock_body)
+            self.assertEqual(status, 200)
+            token = headers["Lock-Token"]
+            self.assertEqual(self._request(host, port, "PUT", "/new.txt", b"no token")[0], 423)
+            self.assertEqual(
+                self._request(host, port, "PUT", "/new.txt", b"authorized", {"If": f"({token})"})[
+                    0
+                ],
+                201,
+            )
+        self.assertEqual((self.root / "new.txt").read_bytes(), b"authorized")
+
+    def test_descendant_lock_blocks_parent_delete(self):
+        (self.root / "sub" / "child.txt").write_text("x")
+        body = b'<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope></D:lockinfo>'
+        with serving(self.cfg) as (host, port):
+            status, _headers, _ = self._request(host, port, "LOCK", "/sub/child.txt", body)
+            self.assertEqual(status, 200)
+            self.assertEqual(self._request(host, port, "DELETE", "/sub")[0], 423)
+        self.assertTrue((self.root / "sub" / "child.txt").exists())
+
+    def test_empty_lock_body_refreshes_submitted_token(self):
+        body = b'<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope></D:lockinfo>'
+        with serving(self.cfg) as (host, port):
+            status, headers, _ = self._request(host, port, "LOCK", "/hello.txt", body)
+            self.assertEqual(status, 200)
+            token = headers["Lock-Token"]
+            refreshed, refreshed_headers, _ = self._request(
+                host, port, "LOCK", "/hello.txt", b"", {"If": f"({token})"}
+            )
+            self.assertEqual(refreshed, 200)
+            self.assertEqual(refreshed_headers["Lock-Token"], token)
+
+
+class DavClass1ModeTest(_DavCase):
+    dav_lock_mode = "class1"
+
+    def test_advertising_and_methods_are_honest(self):
+        status, headers, _ = self._req("OPTIONS", "/")
+        self.assertEqual(status, 204)
+        self.assertEqual(headers["DAV"], "1")
+        self.assertNotIn("LOCK", headers["Allow"])
+        self.assertEqual(self._req("LOCK", "/hello.txt", body=b"")[0], 405)
+
+
+class DavCompatModeTest(_DavCase):
+    dav_lock_mode = "compat"
+
+    def test_fake_token_does_not_enforce_and_warns(self):
+        self.assertTrue(
+            any("without enforcing" in warning for warning in self.cfg.startup_warnings())
+        )
+        status, headers, _ = self._req("LOCK", "/hello.txt", body=b"lock")
+        self.assertEqual(status, 200)
+        self.assertIn("opaquelocktoken", headers["Lock-Token"])
+        self.assertEqual(self._req("DELETE", "/hello.txt")[0], 204)
+
+
+class DavPropfindBudgetTest(_DavCase):
+    max_propfind_entries = 1
+
+    def test_depth_one_over_limit_is_explicit_507(self):
+        (self.root / "second.txt").write_text("2")
+        status, _, body = self._req("PROPFIND", "/", headers={"Depth": "1"})
+        self.assertEqual(status, 507)
+        self.assertNotIn(b"207 Multi-Status", body)
+
+
+class DavLockManagerTest(unittest.TestCase):
+    def test_expired_lock_is_purged(self):
+        manager = _webdav.DavLockManager()
+        with mock.patch.object(_webdav.time, "time", return_value=100.0):
+            record = manager.acquire("/tmp/x", 5)
+        self.assertIsNotNone(record)
+        with mock.patch.object(_webdav.time, "time", return_value=106.0):
+            self.assertTrue(manager.authorized(["/tmp/x"], ""))
+
+    def test_conflict_refresh_release_and_authorization_paths(self):
+        manager = _webdav.DavLockManager()
+        record = manager.acquire("/tmp/root", 60, "owner")
+        if record is None:
+            self.fail("initial lock was not acquired")
+        self.assertIsNone(manager.acquire("/tmp/root/child", 60))
+        self.assertFalse(manager.authorized(["/tmp/root/child"], "wrong"))
+        self.assertTrue(manager.authorized(["/tmp/root/child"], record.token))
+        self.assertEqual(manager.discover("/tmp/root/child"), [record])
+        self.assertIsNone(manager.refresh("wrong", "/tmp/root", 60))
+        refreshed = manager.refresh(record.token, "/tmp/root", 120)
+        self.assertIsNotNone(refreshed)
+        self.assertFalse(manager.release(record.token, "/tmp/other"))
+        self.assertFalse(manager.release("missing", "/tmp/root"))
+        self.assertTrue(manager.release(record.token, "/tmp/root"))
+
+    def test_timeout_parser_is_bounded_and_tolerant(self):
+        self.assertEqual(_webdav._lock_timeout("Infinite"), 3600)
+        self.assertEqual(_webdav._lock_timeout("nonsense"), 3600)
+        self.assertEqual(_webdav._lock_timeout("Second-0"), 1)
+        self.assertEqual(_webdav._lock_timeout("Second-999999"), 24 * 60 * 60)
+
+
 class DavReadOnlyTest(_DavCase):
     dav_write = False
 
@@ -215,7 +347,9 @@ class DavReadOnlyTest(_DavCase):
         self.assertEqual(self._req("PUT", "/x.txt", body=b"x")[0], 403)  # read-only
         self.assertEqual(self._req("DELETE", "/hello.txt")[0], 403)
         self.assertEqual(self._req("PROPFIND", "/", headers={"Depth": "0"})[0], 207)  # reads ok
-        self.assertEqual(self._req("LOCK", "/hello.txt", body=b"")[0], 200)  # stub lock still works
+        _status, headers, _ = self._req("OPTIONS", "/")
+        self.assertEqual(headers["DAV"], "1")
+        self.assertEqual(self._req("LOCK", "/hello.txt", body=b"")[0], 405)
 
 
 class DavDisabledTest(_DavCase):

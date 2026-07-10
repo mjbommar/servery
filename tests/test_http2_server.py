@@ -70,6 +70,7 @@ def _h2_exchange(
 
 class _H2ServerCase(unittest.TestCase):
     auth: str | None = None
+    max_buffered_response = 1024
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -78,7 +79,13 @@ class _H2ServerCase(unittest.TestCase):
         (self.dir / "big.bin").write_bytes(b"x" * 20000)
         (self.dir / "sub").mkdir()
         config = Config.create(
-            self.dir, host="127.0.0.1", port=0, quiet=True, http2=True, auth=self.auth
+            self.dir,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            http2=True,
+            auth=self.auth,
+            max_buffered_response=self.max_buffered_response,
         )
         self.httpd = make_server(config)
         self.host = str(self.httpd.server_address[0])

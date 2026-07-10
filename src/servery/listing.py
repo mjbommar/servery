@@ -309,12 +309,42 @@ def _category(entry: EntryInfo) -> str:
     return _ext_to_category(_extension(entry.name))
 
 
-def _scan(fs_dir: str, *, show_hidden: bool) -> list[EntryInfo]:
+def _scan(
+    fs_dir: str,
+    *,
+    show_hidden: bool,
+    max_entries: int | None = None,
+    details_threshold: int | None = None,
+) -> list[EntryInfo]:
+    return _scan_with_status(
+        fs_dir,
+        show_hidden=show_hidden,
+        max_entries=max_entries,
+        details_threshold=details_threshold,
+    )[0]
+
+
+def _scan_with_status(
+    fs_dir: str,
+    *,
+    show_hidden: bool,
+    max_entries: int | None = None,
+    details_threshold: int | None = None,
+) -> tuple[list[EntryInfo], bool]:
+    max_entries = _MAX_SCAN_ENTRIES if max_entries is None else max_entries
+    details_threshold = max_entries if details_threshold is None else details_threshold
     entries: list[EntryInfo] = []
+    truncated = False
     with os.scandir(fs_dir) as it:
         for entry in it:
             if not show_hidden and entry.name.startswith("."):
                 continue
+            if len(entries) >= max_entries:
+                truncated = True
+                _log.logger.warning(
+                    "directory listing truncated at %d entries: %s", max_entries, fs_dir
+                )
+                break
             # Match os.path.* behavior: swallow per-entry stat errors.
             try:
                 is_dir = entry.is_dir()
@@ -326,13 +356,14 @@ def _scan(fs_dir: str, *, show_hidden: bool) -> list[EntryInfo]:
                 is_symlink = False
             size: int | None = None
             mtime: float | None = None
-            try:
-                stat = entry.stat()
-                mtime = stat.st_mtime
-                if not is_dir:
-                    size = stat.st_size
-            except OSError:
-                pass
+            if len(entries) < details_threshold:
+                try:
+                    stat = entry.stat()
+                    mtime = stat.st_mtime
+                    if not is_dir:
+                        size = stat.st_size
+                except OSError:
+                    pass
             entries.append(
                 EntryInfo(
                     name=entry.name,
@@ -342,12 +373,7 @@ def _scan(fs_dir: str, *, show_hidden: bool) -> list[EntryInfo]:
                     mtime=mtime,
                 )
             )
-            if len(entries) >= _MAX_SCAN_ENTRIES:  # stop before unbounded RAM/CPU
-                _log.logger.warning(
-                    "directory listing truncated at %d entries: %s", _MAX_SCAN_ENTRIES, fs_dir
-                )
-                break
-    return entries
+    return entries, truncated
 
 
 def _key_func(sort: str) -> Callable[[EntryInfo], Any]:
@@ -641,6 +667,8 @@ def render(
     per_page: int = 0,
     theme: str = "auto",
     upload: bool = False,
+    max_entries: int = _MAX_SCAN_ENTRIES,
+    details_threshold: int = _MAX_SCAN_ENTRIES,
 ) -> bytes:
     """Render a directory listing page as UTF-8 bytes.
 
@@ -652,8 +680,16 @@ def render(
     ``dark``. Raises ``OSError`` if the directory cannot be scanned.
     """
     now = time.time()
-    scanned = _scan(fs_dir, show_hidden=show_hidden)
+    scanned, truncated = _scan_with_status(
+        fs_dir,
+        show_hidden=show_hidden,
+        max_entries=max_entries,
+        details_threshold=details_threshold,
+    )
+    details_limited = len(scanned) > details_threshold
     filtered = _filter(scanned, query, ext)
+    if details_limited and sort in {"size", "date"}:
+        sort = "name"
     entries = _sorted(filtered, sort, order)
     total = len(entries)
     max_size = max((e.size or 0 for e in entries if not e.is_dir), default=0)
@@ -668,6 +704,14 @@ def render(
         visible = entries
 
     base = _state_params(sort, order, query, ext, page)
+    notices: list[str] = []
+    if truncated:
+        notices.append(f"Listing limited to the first {max_entries:,} entries.")
+    if details_limited:
+        notices.append(
+            f"Size, date, facets, metrics, and timeline are limited above "
+            f"{details_threshold:,} entries."
+        )
 
     rows: list[str] = []
     if display_path != "/" and page == 1:
@@ -697,9 +741,10 @@ def render(
         heading=html.escape(display_path),
         upload_form=_UPLOAD_FORM if upload else "",
         search_value=html.escape(query, quote=True),
-        facets=_facets(filtered, ext, base),
-        metrics=_metrics(filtered, now),
-        timeline=_timeline_svg(filtered),
+        notice=(f'<p class="notice">{" ".join(notices)}</p>' if notices else ""),
+        facets="" if details_limited else _facets(filtered, ext, base),
+        metrics="" if details_limited else _metrics(filtered, now),
+        timeline="" if details_limited else _timeline_svg(filtered),
         name_header=_sort_link("Name", "N", sort, order, base),
         size_header=_sort_link("Size", "S", sort, order, base),
         mtime_header=_sort_link("Modified", "M", sort, order, base),
@@ -744,6 +789,8 @@ nav.facets a.active b { opacity: 0.85; }
 .metrics { display: flex; flex-wrap: wrap; gap: 0.4rem 1.1rem; margin: 0.6rem 0;
   font-size: 0.82rem; opacity: 0.85; }
 .metrics b { font-weight: 600; }
+.notice { padding: 0.55rem 0.7rem; border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent); font-size: 0.82rem; }
 figure.timeline { margin: 0.4rem 0 0.8rem; }
 figure.timeline svg { width: 100%; height: 40px; display: block; }
 figure.timeline rect { fill: var(--accent); opacity: 0.55; }
@@ -804,6 +851,7 @@ _TEMPLATE = """\
 <input type="search" name="q" value="{search_value}" placeholder="Filter\N{HORIZONTAL ELLIPSIS}" \
 aria-label="Filter">
 </form>
+{notice}
 {facets}
 {metrics}
 {timeline}

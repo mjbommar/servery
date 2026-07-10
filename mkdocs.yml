@@ -97,6 +97,7 @@ nav:
       - Implementation best practices: BEST-PRACTICES.md
       - Dynamic handlers: DYNAMIC.md
       - Roadmap: ROADMAP.md
+      - Reliability & performance priorities: design/reliability-performance-priorities.md
       - References & prior art: REFERENCES.md
 
 extra:

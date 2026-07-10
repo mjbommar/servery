@@ -18,10 +18,8 @@ embedded gear — without burdening the zero-dependency core or the safe default
 - **Smallness:** ~300 LOC, isolated in one module off the default path.
 
 ## Architecture
-- A **separate UDP listener** (not the HTTP socket), started in `server.serve()`
-  alongside the HTTP server — the same pattern as the mDNS advertiser — and stopped in
-  a `finally`. There is no shared transport seam; like the `--http3` UDP path, it
-  owns its own socket and loop.
+- A **separate UDP listener** (not the HTTP socket), started by the unified
+  `server.serve()` lifecycle alongside HTTP/HTTP3 and stopped in a `finally`.
 - `servery/_tftp.py :: TftpServer`: a main socket accepts RRQ/WRQ; each transfer runs
   in a worker thread on a **fresh ephemeral socket** (the per-transfer TID, RFC 1350
   §4), bound to the operator's configured address.
@@ -30,7 +28,9 @@ embedded gear — without burdening the zero-dependency core or the safe default
 
 ## Protocol coverage
 - RRQ (read) and WRQ (write); DATA/ACK lockstep with **timeout-retransmit** (5 tries).
-- **octet** and **netascii** modes (netascii translated on the wire ↔ local newlines).
+- **octet** and **netascii** modes. Netascii uses a stateful streaming converter, so
+  CR/LF pairs remain correct across filesystem reads and TFTP blocks without an
+  entire-file allocation.
 - **RFC 2347-2349 options** — `blksize`, `tsize`, `timeout` — negotiated via OACK
   (the bits PXE relies on). `blksize` clamped to `[8, 65464]`.
 - ERROR packets: file-not-found, access-violation (writes disabled / escape),
@@ -38,12 +38,14 @@ embedded gear — without burdening the zero-dependency core or the safe default
   (bad mode / malformed request), unknown-TID (stray peer).
 - Writes stream to a tempfile in the target dir and commit with an atomic
   `os.replace`; existing files are refused (no silent overwrite); the total is bounded
-  by `--max-upload-size`.
+  by `--max-upload-size`. The same canonical-target coordinator used by HTTP writes
+  covers the entire TFTP transfer.
 
 ## Config / CLI
-- `Config.tftp` / `tftp_port` (default 69) / `tftp_write`; `--tftp-write` requires
-  `--tftp`. Startup warnings for "no auth/encryption" and (with write) "anonymous
-  writes."
+- `Config.tftp` / `tftp_port` (default 69) / `tftp_write` and
+  `max_tftp_transfers` (default 32); `--tftp-write` requires `--tftp`. Saturation is
+  rejected before a worker/thread is created and capacity recovers after the full
+  transfer lifetime. Startup warnings cover no auth/encryption and anonymous writes.
 
 ## Out of scope (now)
 - FTP / FTPS (deprecated; browsers removed FTP; cleartext + bounce/firewall footguns).

@@ -9,10 +9,13 @@ _lifespan_log: list[str] = []
 
 async def echo(scope: dict[str, Any], receive: Any, send: Any) -> None:
     assert scope["type"] == "http"
-    message = await receive()
-    reply = b" ".join(
-        [b"asgi", scope["method"].encode(), scope["path"].encode(), message.get("body", b"")]
-    )
+    chunks: list[bytes] = []
+    while True:
+        message = await receive()
+        chunks.append(message.get("body", b""))
+        if not message.get("more_body", False):
+            break
+    reply = b" ".join([b"asgi", scope["method"].encode(), scope["path"].encode(), b"".join(chunks)])
     await send(
         {
             "type": "http.response.start",
@@ -35,6 +38,37 @@ async def streaming(scope: dict[str, Any], receive: Any, send: Any) -> None:
     )
     await send({"type": "http.response.body", "body": b"part1", "more_body": True})
     await send({"type": "http.response.body", "body": b"part2", "more_body": False})
+
+
+async def body_shape(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    sizes: list[int] = []
+    while True:
+        message = await receive()
+        sizes.append(len(message.get("body", b"")))
+        if not message.get("more_body", False):
+            break
+    nonempty = [size for size in sizes if size]
+    payload = f"{len(nonempty)}:{max(nonempty, default=0)}:{sum(nonempty)}".encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-length", str(len(payload)).encode())],
+        }
+    )
+    await send({"type": "http.response.body", "body": payload})
+
+
+async def ignores_body(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    payload = b"ignored"
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-length", str(len(payload)).encode())],
+        }
+    )
+    await send({"type": "http.response.body", "body": payload})
 
 
 async def ws_echo(scope: dict[str, Any], receive: Any, send: Any) -> None:

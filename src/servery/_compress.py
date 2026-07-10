@@ -14,6 +14,10 @@ build never claims a coding it cannot produce (RFC 9110 §12.5.5).
 from __future__ import annotations
 
 import gzip
+import os
+import threading
+from collections import OrderedDict
+from collections.abc import Callable
 
 try:  # zstd landed in the stdlib in 3.14 (PEP 784); absent on 3.13.
     from compression import zstd as _zstd  # ty: ignore[unresolved-import]
@@ -22,6 +26,8 @@ except ImportError:  # pragma: no cover - exercised on 3.13, not the 3.14 CI def
 
 #: True when this interpreter can produce ``Content-Encoding: zstd`` (3.14+).
 HAVE_ZSTD = _zstd is not None
+#: gzip compression level for on-the-fly encoding.
+GZIP_LEVEL = 6
 #: zstd compression level for on-the-fly encoding — a balance of ratio vs CPU,
 #: well clear of the slow high end (max is 22) so it stays cheap per request.
 ZSTD_LEVEL = 9
@@ -31,6 +37,78 @@ ZSTD_LEVEL = 9
 # and large files are usually already-compressed media anyway).
 GZIP_MIN = 1024
 GZIP_MAX = 10 * 1024 * 1024
+
+type CacheKey = tuple[str, int, int, str, int]
+
+
+class CompressionCache:
+    """Thread-safe, byte-bounded LRU of encoded static representations."""
+
+    def __init__(self, max_bytes: int = 0) -> None:
+        self.max_bytes = max_bytes
+        self._bytes = 0
+        self._items: OrderedDict[CacheKey, bytes] = OrderedDict()
+        self._lock = threading.Lock()
+        # Cache misses are deliberately serialized when caching is enabled. This
+        # prevents a hot-file miss storm from multiplying compression CPU and
+        # working memory; the default zero-byte cache pays no serialization cost.
+        self._compute_lock = threading.Lock()
+
+    @property
+    def current_bytes(self) -> int:
+        with self._lock:
+            return self._bytes
+
+    def get(self, key: CacheKey) -> bytes | None:
+        if self.max_bytes <= 0:
+            return None
+        with self._lock:
+            value = self._items.get(key)
+            if value is not None:
+                self._items.move_to_end(key)
+            return value
+
+    def put(self, key: CacheKey, value: bytes) -> None:
+        if self.max_bytes <= 0 or len(value) > self.max_bytes:
+            return
+        with self._lock:
+            previous = self._items.pop(key, None)
+            if previous is not None:
+                self._bytes -= len(previous)
+            self._items[key] = value
+            self._bytes += len(value)
+            while self._bytes > self.max_bytes:
+                _, evicted = self._items.popitem(last=False)
+                self._bytes -= len(evicted)
+
+    def get_or_compute(self, key: CacheKey, factory: Callable[[], bytes]) -> bytes:
+        """Return a cached value or compute one without concurrent miss stampedes."""
+        if self.max_bytes <= 0:
+            return factory()
+        cached = self.get(key)
+        if cached is not None:
+            return cached
+        with self._compute_lock:
+            cached = self.get(key)
+            if cached is not None:
+                return cached
+            value = factory()
+            self.put(key, value)
+            return value
+
+
+def cache_key(path: str, stat: os.stat_result, coding: str, level: int | None = None) -> CacheKey:
+    """Build an encoded-representation cache key from stable file metadata."""
+    if level is None:
+        level = ZSTD_LEVEL if coding == "zstd" else GZIP_LEVEL
+    return (
+        os.path.realpath(path),
+        stat.st_mtime_ns,
+        stat.st_size,
+        coding,
+        level,
+    )
+
 
 # Compress these (an allowlist: text-like and not already compressed). Anything
 # not matched — jpeg/png/webp, mp4, zip/gz, woff/woff2, … — is served as-is.
@@ -158,7 +236,12 @@ def negotiate(accept_encoding: str, *, enabled: bool) -> str | None:
 
 
 def choose_encoding(
-    content_type: str, size: int, accept_encoding: str, *, enabled: bool
+    content_type: str,
+    size: int,
+    accept_encoding: str,
+    *,
+    enabled: bool,
+    max_size: int = GZIP_MAX,
 ) -> str | None:
     """The single content-coding decision for a file: ``"zstd"``, ``"gzip"``, or ``None``.
 
@@ -166,7 +249,7 @@ def choose_encoding(
     stat without reading the file. Shared by every transport so the decision is one
     place (it must agree with the ETag's coding variant, RFC 9110 §8.8.3.3).
     """
-    if not (enabled and compressible(content_type) and GZIP_MIN <= size <= GZIP_MAX):
+    if not (enabled and compressible(content_type) and GZIP_MIN <= size <= max_size):
         return None
     return negotiate(accept_encoding, enabled=True)
 
@@ -183,7 +266,7 @@ def should_gzip(content_type: str, size: int, accept_encoding: str, *, enabled: 
 
 def gzip_bytes(data: bytes) -> bytes:
     """Compress ``data`` as a gzip stream (deterministic: fixed mtime)."""
-    return gzip.compress(data, compresslevel=6, mtime=0)
+    return gzip.compress(data, compresslevel=GZIP_LEVEL, mtime=0)
 
 
 def zstd_bytes(data: bytes) -> bytes:

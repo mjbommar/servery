@@ -22,14 +22,14 @@ curl -fsSL https://github.com/mjbommar/servery/releases/latest/download/servery.
 easiest path — it even fetches a matching Python for you. The piped `servery.py` is the
 released package amalgamated into one auditable file (pure stdlib). It runs code, so
 inspect it first if you like (`curl -fsSL <url> | less`), pin a version
-(`…/releases/download/v1.3.0/servery.py`), or grab the `servery.pyz` zipapp — both are
+(`…/releases/download/v1.5.0/servery.py`), or grab the `servery.pyz` zipapp — both are
 attached to [every release](https://github.com/mjbommar/servery/releases/latest).
 
 Serve or share a directory over HTTP with the niceties people expect from tools like
 [miniserve](https://github.com/svenstaro/miniserve) or `npx serve` — rich sortable
-directory listings, file upload, HTTP Basic Auth, HTTPS, range/resumable downloads, on-the-fly
-archive download, even **HTTP/2** — while the core depends on **nothing but the Python standard
-library**.
+directory listings, file upload, HTTP Basic Auth, HTTPS, range/resumable downloads,
+on-the-fly archive download, even **HTTP/2** and opt-in **HTTP/3** — while the core
+depends on **nothing but the Python standard library**.
 
 ```console
 $ servery                                  # serve the current directory on http://127.0.0.1:8000
@@ -61,7 +61,8 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
 - **Upload** — opt-in `--upload`, streaming `multipart/form-data` (no `cgi`), atomic writes,
   bounded size, overwrite off by default. **Resumable uploads** too: `PUT` with
   `Content-Range` appends a chunk and survives an interrupted transfer (the Google/S3
-  convention — works from bare `curl`, `308` + `Range` to resume).
+  convention — works from bare `curl`, `308` + `Range` to resume). Same-target writes
+  are serialized across upload, WebDAV, archive extraction, and TFTP.
 - **Archive download** — stream any directory as `tar.gz` or `zip` (`?archive=tar.gz`), or
   tick the per-entry checkboxes and **zip just the selected files/folders** — all with **no
   JavaScript**.
@@ -69,7 +70,8 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
   (`--access-log-format clf`/`combined`/`json`), separate from the diagnostic stderr log.
 - **WebDAV** — `--dav` lets macOS Finder / Windows Explorer / Linux *mount* the share as a
   network drive (read-only); `--dav-write` adds write (PUT/DELETE/MKCOL/MOVE/COPY). Pure
-  stdlib, same path-safety as everything else; writes honor `--auth`.
+  stdlib, same path-safety as everything else; writes honor `--auth`. Writable DAV
+  defaults to enforced exclusive locks, with explicit `class1` and compatibility modes.
 - **CORS, SPA fallback, cache control, security headers** — `--cors`, `--spa`, `--cache`,
   with `nosniff` everywhere and a scoped CSP on generated pages (off via `--no-security-headers`).
 - **On-the-fly compression** — text-like responses (and the directory listing) are compressed
@@ -84,12 +86,14 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
   prior-knowledge). The HPACK and frame codecs are implemented against the RFCs with no
   third-party package.
 - **HTTP/3** — optional, via `pip install servery[http3]` (the `aioquic` QUIC stack); the core
-  stays zero-dependency.
+  stays zero-dependency. It runs beside the TCP fallback and advertises its live UDP port
+  via `Alt-Svc`; large HTTP/2/3 files stream above a configurable buffering threshold.
 - **TFTP** — opt-in `--tftp` also serves the directory over TFTP (UDP, RFC 1350) for PXE boot
   and network gear, with `blksize`/`tsize`/`timeout` options; read-only unless `--tftp-write`.
   Pure stdlib. No auth or encryption — **trusted LAN / lab networks only** (off by default).
 - **Safe by default** — binds `127.0.0.1`, path-traversal + symlink-escape protection, a
-  default socket timeout, and loud warnings when you expose it or run auth without TLS.
+  default socket timeout, a 256-connection/session ceiling, distinct HTTP/2/TFTP budgets,
+  and loud warnings when you expose it or run auth without TLS.
 - **Free-threading ready** — runs under the no-GIL builds (3.13t/3.14t); immutable config,
   no module-level mutable state.
 

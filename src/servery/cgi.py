@@ -29,13 +29,12 @@ import subprocess  # nosec B404 (executing CGI scripts is the whole point of --c
 import sys
 from pathlib import Path
 
-from servery import _http1, _log, security
+from servery import _body, _http1, _log, security
 from servery.handler import ServeryHandler
 
 # RFC 3875 §9.2 + httpoxy: request headers that must never become CGI meta-vars.
 _BLOCKED_HEADERS = frozenset({"authorization", "proxy-authorization", "proxy"})
 _TIMEOUT: float = 30.0
-_MAX_BODY: int = 100 * 1024 * 1024
 
 
 def resolve_script(cgi_root: str, url_path: str) -> tuple[str, str] | None:
@@ -95,18 +94,23 @@ def _argv(script: str) -> list[str]:
 
 def run(handler: ServeryHandler) -> None:
     """Resolve + execute the CGI script for this request and relay the response."""
+    handler._require_body_disposition()
     cgi_root = handler._server.cgi_root
     resolved = resolve_script(cgi_root, handler.path)
     if resolved is None:
         handler.send_error(404, "No CGI script found")
         return
     script, path_info = resolved
-    try:
-        length = max(0, min(int(handler.headers.get("content-length") or 0), _MAX_BODY))
-    except ValueError:
-        handler.send_error(400, "Invalid Content-Length")
+    length = handler._body_plan.length or 0
+    if length > handler._server.config.max_request_body:
+        handler._reject_unread_body(413, "Request body exceeds the size limit")
         return
-    body = handler.rfile.read(length) if length else b""
+    reader = _body.LimitedReader(handler.rfile, length)
+    body = reader.read()
+    if reader.remaining:
+        handler.close_connection = True
+        return
+    handler._body_consumed()
     env = build_env(handler, script, path_info)
     try:
         proc = subprocess.run(  # nosec B603 (argv list, shell=False, clean minimal env)

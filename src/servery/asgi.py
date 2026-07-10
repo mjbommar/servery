@@ -17,12 +17,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Callable
 from http import HTTPStatus
 from typing import Any
 
-from servery import __version__, _appspec, _http1, _log, _tls, _websocket, auth
+from servery import __version__, _appspec, _body, _http1, _log, _tls, _websocket, auth
 
-_MAX_BODY = 100 * 1024 * 1024
 _SERVER_HEADER = f"Server: servery/{__version__}".encode("latin-1")
 
 
@@ -89,23 +89,93 @@ class _Lifespan:
                 await self._task
 
 
-async def _read_chunked(reader: asyncio.StreamReader) -> bytes:
-    """Decode a client chunked request body (RFC 9112 §7.1), bounded by _MAX_BODY."""
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        size_line = await reader.readuntil(b"\r\n")
-        size = int(size_line.split(b";", 1)[0].strip() or b"0", 16)  # ignore extensions
-        if size == 0:
-            while (await reader.readuntil(b"\r\n")) != b"\r\n":  # consume any trailers
-                pass
-            break
-        total += size
-        if total > _MAX_BODY:
-            raise ValueError("chunked request body exceeds limit")
-        chunks.append(await reader.readexactly(size))
-        await reader.readexactly(2)  # the CRLF that terminates each chunk
-    return b"".join(chunks)
+class _BodyReadError(ValueError):
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class _AsyncBody:
+    """Expose an accepted HTTP/1 body as bounded ASGI ``receive()`` chunks."""
+
+    _CHUNK = 64 * 1024
+    _MAX_TRAILERS = 64 * 1024
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        plan: _body.BodyPlan,
+        *,
+        max_body: int,
+        timeout: float,
+    ) -> None:
+        self._reader = reader
+        self._chunked = plan.chunked
+        self._remaining = plan.length or 0
+        self._chunk_remaining = 0
+        self._total = 0
+        self._max_body = max_body
+        self._timeout = timeout
+        self._done = not plan.chunked and self._remaining == 0
+        self._final_delivered = False
+
+    @property
+    def complete(self) -> bool:
+        return self._done
+
+    async def receive(self) -> dict[str, Any]:
+        if self._final_delivered:
+            return {"type": "http.disconnect"}
+        if self._done:
+            self._final_delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        if not self._chunked:
+            size = min(self._CHUNK, self._remaining)
+            data = await asyncio.wait_for(self._reader.readexactly(size), self._timeout)
+            self._remaining -= len(data)
+            self._done = self._remaining == 0
+            if self._done:
+                self._final_delivered = True
+            return {"type": "http.request", "body": data, "more_body": not self._done}
+        return await self._receive_chunked()
+
+    async def _receive_chunked(self) -> dict[str, Any]:
+        if self._chunk_remaining == 0:
+            raw = await asyncio.wait_for(self._reader.readuntil(b"\r\n"), self._timeout)
+            token = raw[:-2].split(b";", 1)[0].strip()
+            if not token or any(byte not in b"0123456789abcdefABCDEF" for byte in token):
+                raise _BodyReadError("invalid chunk size")
+            # The byte allowlist above makes conversion infallible and avoids
+            # accepting Python-specific integer spellings.
+            size = int(token, 16)
+            if size == 0:
+                await self._consume_trailers()
+                self._done = True
+                self._final_delivered = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            self._total += size
+            if self._total > self._max_body:
+                raise _BodyReadError("chunked request body exceeds limit", 413)
+            self._chunk_remaining = size
+        size = min(self._CHUNK, self._chunk_remaining)
+        data = await asyncio.wait_for(self._reader.readexactly(size), self._timeout)
+        self._chunk_remaining -= len(data)
+        if self._chunk_remaining == 0:
+            terminator = await asyncio.wait_for(self._reader.readexactly(2), self._timeout)
+            if terminator != b"\r\n":
+                raise _BodyReadError("invalid chunk terminator")
+        # Preserve streaming: a final empty receive follows after the zero chunk.
+        return {"type": "http.request", "body": data, "more_body": True}
+
+    async def _consume_trailers(self) -> None:
+        total = 0
+        while True:
+            line = await asyncio.wait_for(self._reader.readuntil(b"\r\n"), self._timeout)
+            total += len(line)
+            if total > self._MAX_TRAILERS:
+                raise _BodyReadError("request trailers exceed limit", 431)
+            if line == b"\r\n":
+                return
 
 
 def _wants_keep_alive(version: str, headers: dict[bytes, bytes]) -> bool:
@@ -125,6 +195,7 @@ class _Exchange:
         scheme: str = "http",
         credential: auth.Credential | None = None,
         timeout: float = 30.0,
+        max_body: int = 100 * 1024 * 1024,
         policy: list[tuple[bytes, bytes]] | None = None,
     ) -> None:
         self._app = app
@@ -132,6 +203,7 @@ class _Exchange:
         self._scheme = scheme
         self._credential = credential
         self._timeout = timeout
+        self._max_body = max_body
         self._policy = policy or []
 
     async def handle_connection(
@@ -178,6 +250,25 @@ class _Exchange:
             key, val = name.strip().lower(), value.strip()
             headers.append((key, val))
             header_map[key] = val
+        try:
+            plan = _body.parse_framing(
+                [value.decode("latin-1") for name, value in headers if name == b"content-length"],
+                [
+                    value.decode("latin-1")
+                    for name, value in headers
+                    if name == b"transfer-encoding"
+                ],
+                max_size=self._max_body,
+                allow_chunked=True,
+            )
+        except _body.FramingError as exc:
+            reason = HTTPStatus(exc.status).phrase
+            writer.write(
+                f"HTTP/1.1 {exc.status} {reason}\r\nContent-Length: 0\r\n"
+                "Connection: close\r\n\r\n".encode("latin-1")
+            )
+            await writer.drain()
+            return False
         if self._credential is not None:  # --auth gates both HTTP and WebSocket
             authz = header_map.get(b"authorization", b"").decode("latin-1")
             if not self._credential.check_header(authz):
@@ -185,22 +276,12 @@ class _Exchange:
                 await writer.drain()
                 return False
         if header_map.get(b"upgrade", b"").lower() == b"websocket":
+            if plan.chunked or (plan.length or 0):
+                return False
             await self._serve_websocket(reader, writer, raw_path, headers, header_map)
             return False  # the WebSocket owns the connection until it closes
         keep_alive = _wants_keep_alive(version, header_map)
-        chunked = b"chunked" in header_map.get(b"transfer-encoding", b"").lower()
-        try:
-            if chunked:
-                body = await asyncio.wait_for(_read_chunked(reader), self._timeout)
-            else:
-                length = max(0, min(int(header_map.get(b"content-length", b"0") or 0), _MAX_BODY))
-                body = (
-                    await asyncio.wait_for(reader.readexactly(length), self._timeout)
-                    if length
-                    else b""
-                )
-        except (ValueError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
-            return False  # malformed length/framing or slow-body timeout -> close
+        body_stream = _AsyncBody(reader, plan, max_body=self._max_body, timeout=self._timeout)
         path, _, query = raw_path.partition("?")
         scope = {
             "type": "http",
@@ -215,18 +296,23 @@ class _Exchange:
             "server": list(self._server_addr),
             "client": list(writer.get_extra_info("peername", ("", 0))[:2]),
         }
-        state = _ResponseState(writer, method, keep_alive, self._policy)
-        body_sent = False
-
-        async def receive() -> dict[str, Any]:
-            nonlocal body_sent
-            if not body_sent:
-                body_sent = True
-                return {"type": "http.request", "body": body, "more_body": False}
-            return {"type": "http.disconnect"}
+        state = _ResponseState(
+            writer, method, keep_alive, self._policy, lambda: body_stream.complete
+        )
 
         try:
-            await self._app(scope, receive, state.send)
+            await self._app(scope, body_stream.receive, state.send)
+        except _BodyReadError as exc:
+            if not state.started:
+                reason = HTTPStatus(exc.status).phrase
+                writer.write(
+                    f"HTTP/1.1 {exc.status} {reason}\r\nContent-Length: 0\r\n"
+                    "Connection: close\r\n\r\n".encode("latin-1")
+                )
+                await writer.drain()
+            return False
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
+            return False
         except Exception:
             # The app raised out of its coroutine (it didn't handle its own error).
             # Log with traceback; send a 500 if we haven't committed a response yet.
@@ -244,7 +330,7 @@ class _Exchange:
             _log.logger.info(
                 '%s "%s %s %s" %s', scope["client"][0], method, raw_path, version, state.status
             )
-        return keep_alive and not state.close
+        return keep_alive and not state.close and body_stream.complete
 
     async def _serve_websocket(
         self,
@@ -291,7 +377,17 @@ class _Exchange:
 
 
 class _ResponseState:
-    __slots__ = ("_policy", "_writer", "chunked", "close", "headers", "method", "started", "status")
+    __slots__ = (
+        "_body_complete",
+        "_policy",
+        "_writer",
+        "chunked",
+        "close",
+        "headers",
+        "method",
+        "started",
+        "status",
+    )
 
     def __init__(
         self,
@@ -299,6 +395,7 @@ class _ResponseState:
         method: str,
         keep_alive: bool,
         policy: list[tuple[bytes, bytes]] | None = None,
+        body_complete: Callable[[], bool] | bool = True,
     ) -> None:
         self._writer = writer
         self.method = method
@@ -308,6 +405,7 @@ class _ResponseState:
         self.started = False
         self.chunked = False
         self._policy = policy or []
+        self._body_complete = body_complete
 
     async def send(self, event: dict[str, Any]) -> None:
         kind = event["type"]
@@ -325,6 +423,9 @@ class _ResponseState:
                 self._writer.write(_http1.CHUNK_TERMINATOR)
 
     def _write_headers(self) -> None:
+        complete = self._body_complete() if callable(self._body_complete) else self._body_complete
+        if not complete:
+            self.close = True
         present = {name.lower() for name, _ in self.headers}
         try:
             reason = HTTPStatus(self.status).phrase
@@ -370,10 +471,36 @@ async def serve_forever(
     ]
     lifespan = _Lifespan(app)
     await lifespan.startup()
+    connections = (
+        asyncio.Semaphore(config.max_connections) if config.max_connections is not None else None
+    )
+
+    async def connected(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if connections is not None:
+            # The event loop cannot switch between this check and an immediately
+            # successful acquire, so saturated sockets are rejected instead of
+            # accumulating an unbounded queue of waiting tasks.
+            if connections.locked():
+                writer.close()
+                await writer.wait_closed()
+                return
+            await connections.acquire()
+        try:
+            await _Exchange(
+                app,
+                server.sockets[0].getsockname()[:2],
+                scheme,
+                credential,
+                config.timeout,
+                config.max_request_body,
+                policy,
+            ).handle_connection(reader, writer)
+        finally:
+            if connections is not None:
+                connections.release()
+
     server = await asyncio.start_server(
-        lambda r, w: _Exchange(
-            app, server.sockets[0].getsockname()[:2], scheme, credential, config.timeout, policy
-        ).handle_connection(r, w),
+        connected,
         config.host,
         config.port,
         ssl=ssl_context,
