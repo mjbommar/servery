@@ -1325,8 +1325,9 @@ class ASGIServerTest(unittest.TestCase):
     def test_keepalive_idle_budget_ends_at_first_byte_of_slow_head(self):
         with serving_asgi(
             "tests._asgiapp:ignores_body",
-            timeout=1.0,
-            keepalive_timeout=0.2,
+            timeout=3.0,
+            keepalive_timeout=1.0,
+            request_head_timeout=2.5,
         ) as (host, port):
             sock = socket.create_connection((host, port), timeout=5)
             try:
@@ -1336,7 +1337,9 @@ class ASGIServerTest(unittest.TestCase):
                     response += sock.recv(4096)
                 time.sleep(0.05)
                 sock.sendall(b"G")
-                time.sleep(0.25)
+                # Exceed the idle budget after the first byte while leaving
+                # ample scheduler headroom before the request-head deadline.
+                time.sleep(1.25)
                 sock.sendall(b"ET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
                 response = _read_to_close(sock)
                 self.assertIn(b"ignored", response)

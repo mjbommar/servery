@@ -116,9 +116,9 @@ class AbuseLimitTest(unittest.TestCase):
             host="127.0.0.1",
             port=0,
             quiet=True,
-            timeout=1.0,
-            keepalive_timeout=0.2,
-            request_head_timeout=0.8,
+            timeout=3.0,
+            keepalive_timeout=1.0,
+            request_head_timeout=2.5,
         )
         with serving(cfg) as (host, port):
             sock = socket.create_connection((host, port), timeout=5)
@@ -129,7 +129,9 @@ class AbuseLimitTest(unittest.TestCase):
                     response += sock.recv(4096)
                 time.sleep(0.05)
                 sock.sendall(b"G")
-                time.sleep(0.25)
+                # Exceed the idle budget after the first byte while leaving
+                # ample scheduler headroom before the request-head deadline.
+                time.sleep(1.25)
                 sock.sendall(b"ET /f.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
                 response = b""
                 while data := sock.recv(4096):
