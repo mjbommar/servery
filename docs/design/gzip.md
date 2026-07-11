@@ -63,7 +63,10 @@ non-compressible content.
 - The shared response builder returns buffered bytes below the configured threshold
   and a streamed `FileBody` above it. A byte-bounded optional compression cache is
   keyed by canonical path, mtime, size, coding, and compression level. Concurrent
-  cache misses are serialized to avoid multiplying CPU and memory.
+  same-key misses share one transient result to avoid multiplying CPU and memory,
+  even when retained-cache policy is zero. Distinct keys may compute concurrently
+  under the owning server's worker budget; flight entries disappear after their
+  last concurrent caller.
 
 ## Out of scope (now)
 - Streaming dynamic gzip for files above `max_compress_size` (kept identity and

@@ -51,6 +51,7 @@ class Config:
     max_compress_size: int = 10 * 1024 * 1024
     compression_cache_size: int = 0
     max_buffered_response: int = 1024 * 1024
+    small_file_buffer_size: int = 16 * 1024
     max_listing_entries: int = 100_000
     listing_page_size: int = 1000
     listing_details_threshold: int = 10_000
@@ -61,9 +62,25 @@ class Config:
     acme_staging: bool = True  # use the staging CA (safe default); --acme-production to opt in
     access_log: str | None = None  # path to write an access log (off = stderr only)
     access_log_format: str = "clf"  # clf | combined | json
+    access_log_queue: int = 0
+    access_log_queue_bytes: int = 8 * 1024 * 1024
+    access_log_overflow: str = "block"  # block | drop
+    access_log_batch_size: int = 8
+    access_log_batch_wait: float = 0.001
+    access_log_drain_timeout: float = 5.0
     timeout: float = 30.0
+    keepalive_timeout: float | None = None
+    request_head_timeout: float | None = None
+    request_body_timeout: float | None = None
+    write_timeout: float | None = None
+    drain_timeout: float = 30.0
+    workers: int = 1
+    worker_start_timeout: float = 30.0
+    force_timeout: float = 1.0
     max_workers: int | None = None
+    max_archive_streams: int | None = None
     max_connections: int | None = 256
+    max_requests_per_connection: int = 0
     http2: bool = False
     max_h2_streams: int = 100
     http3: bool = False
@@ -72,6 +89,8 @@ class Config:
     wsgi_app: str | None = None  # "module:callable" — opt-in dynamic handler
     cgi_dir: str | None = None  # cgi-bin directory — opt-in dynamic handler
     asgi_app: str | None = None  # "module:callable" — opt-in async dynamic handler
+    lifespan: str = "auto"  # auto | on | off (ASGI only)
+    lifespan_timeout: float = 5.0
     proxy_routes: tuple[tuple[str, str], ...] = ()  # (path-prefix, upstream-url) pairs
     tftp: bool = False  # serve the same dir over TFTP (separate UDP listener; LAN only)
     tftp_port: int = 69
@@ -94,6 +113,31 @@ class Config:
     def uses_tls(self) -> bool:
         """True when HTTPS is configured (a provided or self-signed certificate)."""
         return self.tls_cert is not None or self.tls_self_signed or bool(self.acme)
+
+    @property
+    def aggregate_connection_limit(self) -> int | None:
+        """Maximum connections across the fixed worker generation.
+
+        ``max_connections`` is deliberately a per-worker admission budget.  The
+        supervisor does not place a second semaphore in the parent accept path,
+        so operators can calculate the process-tree bound without mistaking the
+        configured value for a global limit.
+        """
+        if self.max_connections is None:
+            return None
+        return self.workers * self.max_connections
+
+    @property
+    def aggregate_compression_cache_size(self) -> int:
+        """Maximum retained compressed bytes across all worker-local caches."""
+        return self.workers * self.compression_cache_size
+
+    @property
+    def aggregate_archive_stream_limit(self) -> int | None:
+        """Maximum concurrent archive producers across worker-local leases."""
+        if self.max_archive_streams is None:
+            return None
+        return self.workers * self.max_archive_streams
 
     def startup_warnings(self) -> list[str]:
         """Return human-readable warnings about an unsafe configuration."""
@@ -156,6 +200,7 @@ class Config:
         max_compress_size: int = 10 * 1024 * 1024,
         compression_cache_size: int = 0,
         max_buffered_response: int = 1024 * 1024,
+        small_file_buffer_size: int = 16 * 1024,
         max_listing_entries: int = 100_000,
         listing_page_size: int = 1000,
         listing_details_threshold: int = 10_000,
@@ -166,9 +211,25 @@ class Config:
         acme_staging: bool = True,
         access_log: str | None = None,
         access_log_format: str = "clf",
+        access_log_queue: int = 0,
+        access_log_queue_bytes: int = 8 * 1024 * 1024,
+        access_log_overflow: str = "block",
+        access_log_batch_size: int = 8,
+        access_log_batch_wait: float = 0.001,
+        access_log_drain_timeout: float = 5.0,
         timeout: float = 30.0,
+        keepalive_timeout: float | None = None,
+        request_head_timeout: float | None = None,
+        request_body_timeout: float | None = None,
+        write_timeout: float | None = None,
+        drain_timeout: float = 30.0,
+        workers: int | str = 1,
+        worker_start_timeout: float = 30.0,
+        force_timeout: float = 1.0,
         max_workers: int | None = None,
+        max_archive_streams: int | None = None,
         max_connections: int | None = 256,
+        max_requests_per_connection: int = 0,
         http2: bool = False,
         max_h2_streams: int = 100,
         http3: bool = False,
@@ -177,6 +238,8 @@ class Config:
         wsgi_app: str | None = None,
         cgi_dir: str | None = None,
         asgi_app: str | None = None,
+        lifespan: str = "auto",
+        lifespan_timeout: float = 5.0,
         proxy: list[str] | None = None,
         tftp: bool = False,
         tftp_port: int = 69,
@@ -209,10 +272,48 @@ class Config:
             raise ValueError("--max-partial-uploads must be >= 0")
         if timeout <= 0:
             raise ValueError("--timeout must be a positive number of seconds")
+        if keepalive_timeout is not None and keepalive_timeout <= 0:
+            raise ValueError("--keepalive-timeout must be a positive number of seconds")
+        if request_head_timeout is not None and request_head_timeout <= 0:
+            raise ValueError("--request-head-timeout must be a positive number of seconds")
+        if request_body_timeout is not None and request_body_timeout <= 0:
+            raise ValueError("--request-body-timeout must be a positive number of seconds")
+        if write_timeout is not None and write_timeout <= 0:
+            raise ValueError("--write-timeout must be a positive number of seconds")
+        if drain_timeout < 0:
+            raise ValueError("--drain-timeout must be >= 0 seconds")
+        if isinstance(workers, str):
+            if workers == "auto":
+                process_cpu_count = getattr(os, "process_cpu_count", os.cpu_count)
+                workers = process_cpu_count() or 1
+            elif workers.isdecimal():
+                workers = int(workers)
+        if isinstance(workers, bool) or not isinstance(workers, int) or workers <= 0:
+            raise ValueError("--workers must be a positive integer or auto")
+        if worker_start_timeout <= 0:
+            raise ValueError("--worker-start-timeout must be a positive number of seconds")
+        if force_timeout < 0:
+            raise ValueError("--force-timeout must be >= 0 seconds")
         if max_workers is not None and max_workers <= 0:
             raise ValueError("--max-workers must be a positive integer")
+        if max_archive_streams is not None and max_archive_streams <= 0:
+            raise ValueError("--max-archive-streams must be a positive integer")
+        if (
+            max_workers is not None
+            and max_archive_streams is not None
+            and max_archive_streams >= max_workers
+        ):
+            raise ValueError("--max-archive-streams must be smaller than --max-workers")
         if max_connections is not None and max_connections <= 0:
             raise ValueError("--max-connections must be a positive integer")
+        if max_requests_per_connection < 0:
+            raise ValueError("--max-requests-per-connection must be >= 0")
+        if lifespan not in {"auto", "on", "off"}:
+            raise ValueError("--lifespan must be auto, on, or off")
+        if lifespan_timeout <= 0:
+            raise ValueError("--lifespan-timeout must be a positive number of seconds")
+        if asgi_app is None and (lifespan != "auto" or lifespan_timeout != 5.0):
+            raise ValueError("--lifespan and --lifespan-timeout require --asgi")
         if max_h2_streams <= 0:
             raise ValueError("--max-h2-streams must be a positive integer")
         if max_tftp_transfers <= 0:
@@ -225,6 +326,8 @@ class Config:
             raise ValueError("--compression-cache-size must be >= 0 bytes")
         if max_buffered_response < 0:
             raise ValueError("--max-buffered-response must be >= 0 bytes")
+        if small_file_buffer_size < 0:
+            raise ValueError("--small-file-buffer-size must be >= 0 bytes")
         if max_listing_entries <= 0:
             raise ValueError("--max-listing-entries must be a positive integer")
         if listing_page_size <= 0:
@@ -268,8 +371,47 @@ class Config:
             raise ValueError("--dav-write requires --dav")
         if access_log_format not in ("clf", "combined", "json"):
             raise ValueError("--access-log-format must be clf, combined, or json")
+        if access_log_queue < 0:
+            raise ValueError("--access-log-queue must be >= 0")
+        if access_log_queue_bytes <= 0:
+            raise ValueError("--access-log-queue-bytes must be positive")
+        if access_log_overflow not in ("block", "drop"):
+            raise ValueError("--access-log-overflow must be block or drop")
+        if access_log_batch_size <= 0:
+            raise ValueError("--access-log-batch-size must be positive")
+        if access_log_batch_wait < 0:
+            raise ValueError("--access-log-batch-wait must be >= 0 seconds")
+        if access_log_drain_timeout < 0:
+            raise ValueError("--access-log-drain-timeout must be >= 0 seconds")
         if dav and (dynamic or http2 or proxy_routes):
             raise ValueError("--dav is HTTP/1.1 file serving only")
+        if workers > 1:
+            # These modes either mutate shared filesystem state or own a
+            # singleton listener/file/identity.  Keep rejecting them until the
+            # parent-broker protocols in EDGE-013 have bounded queues, owner-death
+            # cleanup, and cross-platform tests.  Quietly running one instance in
+            # every worker would be observably incorrect.
+            unsupported_workers = [
+                name
+                for name, enabled in (
+                    ("--upload", upload),
+                    ("--dav", dav),
+                    ("--cgi", cgi_dir is not None),
+                    ("--proxy", bool(proxy_routes)),
+                    ("--http3", http3),
+                    ("--tftp", tftp),
+                    ("--discoverable", discoverable),
+                    ("--qr", qr),
+                    ("--acme", bool(acme)),
+                    ("--access-log", access_log is not None),
+                )
+                if enabled
+            ]
+            if unsupported_workers:
+                raise ValueError(
+                    "--workers > 1 currently supports static, WSGI, or ASGI serving; "
+                    f"incompatible with {', '.join(unsupported_workers)}"
+                )
         return cls(
             directory=Path(directory).resolve(),
             host=host,
@@ -302,6 +444,7 @@ class Config:
             max_compress_size=max_compress_size,
             compression_cache_size=compression_cache_size,
             max_buffered_response=max_buffered_response,
+            small_file_buffer_size=small_file_buffer_size,
             max_listing_entries=max_listing_entries,
             listing_page_size=listing_page_size,
             listing_details_threshold=listing_details_threshold,
@@ -312,9 +455,25 @@ class Config:
             acme_staging=acme_staging,
             access_log=access_log,
             access_log_format=access_log_format,
+            access_log_queue=access_log_queue,
+            access_log_queue_bytes=access_log_queue_bytes,
+            access_log_overflow=access_log_overflow,
+            access_log_batch_size=access_log_batch_size,
+            access_log_batch_wait=access_log_batch_wait,
+            access_log_drain_timeout=access_log_drain_timeout,
             timeout=timeout,
+            keepalive_timeout=keepalive_timeout,
+            request_head_timeout=request_head_timeout,
+            request_body_timeout=request_body_timeout,
+            write_timeout=write_timeout,
+            drain_timeout=drain_timeout,
+            workers=workers,
+            worker_start_timeout=worker_start_timeout,
+            force_timeout=force_timeout,
             max_workers=max_workers,
+            max_archive_streams=max_archive_streams,
             max_connections=max_connections,
+            max_requests_per_connection=max_requests_per_connection,
             http2=http2,
             max_h2_streams=max_h2_streams,
             http3=http3,
@@ -323,6 +482,8 @@ class Config:
             wsgi_app=wsgi_app,
             cgi_dir=cgi_dir,
             asgi_app=asgi_app,
+            lifespan=lifespan,
+            lifespan_timeout=lifespan_timeout,
             proxy_routes=proxy_routes,
             tftp=tftp,
             tftp_port=tftp_port,

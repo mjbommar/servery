@@ -54,7 +54,11 @@ http://localhost:8000/photos/?archive=zip
 ```
 
 Only regular files are included — symlinks are skipped, so an archive can never leak
-content from outside the served tree.
+content outside the served tree. Archive bodies stream rather than accumulating
+in memory. For a public service, `--max-archive-streams N` can reserve only N
+concurrent archive/selection producers per worker; excess requests receive `503`
+with `Retry-After: 1` before response headers. Keep N below `--max-workers` so
+cheap static requests retain at least one handler.
 
 ## Pick a few files → one zip (no JavaScript)
 

@@ -23,7 +23,7 @@ curl -fsSL https://github.com/mjbommar/servery/releases/latest/download/servery.
 [`uvx`](https://docs.astral.sh/uv/) (from uv) is the easiest path — it manages Python
 for you. The piped `servery.py` is the released package amalgamated into one auditable
 file (pure stdlib): inspect it first if you like (`curl -fsSL <url> | less`), pin a
-version (`…/releases/download/v1.5.0/servery.py`), or grab the `servery.pyz` zipapp.
+version (`…/releases/download/v1.6.0/servery.py`), or grab the `servery.pyz` zipapp.
 
 ```console
 $ servery                                  # serve the current directory on http://127.0.0.1:8000

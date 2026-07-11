@@ -2,6 +2,12 @@ name: Performance trends
 
 on:
   workflow_dispatch:
+    inputs:
+      external_comparison:
+        description: Run the Docker comparison against nginx/Caddy/Gunicorn/Uvicorn
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: "23 7 * * 1"
 
@@ -29,5 +35,28 @@ jobs:
         with:
           name: servery-performance-${{ github.run_id }}
           path: benchmarks/artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  external-comparison:
+    name: External server comparison
+    if: github.event_name == 'workflow_dispatch' && inputs.external_comparison
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - run: >-
+          uv run python scripts/compare_servers.py
+          --duration 5 --warmup 1 --trials 3
+          --json benchmarks/artifacts/external-comparison.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: servery-external-comparison-${{ github.run_id }}
+          path: benchmarks/artifacts/external-comparison.json
           if-no-files-found: error
           retention-days: 30

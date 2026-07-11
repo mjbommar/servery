@@ -41,6 +41,18 @@ GZIP_MAX = 10 * 1024 * 1024
 type CacheKey = tuple[str, int, int, str, int]
 
 
+class _Flight:
+    """One transient same-key computation shared by concurrent callers."""
+
+    __slots__ = ("error", "event", "references", "value")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.references = 0
+        self.value: bytes | None = None
+        self.error: BaseException | None = None
+
+
 class CompressionCache:
     """Thread-safe, byte-bounded LRU of encoded static representations."""
 
@@ -49,10 +61,10 @@ class CompressionCache:
         self._bytes = 0
         self._items: OrderedDict[CacheKey, bytes] = OrderedDict()
         self._lock = threading.Lock()
-        # Cache misses are deliberately serialized when caching is enabled. This
-        # prevents a hot-file miss storm from multiplying compression CPU and
-        # working memory; the default zero-byte cache pays no serialization cost.
-        self._compute_lock = threading.Lock()
+        # Same-key misses share one transient result even when retention is disabled.
+        # Distinct files may compute concurrently under the caller's worker budget;
+        # flights are reference-counted and removed after the last concurrent caller.
+        self._flights: dict[CacheKey, _Flight] = {}
 
     @property
     def current_bytes(self) -> int:
@@ -83,18 +95,41 @@ class CompressionCache:
 
     def get_or_compute(self, key: CacheKey, factory: Callable[[], bytes]) -> bytes:
         """Return a cached value or compute one without concurrent miss stampedes."""
-        if self.max_bytes <= 0:
-            return factory()
         cached = self.get(key)
         if cached is not None:
             return cached
-        with self._compute_lock:
-            cached = self.get(key)
-            if cached is not None:
-                return cached
-            value = factory()
-            self.put(key, value)
-            return value
+        with self._lock:
+            flight = self._flights.get(key)
+            owner = flight is None
+            if flight is None:
+                flight = _Flight()
+                self._flights[key] = flight
+            flight.references += 1
+        try:
+            if owner:
+                cached = self.get(key)
+                try:
+                    value = cached if cached is not None else factory()
+                    if cached is None:
+                        self.put(key, value)
+                except BaseException as exc:
+                    flight.error = exc
+                    flight.event.set()
+                    raise
+                flight.value = value
+                flight.event.set()
+                return value
+            flight.event.wait()
+            if flight.error is not None:
+                raise flight.error
+            if flight.value is None:  # pragma: no cover - event/result invariant
+                raise RuntimeError("compression flight completed without a result")
+            return flight.value
+        finally:
+            with self._lock:
+                flight.references -= 1
+                if flight.references == 0:
+                    self._flights.pop(key, None)
 
 
 def cache_key(path: str, stat: os.stat_result, coding: str, level: int | None = None) -> CacheKey:

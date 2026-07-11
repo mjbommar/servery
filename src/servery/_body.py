@@ -7,6 +7,9 @@ callers supply their configurable size limit and decide how to report the error.
 
 from __future__ import annotations
 
+import contextlib
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Protocol
@@ -16,12 +19,25 @@ class Readable(Protocol):
     def read(self, size: int, /) -> bytes: ...
 
 
+class BodyStream(Readable, Protocol):
+    def readline(self, size: int = -1, /) -> bytes: ...
+
+
+class TimeoutSocket(Protocol):
+    def gettimeout(self) -> float | None: ...
+    def settimeout(self, value: float | None) -> None: ...
+
+
 class FramingError(ValueError):
     """A request body is ambiguously or invalidly framed."""
 
     def __init__(self, message: str, status: int = HTTPStatus.BAD_REQUEST) -> None:
         super().__init__(message)
         self.status = status
+
+
+class BodyTimeoutError(TimeoutError):
+    """The configured total request-body consumption budget expired."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,3 +130,102 @@ class LimitedReader:
             if not self.read(min(64 * 1024, self.remaining)):
                 break
         return self.remaining == 0
+
+
+class DeadlineReader:
+    """Apply one total deadline across blocking reads from a request body.
+
+    The clock starts lazily on the first read. Each operation retains any
+    shorter socket progress timeout and restores it before returning.
+    """
+
+    __slots__ = ("_buffer", "_deadline", "_sock", "_source", "_timeout")
+
+    def __init__(
+        self,
+        source: BodyStream,
+        sock: TimeoutSocket,
+        timeout: float,
+    ) -> None:
+        self._source = source
+        self._sock = sock
+        self._timeout = timeout
+        self._deadline: float | None = None
+        self._buffer = b""
+
+    def _remaining(self) -> float:
+        now = time.monotonic()
+        if self._deadline is None:
+            self._deadline = now + self._timeout
+        remaining = self._deadline - now
+        if remaining <= 0:
+            raise BodyTimeoutError("request body deadline expired")
+        return remaining
+
+    def _read_once(self, size: int) -> bytes:
+        remaining = self._remaining()
+        previous = self._sock.gettimeout()
+        total_is_shorter = previous is None or remaining <= previous
+        effective = remaining if total_is_shorter else previous
+        method: Callable[[int], bytes] = getattr(self._source, "read1", self._source.read)
+        if previous != effective:
+            self._sock.settimeout(effective)
+        try:
+            return method(size)
+        except TimeoutError as exc:
+            if total_is_shorter:
+                raise BodyTimeoutError("request body deadline expired") from exc
+            raise
+        finally:
+            if previous != effective:
+                with contextlib.suppress(OSError):
+                    self._sock.settimeout(previous)
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        self._remaining()
+        chunks: list[bytes] = []
+        if self._buffer:
+            if size >= 0 and len(self._buffer) > size:
+                data, self._buffer = self._buffer[:size], self._buffer[size:]
+                return data
+            chunks.append(self._buffer)
+            self._buffer = b""
+        if size < 0:
+            while data := self._read_once(64 * 1024):
+                chunks.append(data)
+            return b"".join(chunks)
+        remaining = size - sum(map(len, chunks))
+        while remaining > 0:
+            data = self._read_once(remaining)
+            if not data:
+                break
+            chunks.append(data)
+            remaining -= len(data)
+        return b"".join(chunks)
+
+    def readline(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        self._remaining()
+        chunks: list[bytes] = []
+        remaining = size
+        while remaining != 0:
+            newline = self._buffer.find(b"\n")
+            take = len(self._buffer) if newline < 0 else newline + 1
+            if remaining > 0:
+                take = min(take, remaining)
+            if take:
+                chunks.append(self._buffer[:take])
+                self._buffer = self._buffer[take:]
+                if chunks[-1].endswith(b"\n") or (remaining > 0 and take == remaining):
+                    break
+                if remaining > 0:
+                    remaining -= take
+            want = 64 * 1024 if remaining < 0 else min(64 * 1024, remaining)
+            data = self._read_once(want)
+            if not data:
+                break
+            self._buffer += data
+        return b"".join(chunks)

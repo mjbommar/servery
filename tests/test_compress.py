@@ -161,6 +161,98 @@ class CompressionCacheTest(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertEqual(results, [b"encoded"] * 4)
 
+    def test_distinct_cache_keys_compute_concurrently(self):
+        cache = _compress.CompressionCache(1024)
+        rendezvous = threading.Barrier(2, timeout=1)
+        results: list[bytes] = []
+        errors: list[BaseException] = []
+
+        def worker(name: str) -> None:
+            try:
+                result = cache.get_or_compute(
+                    self._key(name),
+                    lambda: (rendezvous.wait(), name.encode())[1],
+                )
+                results.append(result)
+            except BaseException as exc:  # capture thread failures for the assertion
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(name,)) for name in ("a", "b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(2)
+
+        self.assertEqual(errors, [])
+        self.assertCountEqual(results, [b"a", b"b"])
+        self.assertEqual(cache._flights, {})  # lifecycle invariant
+
+    def test_disabled_cache_shares_only_concurrent_same_key_result(self):
+        cache = _compress.CompressionCache(0)
+        key = self._key("uncached-hot")
+        entered = threading.Event()
+        release = threading.Event()
+        calls = 0
+        results: list[bytes] = []
+
+        def factory() -> bytes:
+            nonlocal calls
+            calls += 1
+            entered.set()
+            release.wait(1)
+            return b"transient"
+
+        first = threading.Thread(target=lambda: results.append(cache.get_or_compute(key, factory)))
+        second = threading.Thread(target=lambda: results.append(cache.get_or_compute(key, factory)))
+        first.start()
+        self.assertTrue(entered.wait(1))
+        second.start()
+        time.sleep(0.01)
+        release.set()
+        first.join(2)
+        second.join(2)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(results, [b"transient", b"transient"])
+        self.assertEqual(cache.current_bytes, 0)
+        self.assertIsNone(cache.get(key))
+        self.assertEqual(cache.get_or_compute(key, lambda: b"later"), b"later")
+
+    def test_single_flight_failure_reaches_waiters_and_is_reclaimed(self):
+        cache = _compress.CompressionCache(1024)
+        key = self._key("broken")
+        entered = threading.Event()
+        release = threading.Event()
+        errors: list[str] = []
+        calls = 0
+
+        def factory() -> bytes:
+            nonlocal calls
+            calls += 1
+            entered.set()
+            release.wait(1)
+            raise OSError("encode failed")
+
+        def worker() -> None:
+            try:
+                cache.get_or_compute(key, factory)
+            except OSError as exc:
+                errors.append(str(exc))
+
+        first = threading.Thread(target=worker)
+        second = threading.Thread(target=worker)
+        first.start()
+        self.assertTrue(entered.wait(1))
+        second.start()
+        time.sleep(0.01)
+        release.set()
+        first.join(2)
+        second.join(2)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(errors, ["encode failed", "encode failed"])
+        self.assertEqual(cache._flights, {})
+
     def test_shared_response_builder_reuses_and_invalidates_encoded_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp, "hot.txt")

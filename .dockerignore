@@ -1,0 +1,13 @@
+.git
+.venv
+.benchmarks
+.coverage*
+.pytest_cache
+.ruff_cache
+benchmarks/artifacts
+benchmarks/baselines
+build
+dist
+site
+**/__pycache__
+**/*.pyc

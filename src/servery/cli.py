@@ -8,6 +8,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from servery._supervisor import SupervisorError
 from servery._version import __version__
 from servery.config import Config
 from servery.http3 import Http3UnavailableError
@@ -32,9 +33,15 @@ PROFILES: dict[str, dict[str, object]] = {
         "cors": True,
         "http2": True,
         "compression_cache_size": 32 * 1024 * 1024,
+        "max_requests_per_connection": 1000,
     },
     "dev": {"host": "127.0.0.1", "spa": True, "cors": True},
-    "app": {"host": _ALL, "tls_self_signed": True, "max_workers": os.cpu_count() or 4},
+    "app": {
+        "host": _ALL,
+        "tls_self_signed": True,
+        "max_workers": os.cpu_count() or 4,
+        "max_requests_per_connection": 1000,
+    },
 }
 # Network-exposed + writable -> auth is mandatory.
 _PROFILE_REQUIRES_AUTH = frozenset({"inbox", "public-readwrite"})
@@ -202,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         metavar="BYTES",
-        help="byte budget for cached compressed static responses (default: 0, disabled)",
+        help="per-worker byte budget for cached compressed static responses (default: 0, disabled)",
     )
     parser.add_argument(
         "--max-buffered-response",
@@ -210,6 +217,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=1024 * 1024,
         metavar="BYTES",
         help="largest h2/h3 file buffered as one response (default: 1 MiB; 0 streams all files)",
+    )
+    parser.add_argument(
+        "--small-file-buffer-size",
+        type=int,
+        default=16 * 1024,
+        metavar="BYTES",
+        help="largest plaintext h1 file sent from a bounded buffer "
+        "(default: 16 KiB; 0 always uses sendfile/streaming)",
     )
     parser.add_argument(
         "--max-listing-entries",
@@ -273,6 +288,61 @@ def build_parser() -> argparse.ArgumentParser:
         help="per-connection socket timeout (default: 30)",
     )
     parser.add_argument(
+        "--keepalive-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="idle wait for the next HTTP/1 request (default: inherit --timeout)",
+    )
+    parser.add_argument(
+        "--request-body-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="total time from first HTTP/1 body read to completion (default: disabled)",
+    )
+    parser.add_argument(
+        "--request-head-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="total time from first HTTP/1 head byte to completion (default: disabled)",
+    )
+    parser.add_argument(
+        "--write-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="maximum wait without response-write progress (default: transport behavior)",
+    )
+    parser.add_argument(
+        "--drain-timeout",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="maximum graceful-shutdown drain time before forced closure (default: 30)",
+    )
+    parser.add_argument(
+        "--workers",
+        default="1",
+        metavar="N|auto",
+        help="supervised worker processes (default: 1; use auto for available CPUs)",
+    )
+    parser.add_argument(
+        "--worker-start-timeout",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="maximum wait for every worker to report startup readiness (default: 30)",
+    )
+    parser.add_argument(
+        "--force-timeout",
+        type=float,
+        default=1.0,
+        metavar="SECONDS",
+        help="wait after terminate before killing an unresponsive worker (default: 1)",
+    )
+    parser.add_argument(
         "--max-workers",
         type=int,
         default=None,
@@ -282,11 +352,25 @@ def build_parser() -> argparse.ArgumentParser:
         "(sharply lower tail latency)",
     )
     parser.add_argument(
+        "--max-archive-streams",
+        type=int,
+        default=None,
+        metavar="N",
+        help="maximum concurrent archive/selection producers per worker (default: unbounded)",
+    )
+    parser.add_argument(
         "--max-connections",
         type=int,
         default=256,
         metavar="N",
-        help="maximum simultaneous HTTP connections/sessions (default: 256)",
+        help="maximum simultaneous HTTP connections/sessions per worker (default: 256)",
+    )
+    parser.add_argument(
+        "--max-requests-per-connection",
+        type=int,
+        default=0,
+        metavar="N",
+        help="close HTTP/1 connections after N requests (default: 0, unlimited)",
     )
     parser.add_argument(
         "--http2",
@@ -314,6 +398,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--asgi",
         metavar="MODULE:APP",
         help="serve an ASGI application (opt-in, experimental; supports TLS), e.g. myapp:app",
+    )
+    parser.add_argument(
+        "--lifespan",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="ASGI lifespan policy: auto (default), on (required), or off",
+    )
+    parser.add_argument(
+        "--lifespan-timeout",
+        type=float,
+        default=5.0,
+        metavar="SECONDS",
+        help="maximum wait for ASGI lifespan startup or shutdown (default: 5)",
     )
     parser.add_argument(
         "--proxy",
@@ -406,6 +503,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="access log format: clf (default), combined (+ referer/user-agent), or json",
     )
     parser.add_argument(
+        "--access-log-queue",
+        type=int,
+        default=0,
+        metavar="N",
+        help="waiting records for bounded asynchronous logging (default: 0, synchronous)",
+    )
+    parser.add_argument(
+        "--access-log-queue-bytes",
+        type=int,
+        default=8 * 1024 * 1024,
+        metavar="BYTES",
+        help="access-log active+queued retained-byte budget (default: 8 MiB)",
+    )
+    parser.add_argument(
+        "--access-log-overflow",
+        choices=("block", "drop"),
+        default="block",
+        help="access-log saturation policy (default: block for lossless backpressure)",
+    )
+    parser.add_argument(
+        "--access-log-batch-size",
+        type=int,
+        default=8,
+        metavar="N",
+        help="maximum records per access-log write (default: 8)",
+    )
+    parser.add_argument(
+        "--access-log-batch-wait",
+        type=float,
+        default=0.001,
+        metavar="SECONDS",
+        help="maximum access-log batching window (default: 0.001)",
+    )
+    parser.add_argument(
+        "--access-log-drain-timeout",
+        type=float,
+        default=5.0,
+        metavar="SECONDS",
+        help="maximum access-log flush wait during shutdown (default: 5)",
+    )
+    parser.add_argument(
         "--acme-production",
         action="store_false",
         dest="acme_staging",
@@ -469,6 +607,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         max_compress_size=args.max_compress_size,
         compression_cache_size=args.compression_cache_size,
         max_buffered_response=args.max_buffered_response,
+        small_file_buffer_size=args.small_file_buffer_size,
         max_listing_entries=args.max_listing_entries,
         listing_page_size=args.listing_page_size,
         listing_details_threshold=args.listing_details_threshold,
@@ -483,12 +622,28 @@ def config_from_args(args: argparse.Namespace) -> Config:
         acme_staging=args.acme_staging,
         access_log=args.access_log,
         access_log_format=args.access_log_format,
+        access_log_queue=args.access_log_queue,
+        access_log_queue_bytes=args.access_log_queue_bytes,
+        access_log_overflow=args.access_log_overflow,
+        access_log_batch_size=args.access_log_batch_size,
+        access_log_batch_wait=args.access_log_batch_wait,
+        access_log_drain_timeout=args.access_log_drain_timeout,
         spa=args.spa,
         cache_max_age=args.cache_max_age,
         security_headers=args.security_headers,
         timeout=args.timeout,
+        keepalive_timeout=args.keepalive_timeout,
+        request_head_timeout=args.request_head_timeout,
+        request_body_timeout=args.request_body_timeout,
+        write_timeout=args.write_timeout,
+        drain_timeout=args.drain_timeout,
+        workers=args.workers,
+        worker_start_timeout=args.worker_start_timeout,
+        force_timeout=args.force_timeout,
         max_workers=args.max_workers,
+        max_archive_streams=args.max_archive_streams,
         max_connections=args.max_connections,
+        max_requests_per_connection=args.max_requests_per_connection,
         http2=args.http2,
         max_h2_streams=args.max_h2_streams,
         http3=args.http3,
@@ -497,6 +652,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         wsgi_app=args.wsgi,
         cgi_dir=args.cgi,
         asgi_app=args.asgi,
+        lifespan=args.lifespan,
+        lifespan_timeout=args.lifespan_timeout,
         proxy=args.proxy,
         tftp=args.tftp,
         tftp_port=args.tftp_port,
@@ -516,7 +673,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         serve(config)  # pragma: no cover - blocking server loop
     except KeyboardInterrupt:  # pragma: no cover
         return 0
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, SupervisorError) as exc:
         # Bad --auth spec, unreadable --tls-password-file, etc.: fail cleanly.
         print(f"servery: error: {exc}", file=sys.stderr)
         return 2

@@ -22,7 +22,7 @@ curl -fsSL https://github.com/mjbommar/servery/releases/latest/download/servery.
 easiest path — it even fetches a matching Python for you. The piped `servery.py` is the
 released package amalgamated into one auditable file (pure stdlib). It runs code, so
 inspect it first if you like (`curl -fsSL <url> | less`), pin a version
-(`…/releases/download/v1.5.0/servery.py`), or grab the `servery.pyz` zipapp — both are
+(`…/releases/download/v1.6.0/servery.py`), or grab the `servery.pyz` zipapp — both are
 attached to [every release](https://github.com/mjbommar/servery/releases/latest).
 
 Serve or share a directory over HTTP with the niceties people expect from tools like
@@ -65,9 +65,12 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
   are serialized across upload, WebDAV, archive extraction, and TFTP.
 - **Archive download** — stream any directory as `tar.gz` or `zip` (`?archive=tar.gz`), or
   tick the per-entry checkboxes and **zip just the selected files/folders** — all with **no
-  JavaScript**.
-- **Access logging** — `--access-log PATH` writes one line per response in Common Log Format
-  (`--access-log-format clf`/`combined`/`json`), separate from the diagnostic stderr log.
+  JavaScript**. `--max-archive-streams` adds per-worker admission before headers.
+- **Access logging** — `--access-log PATH` writes HTTP/1 file-serving responses in
+  Common Log Format (`clf`/`combined`/`json`). Synchronous writes remain the measured
+  default; setting `--access-log-queue` opts into a count- and byte-bounded batched
+  writer. Backpressure versus drop, batching, and drain are configurable; the
+  diagnostic stderr log remains separate.
 - **WebDAV** — `--dav` lets macOS Finder / Windows Explorer / Linux *mount* the share as a
   network drive (read-only); `--dav-write` adds write (PUT/DELETE/MKCOL/MOVE/COPY). Pure
   stdlib, same path-safety as everything else; writes honor `--auth`. Writable DAV
@@ -93,7 +96,8 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
   Pure stdlib. No auth or encryption — **trusted LAN / lab networks only** (off by default).
 - **Safe by default** — binds `127.0.0.1`, path-traversal + symlink-escape protection, a
   default socket timeout, a 256-connection/session ceiling, distinct HTTP/2/TFTP budgets,
-  and loud warnings when you expose it or run auth without TLS.
+  optional HTTP/1 idle/request-count reuse limits, an opt-in cross-transport stalled-write
+  deadline, and loud warnings when you expose it or run auth without TLS.
 - **Free-threading ready** — runs under the no-GIL builds (3.13t/3.14t); immutable config,
   no module-level mutable state.
 
@@ -180,8 +184,9 @@ A reproducible per-transport benchmark suite (pytest-benchmark) lives in `benchm
 uv run --group bench pytest benchmarks/   # HTTP/1.1, TLS, HTTP/2, WSGI, CGI, ASGI, proxy, …
 ```
 
-See [BENCHMARKS.md](BENCHMARKS.md) for reference numbers, the HTTP/3 case, and the
-regression-comparison workflow.
+See [BENCHMARKS.md](BENCHMARKS.md) for reference numbers, the HTTP/3 case, the
+regression workflow, and the controlled static/WSGI/ASGI comparisons against nginx,
+Caddy, Gunicorn, and Uvicorn.
 
 ## License
 

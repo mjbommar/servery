@@ -1,0 +1,21 @@
+schema_version = 1
+profile = "production"
+
+[listener]
+host = "0.0.0.0"
+port = 443
+http2 = true
+
+[tls]
+mode = "manual"
+
+[tls.manual]
+certificate_file = "/etc/servery/site.crt"
+private_key_file = "/etc/servery/site.key"
+private_key_password = { file = "/run/secrets/tls-key-password" }
+
+[application]
+mode = "static"
+
+[application.static]
+root = "/srv/www"

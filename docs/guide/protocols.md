@@ -120,3 +120,5 @@ quickly instead of growing an unbounded queue. servery also runs cleanly on the
 | `--max-workers N` | unbounded | bound concurrency to N worker threads |
 | `--max-buffered-response BYTES` | 1 MiB | HTTP/2/3 buffered fast-path threshold |
 | `--timeout SECONDS` | `30` | per-connection socket timeout (Slowloris bound) |
+| `--request-head-timeout SECONDS` | off | total HTTP/1 request-head budget from first byte |
+| `--request-body-timeout SECONDS` | off | total HTTP/1 body-consumption budget from first read |

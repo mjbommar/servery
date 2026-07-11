@@ -52,6 +52,7 @@ class ProfileTest(unittest.TestCase):
         self.assertTrue(cfg.cors)
         self.assertTrue(cfg.http2)
         self.assertEqual(cfg.compression_cache_size, 32 * 1024 * 1024)
+        self.assertEqual(cfg.max_requests_per_connection, 1000)
 
     def test_dev_is_local(self):
         cfg = _config("--profile", "dev")
@@ -63,11 +64,13 @@ class ProfileTest(unittest.TestCase):
     def test_app_sets_workers(self):
         cfg = _config("--profile", "app")
         self.assertEqual(cfg.max_workers, os.cpu_count() or 4)
+        self.assertEqual(cfg.max_requests_per_connection, 1000)
 
     def test_no_profile_is_default(self):
         cfg = _config()
         self.assertEqual(cfg.host, "127.0.0.1")
         self.assertFalse(cfg.tls_self_signed)
+        self.assertEqual(cfg.max_requests_per_connection, 0)
 
 
 if __name__ == "__main__":

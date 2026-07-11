@@ -1,0 +1,22 @@
+schema_version = 1
+profile = "production"
+
+[listener]
+host = "0.0.0.0"
+port = 443
+http2 = true
+
+[tls]
+mode = "acme"
+
+[tls.acme]
+domains = ["example.com", "www.example.com"]
+email = "ops@example.com"
+directory = "production"
+state_directory = "/var/lib/servery/acme"
+
+[application]
+mode = "static"
+
+[application.static]
+root = "/srv/www"

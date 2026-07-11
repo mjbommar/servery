@@ -26,19 +26,30 @@ out-of-band `.sha256` sidecar, without taxing the default download path.
   describes a different representation, so the digest is omitted there.
 
 ## Design decisions
-- New `servery/_digest.py`, pure functions:
+- `servery/_digest.py` provides:
   - `choose_algorithm(want)` — tolerant `Want-*-Digest` parser (bare key, integer
     preference, `?0`/`?1`); returns the RFC key or `None`.
-  - `field_value(algorithm, data)` and `field_value_for_file(path, algorithm)` (the
-    file form streams in 256 KiB chunks; flat memory).
-- `handler.ServeryHandler._send_repr_digest(path)` reads `Want-Repr-Digest`, computes,
-  and emits the header. Called in the identity 200 and 206 branches of `_serve_file`
-  (after `Last-Modified`, before the body). The double file read (digest + send) is
-  acceptable because it happens only on explicit request.
+  - `field_value(algorithm, data)`, `field_value_for_file(path, algorithm)`, and
+    `field_value_for_handle(handle, algorithm, expected_size)`; file forms stream
+    in 256 KiB chunks with flat memory;
+  - an entry-bounded `DigestCache` whose zero-entry mode retains nothing but
+    shares one transient result among concurrent requests for the same identity.
+- HTTP/1 hashes the same opened handle used for metadata and body emission. An
+  atomic pathname replacement can no longer pair a new digest with old bytes.
+  Exact-size hashing fails before file headers on truncation and restores the
+  handle position for range/sendfile delivery.
+- Production retains zero digest entries. A public retained-cache setting is
+  deferred until metadata invalidation behavior and real workloads justify it.
+  The benchmark-only selector explores separate digest worker, queue, and cache
+  budgets; hashing never runs on its event loop.
 
 ## Out of scope (now)
 - `Content-Digest` / per-range or per-coding digests.
 - `Repr-Digest` on the HTTP/2 / HTTP/3 buffered backends (HTTP/1.1 is the
   full-featured path, and where parallel-range downloads matter).
 - Emitting digests unsolicited, or on directory listings.
+- A shipped retained digest cache or selector digest-worker setting.
 - HTTP Message Signatures (RFC 9421), for which this is the natural input later.
+
+Performance and scheduling evidence is recorded in
+[Opened-identity digests and bounded selector hashing — 2026-07-10](performance-experiments/2026-07-10-selector-digests.md).

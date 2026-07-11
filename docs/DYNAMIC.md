@@ -8,7 +8,8 @@ only the standard library**, on every supported Python version.
 > **D1 `--wsgi`** (`servery/wsgi.py`, lean HTTP/1.1 engine, `wsgiref.validate`-gated,
 > ~20k req/s). **D2 `--cgi`** (`servery/cgi.py`, RFC 3875 + the full security suite).
 > **D3 `--asgi`** (`servery/asgi.py`, asyncio "mini-uvicorn", lifespan, ~19k req/s,
-> verified against Starlette). Each is off by default; HTTP/1.1 only. ASGI also
+> verified against Starlette and FastAPI). Each is off by default; WSGI and ASGI
+> currently use their dedicated HTTP/1.1 engines. ASGI also
 > supports TLS and WebSocket upgrades. The notes below remain the design record.
 
 ## 0. The boundary (read first)
@@ -71,10 +72,13 @@ thread-per-request handler. Per request:
    request-derived environ and the socket streams; wsgiref does the protocol.
 3. The app is imported once at startup (`module:callable`).
 
-Bounds: use the separate `--max-request-body` request-body cap and the
-socket `--timeout`. Mounting model: app at `/` by default, optionally under a
-prefix (the prefix becomes `SCRIPT_NAME`); static files can still be served from
-other paths.
+Bounds: use the separate `--max-request-body` request-body cap, socket
+`--timeout`, optional total `--request-head-timeout`, and optional total
+`--request-body-timeout`. The head clock spans the first byte through the blank
+line; the body clock starts on the app's first body read and includes pauses
+between reads. Mounting model:
+app at `/` by default, optionally under a prefix (the prefix becomes
+`SCRIPT_NAME`); static files can still be served from other paths.
 
 ### 2.2 CGI — `--cgi DIR` (small core, security-heavy)
 
@@ -103,15 +107,26 @@ an ASGI `scope` + `receive`/`send`:
   `http_version`, `scheme`, `server`, `client`, `asgi:{version:"3.0"}`).
 - **`receive()`** yields `http.request` events (body, `more_body` for streaming
   request bodies); **`send()`** consumes `http.response.start` +
-  `http.response.body` events (with backpressure via `drain()`).
-- **lifespan** protocol (`startup`/`shutdown`) handled once per process.
-- Scope it to the **HTTP** ASGI scope first; **WebSocket** scope is a later,
-  separate sub-phase (servery has no WebSocket support today). HTTP/2 for ASGI is
-  out of this plan.
+  `http.response.body` events (with backpressure via `drain()`). Response order,
+  exact `Content-Length`, server-owned connection/transfer framing, and
+  incomplete application returns are enforced. HTTP scopes advertise the ASGI
+  trailers extension; HTTP/1 emits trailer fields only after client
+  `TE: trailers` negotiation.
+- **lifespan** protocol (`startup`/`shutdown`) handled once per process. The
+  `auto` default tolerates unsupported callables; `on` requires support and
+  `off` removes the lifecycle/state path. Explicit failure and positive
+  per-phase timeout prevent false readiness or indefinite shutdown. Successful
+  lifespan state is shallow-copied into each HTTP and WebSocket scope.
+- **WebSocket** scopes are supported over cleartext and TLS with the same
+  authentication, write-progress, and lifespan-state policy. HTTP/2-to-ASGI is
+  not shipped; it is required before an ASGI production configuration may
+  advertise `h2`, rather than being silently delegated to another server.
 
-This is effectively a minimal `uvicorn` in the stdlib. It is the highest-effort
-phase and the one furthest from servery's sync core — hence last, and explicitly
-**experimental** until proven.
+This is effectively a minimal ASGI server in the stdlib. Basic Starlette and
+FastAPI compatibility is proven, but background tasks, SSE, multipart limits,
+framework WebSockets, long-running leak/recycling, complete graceful drain, and
+HTTP/2 adaptation remain production gates. “Shipped” is not the same claim as
+“production-ready.”
 
 ## 3. Security model (the hard part is CGI)
 
@@ -172,9 +187,13 @@ each independently revertable.
 
 - **Not** a framework: no routing, no middleware, no app scaffolding. servery
   hosts an interface; the operator brings the app.
-- **WebSocket / HTTP-2-for-ASGI**: out of the initial plan (D3b stretch / never).
-- **Hot reload, process managers, multiple workers**: out of scope — that is
-  gunicorn/uvicorn territory. servery hosts one app, one process.
+- **HTTP/2-for-ASGI**: not in the original D3 delivery, but in the direct-edge
+  production target. Until it lands, ASGI production mode must advertise only
+  HTTP/1.1.
+- **Hot reload and multiple workers**: not part of the original dynamic-handler
+  phases, but required production server responsibilities. Servery's supervisor
+  must provide them without requiring Gunicorn, Uvicorn, or another process
+  manager.
 - **Mounting**: does a dynamic handler take the whole server, or mount under a
   path with static files elsewhere? (Lean: whole-server by default, optional
   prefix.) — to settle in D1.

@@ -6,6 +6,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from servery import _body
 from servery.config import Config
@@ -85,6 +86,37 @@ class LimitedReaderTest(unittest.TestCase):
         short = _body.LimitedReader(io.BytesIO(b"x"), 2)
         self.assertFalse(short.drain())
         self.assertEqual(short.remaining, 1)
+
+
+class DeadlineReaderTest(unittest.TestCase):
+    class Socket:
+        def __init__(self, timeout: float | None = 30.0) -> None:
+            self.timeout = timeout
+            self.set_calls: list[float | None] = []
+
+        def gettimeout(self) -> float | None:
+            return self.timeout
+
+        def settimeout(self, value: float | None) -> None:
+            self.timeout = value
+            self.set_calls.append(value)
+
+    def test_total_deadline_is_lazy_and_restores_socket_timeout(self):
+        sock = self.Socket()
+        reader = _body.DeadlineReader(io.BytesIO(b"ab"), sock, 1.0)
+        with mock.patch("servery._body.time.monotonic", side_effect=(10.0, 10.0, 11.1)):
+            self.assertEqual(reader.read(1), b"a")
+            with self.assertRaises(_body.BodyTimeoutError):
+                reader.read(1)
+        self.assertEqual(sock.timeout, 30.0)
+        self.assertEqual(sock.set_calls, [1.0, 30.0])
+
+    def test_readline_preserves_bytes_after_the_delimiter(self):
+        sock = self.Socket()
+        reader = _body.DeadlineReader(io.BytesIO(b"a\nb"), sock, 1.0)
+        with mock.patch("servery._body.time.monotonic", return_value=0.0):
+            self.assertEqual(reader.readline(), b"a\n")
+            self.assertEqual(reader.read(1), b"b")
 
 
 class FramingWireTest(unittest.TestCase):

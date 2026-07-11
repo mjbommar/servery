@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from servery import http3
+from servery import _response, http3
 from servery.config import Config
 
 
@@ -28,6 +28,23 @@ class Http3HelpersTest(unittest.TestCase):
         status, _, body = self._build("GET", "/hello.txt")
         self.assertEqual(status, 200)
         self.assertEqual(body, b"hi there")
+
+    def test_streaming_file_body_owns_the_validated_handle(self):
+        config = Config.create(
+            self.dir,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            max_buffered_response=1,
+        )
+        status, _, body = http3.build_response(config, self.root_real, "GET", "/hello.txt")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(body, _response.FileBody)
+        assert isinstance(body, _response.FileBody)
+        try:
+            self.assertEqual(body.handle.read(), b"hi there")
+        finally:
+            body.close()
 
     def test_listing(self):
         status, _, body = self._build("GET", "/")

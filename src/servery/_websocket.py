@@ -21,6 +21,8 @@ import hashlib
 import struct
 from typing import Any
 
+from servery import _write
+
 _GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC 6455 §1.3
 _MAX_PAYLOAD = 16 * 1024 * 1024  # per-message cap (DoS guard)
 
@@ -82,7 +84,9 @@ async def _read_frame(reader: asyncio.StreamReader) -> tuple[bool, int, bytes]:
 
 
 async def _read_message(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    write_timeout: float | None,
 ) -> tuple[int, bytes]:
     """Read one full application message, answering ping/close along the way."""
     fragments: list[bytes] = []
@@ -93,11 +97,17 @@ async def _read_message(
         if opcode == _CLOSE:
             code = struct.unpack("!H", payload[:2])[0] if len(payload) >= 2 else 1005
             writer.write(_frame(_CLOSE, payload[:2]))  # echo the close
-            await writer.drain()
+            if write_timeout is None:
+                await writer.drain()
+            else:
+                await _write.drain(writer, write_timeout)
             raise _ClosedError(code)
         if opcode == _PING:
             writer.write(_frame(_PONG, payload))
-            await writer.drain()
+            if write_timeout is None:
+                await writer.drain()
+            else:
+                await _write.drain(writer, write_timeout)
             continue
         if opcode == _PONG:
             continue
@@ -112,7 +122,11 @@ async def _read_message(
 
 
 async def _send_handshake(
-    writer: asyncio.StreamWriter, key: bytes, subprotocol: str | None, extra: list[Any]
+    writer: asyncio.StreamWriter,
+    key: bytes,
+    subprotocol: str | None,
+    extra: list[Any],
+    write_timeout: float | None,
 ) -> None:
     lines = [
         b"HTTP/1.1 101 Switching Protocols",
@@ -125,7 +139,10 @@ async def _send_handshake(
     for name, value in extra:  # app-supplied response headers
         lines.append(bytes(name) + b": " + bytes(value))
     writer.write(b"\r\n".join(lines) + b"\r\n\r\n")
-    await writer.drain()
+    if write_timeout is None:
+        await writer.drain()
+    else:
+        await _write.drain(writer, write_timeout)
 
 
 async def serve(
@@ -134,18 +151,74 @@ async def serve(
     scope: dict[str, Any],
     app: Any,
     key: bytes,
+    *,
+    write_timeout: float | None = None,
+    shutdown: asyncio.Event | None = None,
 ) -> None:
     """Run the ASGI ``websocket`` app over this connection."""
-    state = {"connect_sent": False, "accepted": False, "closed": False}
+    state = {
+        "connect_sent": False,
+        "accepted": False,
+        "closed": False,
+        "restart_sent": False,
+    }
+    accepted = asyncio.Event()
+
+    async def restart() -> None:
+        """Notify an accepted peer that the service is restarting (RFC 6455)."""
+        if not state["accepted"] or state["restart_sent"]:
+            return
+        # Set the guard before yielding so a receive waiter and the independent
+        # watcher cannot emit duplicate close frames.
+        state["restart_sent"] = True
+        state["closed"] = True
+        writer.write(_frame(_CLOSE, struct.pack("!H", 1012)))
+        if write_timeout is None:
+            await writer.drain()
+        else:
+            await _write.drain(writer, write_timeout)
+
+    async def watch_shutdown() -> None:
+        if shutdown is None:
+            return
+        await shutdown.wait()
+        # An application may be between websocket.connect and accept.  Avoid
+        # sending a WebSocket frame before the HTTP upgrade is committed.
+        if not state["accepted"]:
+            await accepted.wait()
+        await restart()
+
+    watcher = asyncio.create_task(watch_shutdown()) if shutdown is not None else None
 
     async def receive() -> dict[str, Any]:
         if not state["connect_sent"]:
             state["connect_sent"] = True
             return {"type": "websocket.connect"}
         if state["closed"]:
-            return {"type": "websocket.disconnect", "code": 1005}
+            return {
+                "type": "websocket.disconnect",
+                "code": 1012 if state["restart_sent"] else 1005,
+            }
+        if shutdown is not None and shutdown.is_set():
+            await restart()
+            return {"type": "websocket.disconnect", "code": 1012}
         try:
-            opcode, data = await _read_message(reader, writer)
+            if shutdown is None:
+                opcode, data = await _read_message(reader, writer, write_timeout)
+            else:
+                incoming = asyncio.create_task(_read_message(reader, writer, write_timeout))
+                stopping = asyncio.create_task(shutdown.wait())
+                done, _ = await asyncio.wait(
+                    (incoming, stopping), return_when=asyncio.FIRST_COMPLETED
+                )
+                if stopping in done:
+                    incoming.cancel()
+                    await asyncio.gather(incoming, return_exceptions=True)
+                    await restart()
+                    return {"type": "websocket.disconnect", "code": 1012}
+                stopping.cancel()
+                await asyncio.gather(stopping, return_exceptions=True)
+                opcode, data = incoming.result()
         except (asyncio.IncompleteReadError, ConnectionError) as exc:
             state["closed"] = True
             return {"type": "websocket.disconnect", "code": getattr(exc, "code", 1006)}
@@ -164,14 +237,24 @@ async def serve(
     async def send(event: dict[str, Any]) -> None:
         kind = event["type"]
         if kind == "websocket.accept":
-            await _send_handshake(writer, key, event.get("subprotocol"), event.get("headers", []))
+            await _send_handshake(
+                writer,
+                key,
+                event.get("subprotocol"),
+                event.get("headers", []),
+                write_timeout,
+            )
             state["accepted"] = True
+            accepted.set()
         elif kind == "websocket.send" and not state["closed"]:
             if event.get("text") is not None:
                 writer.write(_frame(_TEXT, event["text"].encode("utf-8")))
             elif event.get("bytes") is not None:
                 writer.write(_frame(_BINARY, event["bytes"]))
-            await writer.drain()
+            if write_timeout is None:
+                await writer.drain()
+            else:
+                await _write.drain(writer, write_timeout)
         elif kind == "websocket.close":
             if not state["accepted"]:  # rejected before the handshake
                 writer.write(
@@ -179,7 +262,15 @@ async def serve(
                 )
             elif not state["closed"]:
                 writer.write(_frame(_CLOSE, struct.pack("!H", event.get("code", 1000))))
-            await writer.drain()
+            if write_timeout is None:
+                await writer.drain()
+            else:
+                await _write.drain(writer, write_timeout)
             state["closed"] = True
 
-    await app(scope, receive, send)
+    try:
+        await app(scope, receive, send)
+    finally:
+        if watcher is not None:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)

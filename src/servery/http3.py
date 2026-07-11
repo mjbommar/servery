@@ -20,8 +20,7 @@ import contextlib
 import importlib
 import os
 import threading
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, cast
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from servery import _body, _compress, _log, _response, _tls, auth, security
 
@@ -264,24 +263,33 @@ def serve_http3(  # pragma: no cover - requires aioquic + UDP
             _log.logger.info('HTTP/3 "%s %s" %s', method, path, status)
             body_size = len(body) if isinstance(body, bytes) else body.size
             send_body = method != "HEAD" and body_size > 0
-            self._http.send_headers(
-                stream_id,
-                [(b":status", str(status).encode("ascii")), *response_headers],
-                end_stream=not send_body,
-            )
-            if send_body:
-                if isinstance(body, bytes):
-                    self._http.send_data(stream_id, body, end_stream=True)
-                else:
-                    await self._stream_file(stream_id, body)
-            self.transmit()
+            try:
+                self._http.send_headers(
+                    stream_id,
+                    [(b":status", str(status).encode("ascii")), *response_headers],
+                    end_stream=not send_body,
+                )
+                if send_body:
+                    if isinstance(body, bytes):
+                        self._http.send_data(stream_id, body, end_stream=True)
+                    else:
+                        await self._stream_file(stream_id, body)
+                self.transmit()
+            finally:
+                if isinstance(body, _response.FileBody) and not body.handle.closed:
+                    await asyncio.to_thread(body.close)
 
         async def _stream_file(self, stream_id: int, body: _response.FileBody) -> None:
             remaining = body.size
-            handle = cast("BinaryIO", await asyncio.to_thread(Path(body.path).open, "rb"))
+            handle = body.handle
             try:
                 while remaining:
-                    await self._wait_for_send_capacity(stream_id)
+                    try:
+                        await self._wait_for_send_capacity(stream_id)
+                    except TimeoutError:
+                        self._quic.reset_stream(stream_id, 0x010C)
+                        self.transmit()
+                        return
                     chunk = await asyncio.to_thread(
                         _read_file_chunk, handle, min(64 * 1024, remaining)
                     )
@@ -300,7 +308,12 @@ def serve_http3(  # pragma: no cover - requires aioquic + UDP
             # Bound its private per-stream sender buffer here, isolated to this
             # optional backend, so a flow-control-stalled peer cannot queue a file.
             limit = 256 * 1024
+            timeout = config.write_timeout
+            loop = asyncio.get_running_loop()
+            deadline = None if timeout is None else loop.time() + timeout
             while self._queued_bytes(stream_id) >= limit:
+                if deadline is not None and loop.time() >= deadline:
+                    raise TimeoutError("HTTP/3 write progress timed out")
                 self.transmit()
                 await asyncio.sleep(0.005)
 

@@ -98,6 +98,47 @@ nav:
       - Dynamic handlers: DYNAMIC.md
       - Roadmap: ROADMAP.md
       - Reliability & performance priorities: design/reliability-performance-priorities.md
+      - External server comparison benchmarks: design/server-comparison-benchmarks.md
+      - Performance gap research roadmap: design/performance-gap-research-roadmap.md
+      - Static hot-path experiments (2026-07-10): design/performance-experiments/2026-07-10-static-hot-path.md
+      - Selector frontend spike (2026-07-10): design/performance-experiments/2026-07-10-selector-spike.md
+      - Shared static plan (2026-07-10): design/performance-experiments/2026-07-10-shared-static-plan.md
+      - Shared request parser (2026-07-10): design/performance-experiments/2026-07-10-shared-request-parser.md
+      - Connection request-count policy (2026-07-10): design/performance-experiments/2026-07-10-connection-policy.md
+      - Keep-alive idle timeout (2026-07-10): design/performance-experiments/2026-07-10-keepalive-timeout.md
+      - ASGI streaming backpressure (2026-07-10): design/performance-experiments/2026-07-10-asgi-stream-backpressure.md
+      - Response write-progress timeout (2026-07-10): design/performance-experiments/2026-07-10-write-progress-timeout.md
+      - Production-shaped selector prototype (2026-07-10): design/performance-experiments/2026-07-10-selector-production-prototype.md
+      - Selector filesystem offload (2026-07-10): design/performance-experiments/2026-07-10-selector-filesystem-offload.md
+      - Shared conditional and range selection (2026-07-10): design/performance-experiments/2026-07-10-shared-range-selection.md
+      - Shared directory redirect and index selection (2026-07-10): design/performance-experiments/2026-07-10-shared-directory-index.md
+      - Shared download disposition and SPA fallback (2026-07-10): design/performance-experiments/2026-07-10-shared-download-spa.md
+      - Selector compression and transient single-flight (2026-07-10): design/performance-experiments/2026-07-10-selector-compression.md
+      - Opened-identity digests and bounded selector hashing (2026-07-10): design/performance-experiments/2026-07-10-selector-digests.md
+      - Shared listing policy and bounded selector rendering (2026-07-10): design/performance-experiments/2026-07-10-selector-listings.md
+      - Bounded selector access logging (2026-07-11): design/performance-experiments/2026-07-11-selector-access-logging.md
+      - Connection backend decision (2026-07-11): design/performance-experiments/2026-07-11-connection-backend-decision.md
+      - Bounded blocking-work scheduler (2026-07-11): design/performance-experiments/2026-07-11-bounded-work-scheduler.md
+      - Production bounded access-log handoff (2026-07-11): design/performance-experiments/2026-07-11-production-access-log-scheduler.md
+      - Lazy ASGI peer-disconnect delivery (2026-07-11): design/performance-experiments/2026-07-11-asgi-peer-disconnect.md
+      - ASGI post-response disconnect (2026-07-11): design/performance-experiments/2026-07-11-asgi-post-response-disconnect.md
+      - ASGI 2.4 closed-send errors (2026-07-11): design/performance-experiments/2026-07-11-asgi-closed-send.md
+      - ASGI response ordering, framing, and trailers (2026-07-11): design/performance-experiments/2026-07-11-asgi-response-state.md
+      - ASGI framework compatibility and comparison (2026-07-11): design/performance-experiments/2026-07-11-asgi-framework-compatibility.md
+      - Native Uvicorn and ASGI concurrency scaling (2026-07-11): design/performance-experiments/2026-07-11-asgi-native-scaling.md
+      - ASGI lifespan policy, failure, and state (2026-07-11): design/performance-experiments/2026-07-11-asgi-lifespan-policy.md
+      - Strict ASGI HTTP/1 field syntax (2026-07-11): design/performance-experiments/2026-07-11-asgi-field-syntax.md
+      - Total HTTP/1 request-body timeout (2026-07-11): design/performance-experiments/2026-07-11-request-body-timeout.md
+      - Total HTTP/1 request-head timeout (2026-07-11): design/performance-experiments/2026-07-11-request-head-timeout.md
+      - Static response planning boundary: design/static-response-planning.md
+      - Production capability gap: design/production-capability-gap.md
+      - Production-edge execution backlog: design/production-edge-execution-backlog.md
+      - Production-edge threat model: design/production-edge-threat-model.md
+      - Production-edge configuration design: design/production-edge-configuration.md
+      - Production-edge observability vocabulary: design/production-edge-observability.md
+      - Parent-owned listener seam (2026-07-11): design/performance-experiments/2026-07-11-parent-owned-listener.md
+      - Fixed-generation worker supervisor (2026-07-11): design/performance-experiments/2026-07-11-worker-supervisor.md
+      - Worker recovery and state ownership (2026-07-11): design/performance-experiments/2026-07-11-worker-state-ownership.md
       - References & prior art: REFERENCES.md
 
 extra:

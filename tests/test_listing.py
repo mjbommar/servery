@@ -57,6 +57,32 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(listing._ext_to_category(""), "binary")
         self.assertNotIn("mpeg", listing._EXT_CATEGORY)  # guard: truly a fallback
 
+    def test_request_options_cover_query_page_theme_and_cookie_policy(self):
+        options = listing.request_options(
+            "/foo%20bar/?C=S&O=D&q=Needle&ext=py&page=2&theme=dark",
+            "servery_theme=light",
+        )
+        self.assertEqual(options.display, "/foo bar/")
+        self.assertEqual(options.sort, "size")
+        self.assertEqual(options.order, "desc")
+        self.assertEqual(options.query, "Needle")
+        self.assertEqual(options.ext, "py")
+        self.assertEqual(options.page, 2)
+        self.assertEqual(options.theme, "dark")
+        self.assertTrue(options.set_theme_cookie)
+
+        fallback = listing.request_options(
+            "/?page=not-a-number&theme=invalid",
+            "servery_theme=light",
+        )
+        self.assertEqual(fallback.page, 1)
+        self.assertEqual(fallback.theme, "light")
+        self.assertFalse(fallback.set_theme_cookie)
+
+    def test_request_options_invalid_cookie_falls_back_to_auto(self):
+        options = listing.request_options("/", "servery_theme=invalid")
+        self.assertEqual(options.theme, "auto")
+
 
 class RenderTest(unittest.TestCase):
     def setUp(self):

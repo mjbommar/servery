@@ -78,7 +78,9 @@ jobs:
       # coverage uneven, but the full suite still RUNS (above) on every OS.
       - name: Coverage threshold (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: uv run --no-default-groups --group test --python ${{ matrix.python }} coverage report
+        run: |
+          uv run --no-default-groups --group test --python ${{ matrix.python }} coverage combine
+          uv run --no-default-groups --group test --python ${{ matrix.python }} coverage report
 
   test-freethreaded:
     name: Test free-threaded (py${{ matrix.python }})

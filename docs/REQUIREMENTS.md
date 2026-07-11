@@ -286,12 +286,14 @@ writes nothing to disk.
 
 ### 1.6 TLS / HTTPS
 
-> Two zero-dep TLS paths: **user-provided cert/key** (FR-TLS-01) and an **ad-hoc
-> self-signed cert generated at startup** (FR-TLS-05). The stdlib `ssl` module has
+> Three zero-dep TLS paths: **user-provided cert/key** (FR-TLS-01), an **ad-hoc
+> self-signed cert generated at startup** (FR-TLS-05), and narrow ACME HTTP-01
+> acquisition. The stdlib `ssl` module has
 > no X.509/keygen API, but pure-Python RSA+DER+PKCS#1 (`_certgen.py`) fills that
 > gap with **zero dependencies** — so self-signed generation is shipped, not just
-> documented (see §6, DEC-TLS). Publicly-trusted / auto-renewed (ACME) certs are
-> the boundary that would warrant an optional extra; not implemented.
+> documented (see §6, DEC-TLS). Continuous
+> renewal, atomic hot replacement, retry, and expiry reporting remain production
+> work; they do not require a planned runtime extra.
 
 **FR-TLS-01 — Serve over HTTPS with provided cert/key.**
 `--tls-cert <path>` and `--tls-key <path>` enable HTTPS via an
@@ -336,9 +338,9 @@ the stdlib `ssl` module, then deleted — nothing persists. This is **opportunis
 encryption for a dev box or LAN, not a trust anchor**: clients see an "untrusted
 certificate" warning. The TLS handshake itself stays in OpenSSL; only keygen and
 signing-our-own-cert are hand-rolled. `--tls-self-signed` is **mutually exclusive
-with `--tls-cert`** and emits a startup warning. Publicly-trusted, auto-renewed
-certs (ACME / Let's Encrypt) are explicitly out of this requirement and would be a
-future optional extra (see §5, DEC-TLS).
+with `--tls-cert`** and emits a startup warning. Publicly-trusted ACME acquisition
+is a separate shipped mode; unattended renewal and live replacement are separate
+production requirements (see §5, DEC-TLS and the production-edge backlog).
 *Acceptance:* `servery --tls-self-signed` completes a real TLS handshake (e.g.
 `curl -k` succeeds); combining it with `--tls-cert` is a clean config error; no
 cert/key file remains on disk after startup.
@@ -708,6 +710,16 @@ the served root.
 | `--cache` | | `SECONDS` | none (`no-cache`) | `Cache-Control: max-age=SECONDS` for file responses (dest `cache_max_age`); default is no-cache. |
 | `--no-security-headers` | | flag | off (headers ON) | Disable servery's default security response headers. |
 | `--timeout` | | `SECONDS` | `30` | Per-connection socket timeout (Slowloris mitigation). |
+| `--keepalive-timeout` | | `SECONDS` | `--timeout` | Idle wait between an HTTP/1 response and the next request. |
+| `--request-head-timeout` | | `SECONDS` | none | Total HTTP/1 request-head budget from first byte. |
+| `--request-body-timeout` | | `SECONDS` | none | Total HTTP/1 body-consumption budget from first read. |
+| `--write-timeout` | | `SECONDS` | none | Maximum wait without response-write progress. |
+| `--drain-timeout` | | `SECONDS` | `30` | Graceful-shutdown drain deadline before forced closure; `0` forces immediately. |
+| `--workers` | | `N\|auto` | `1` | Supervised worker process count; `auto` resolves from available CPUs. |
+| `--worker-start-timeout` | | `SECONDS` | `30` | Positive readiness deadline for all required workers. |
+| `--force-timeout` | | `SECONDS` | `1` | Non-negative wait after terminate before kill. |
+| `--lifespan` | | `auto\|on\|off` | `auto` | Detect, require, or disable ASGI lifespan support. |
+| `--lifespan-timeout` | | `SECONDS` | `5` | Positive ASGI startup/shutdown phase budget. |
 | `--max-workers` | | `N` | unbounded | Bound concurrency to N worker threads (default: unbounded, thread-per-connection). |
 | `--max-connections` | | `N` | `256` | Bound admitted HTTP connections / QUIC sessions. |
 | `--http2` | | flag | off | Enable HTTP/2 (ALPN `h2` over TLS, and h2c prior-knowledge cleartext). Pure-stdlib backend; see `docs/TRANSPORTS.md`. |
@@ -804,12 +816,18 @@ Credential/digest comparisons use `hmac.compare_digest`; any generated tokens us
 *Acceptance:* grep confirms no `==` credential comparison and no passphrase CLI
 arg; a test confirms compare path uses `hmac.compare_digest`.
 
-**NFR-SEC-03 — Honest posture (not production-hardened).**
-servery does not claim DoS resistance, rate limiting, WAF behavior, CSRF
-protection, or multi-tenant isolation. Docs state "safe defaults for trusted
-networks; front it with a reverse proxy for exposure."
-*Acceptance:* README/`--help` carry the not-for-hostile-internet statement; no
-requirement here implies otherwise.
+**NFR-SEC-03 — Honest profile and production posture.**
+The current default profile claims safe defaults for trusted networks, not
+production hardening. The production target is a directly exposed,
+single-service edge with bounded admission, overload recovery, supervision,
+graceful replacement, observability, certificate renewal, and hostile-input
+assurance; it does not require a reverse proxy or external process manager.
+Neither profile claims WAF behavior, multi-tenant isolation, or that CPython,
+OpenSSL, and the operating system are memory-safe implementations.
+*Acceptance:* README/`--help` distinguish the current default from a production
+profile whose status is gated by
+`docs/design/production-edge-execution-backlog.md`; no document calls the
+current build production-ready before those gates pass.
 
 **NFR-PERF-01 — Concurrency via threading.**
 servery serves via `ThreadingHTTPServer` / `ThreadingHTTPSServer`
@@ -840,16 +858,20 @@ non-regular source (e.g. a pipe) falls back to the buffered copy. (`socket.py`
 `sendfile`; `BEST-PRACTICES.md` §2.1.)
 
 **NFR-PERF-04 — Default socket timeout plus cross-transport resource budgets.**
-servery sets a per-request socket timeout (default **30 s**, configurable with a
-positive `--timeout`) so a stalled
-read/write raises `TimeoutError` instead of pinning a worker indefinitely. It admits
-at most `max_connections` HTTP/TLS/ASGI connections or HTTP/3 sessions (256 by
-default); `max_workers` separately bounds blocking HTTP work;
+servery sets a per-request socket progress timeout (default **30 s**,
+configurable with a positive `--timeout`) so a stalled read/write raises
+`TimeoutError` instead of pinning a worker indefinitely. Optional positive
+`request_head_timeout` and `request_body_timeout` values add total HTTP/1
+budgets from the first head byte and first body read respectively; neither
+resets on progress and both are disabled by default. It admits at most
+`max_connections` HTTP/TLS/ASGI connections or HTTP/3 sessions (256 by default);
+`max_workers` separately bounds blocking HTTP work;
 `max_h2_streams` and `max_tftp_transfers` bound logical streams/transfers. Capacity
 checks reject quickly rather than blocking accept or growing an unbounded queue.
-*Acceptance:* idle clients time out; saturation tests observe controlled rejection
-and recovery for threaded HTTP, ASGI, and TFTP; HTTP/2 advertises exactly the limit
-it enforces. (`socketserver`; `asyncio`; `concurrent.futures`.)
+*Acceptance:* idle clients time out; slow-but-progressing threaded/ASGI heads and
+WSGI/ASGI bodies hit their configured total deadlines; saturation tests observe controlled rejection
+and recovery for threaded HTTP, ASGI, and TFTP; HTTP/2 advertises exactly the
+limit it enforces. (`socketserver`; `asyncio`; `concurrent.futures`.)
 
 **NFR-STD-01 — HTTP/1.1 core (9110/9111/9112); HTTP/2 & HTTP/3 are opt-in tiers.**
 servery's **core** is a conformant HTTP/1.1 origin server under RFC 9110/9111/9112,
@@ -958,12 +980,10 @@ Recorded so they are not re-proposed:
   credential.
 - **User-defined routes / endpoints / middleware / app object** — framework lane;
   permanently out.
-- **Publicly-trusted / auto-renewed TLS certs (ACME / Let's Encrypt)** — out of
-  v1; this is the one TLS capability that would warrant an optional extra
-  (future `servery[acme]`), since the full ACME protocol + long-lived-key crypto
-  + a public domain on :80/:443 is production-public-web-server territory at the
-  edge of servery's dev/LAN scope. (Ad-hoc *self-signed* certs are **in** scope
-  and shipped — `--tls-self-signed`, FR-TLS-05, zero-dep via `_certgen.py`.)
+- **Unattended ACME renewal** — not part of the completed v1 scope. Narrow
+  zero-dependency HTTP-01 acquisition is shipped; scheduled renewal, retry,
+  atomic live replacement, and expiry reporting are required by the direct-edge
+  production contract. Ad-hoc self-signed certificates remain development-only.
 - **Directory creation / delete / chmod on upload** — write surface limited to
   bounded file upload in v1.
 - **Environment-variable / config-file configuration** — CLI is the only config
@@ -1016,8 +1036,8 @@ you don't have to apologize for" promise.
 
 **DEC-ARCHIVE — Archive download is IN for v1.**
 zip (`zipfile`) and tar/tar.gz (`tarfile`, streaming `w|gz`). *Rationale:*
-zero-dep, file-server-lane, real parity gap vs miniserve/woof; streaming keeps it
-memory-safe.
+zero-dep, file-server-lane, real parity gap vs miniserve/woof; streaming keeps
+memory use bounded.
 
 **DEC-AUTH — Single shared Basic credential; multi-user OUT.** *(seeded, recorded)*
 `--auth user:pass`, with pre-hashed `user:sha256:<hex>`/`sha512` form;

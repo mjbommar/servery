@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import socket
 import tempfile
+import time
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -47,6 +48,93 @@ class AbuseLimitTest(unittest.TestCase):
                 sock.settimeout(4)
                 # Server times out (~0.5s) and closes -> recv returns b"".
                 self.assertEqual(sock.recv(64), b"")
+            finally:
+                sock.close()
+
+    def test_keepalive_timeout_is_separate_from_active_timeout(self):
+        cfg = Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            timeout=2.0,
+            keepalive_timeout=0.1,
+        )
+        with serving(cfg) as (host, port):
+            sock = socket.create_connection((host, port), timeout=5)
+            try:
+                sock.sendall(b"GET /f.txt HTTP/1.1\r\nHost: x\r\n\r\n")
+                response = b""
+                while b"ok" not in response:
+                    response += sock.recv(4096)
+                sock.settimeout(2)
+                self.assertEqual(sock.recv(1), b"")
+            finally:
+                sock.close()
+
+    def test_total_request_head_timeout_aborts_slow_progress(self):
+        cfg = Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            timeout=1.0,
+            request_head_timeout=0.15,
+        )
+        with serving(cfg) as (host, port):
+            sock = socket.create_connection((host, port), timeout=5)
+            try:
+                sock.sendall(b"G")
+                time.sleep(0.07)
+                sock.sendall(b"ET /f.txt HTTP/1.1\r\n")
+                time.sleep(0.07)
+                sock.sendall(b"Host: x")
+                sock.settimeout(2)
+                self.assertEqual(sock.recv(1), b"")
+            finally:
+                sock.close()
+
+    def test_head_deadline_preserves_pipelined_bytes(self):
+        cfg = Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            request_head_timeout=1.0,
+        )
+        request = (
+            b"GET /f.txt HTTP/1.1\r\nHost: x\r\n\r\n"
+            b"GET /f.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        )
+        with serving(cfg) as (host, port):
+            response = raw_exchange(host, port, request)
+        self.assertEqual(response.count(b"HTTP/1.1 200 OK"), 2)
+
+    def test_keepalive_idle_budget_ends_at_first_byte_of_slow_head(self):
+        cfg = Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            timeout=1.0,
+            keepalive_timeout=0.1,
+            request_head_timeout=0.2,
+        )
+        with serving(cfg) as (host, port):
+            sock = socket.create_connection((host, port), timeout=5)
+            try:
+                sock.sendall(b"GET /f.txt HTTP/1.1\r\nHost: x\r\n\r\n")
+                response = b""
+                while b"ok" not in response:
+                    response += sock.recv(4096)
+                time.sleep(0.04)
+                sock.sendall(b"G")
+                time.sleep(0.08)
+                sock.sendall(b"ET /f.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                response = b""
+                while data := sock.recv(4096):
+                    response += data
+                self.assertIn(b"200 OK", response)
             finally:
                 sock.close()
 

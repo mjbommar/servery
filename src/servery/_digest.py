@@ -20,12 +20,123 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
+import threading
+from collections import OrderedDict
+from collections.abc import Callable
+from typing import BinaryIO
 
 _CHUNK = 256 * 1024
 
 #: RFC 9530 algorithm key -> hashlib constructor name. Strongest-preferred order
 #: is the iteration order here (used to break preference ties).
 SUPPORTED: dict[str, str] = {"sha-256": "sha256", "sha-512": "sha512"}
+
+type CacheKey = tuple[str, int, int, int, int, int, str]
+
+
+class _Flight:
+    """One transient same-identity digest shared by concurrent callers."""
+
+    __slots__ = ("error", "event", "references", "value")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.references = 0
+        self.value: str | None = None
+        self.error: BaseException | None = None
+
+
+class DigestCache:
+    """Thread-safe entry-bounded LRU with same-key miss coalescing.
+
+    A zero-sized cache retains no digest after the concurrent callers finish, but
+    still prevents a burst of requests for one file identity from hashing it once
+    per connection. Retained caching is deliberately opt-in because metadata-based
+    invalidation has the same coarse-filesystem caveats as ETags.
+    """
+
+    def __init__(self, max_entries: int = 0) -> None:
+        if max_entries < 0:
+            raise ValueError("max_entries cannot be negative")
+        self.max_entries = max_entries
+        self._items: OrderedDict[CacheKey, str] = OrderedDict()
+        self._flights: dict[CacheKey, _Flight] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def current_entries(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def get(self, key: CacheKey) -> str | None:
+        if self.max_entries <= 0:
+            return None
+        with self._lock:
+            value = self._items.get(key)
+            if value is not None:
+                self._items.move_to_end(key)
+            return value
+
+    def put(self, key: CacheKey, value: str) -> None:
+        if self.max_entries <= 0:
+            return
+        with self._lock:
+            self._items.pop(key, None)
+            self._items[key] = value
+            while len(self._items) > self.max_entries:
+                self._items.popitem(last=False)
+
+    def get_or_compute(self, key: CacheKey, factory: Callable[[], str]) -> str:
+        """Return a cached value or compute it without a same-key hash stampede."""
+        cached = self.get(key)
+        if cached is not None:
+            return cached
+        with self._lock:
+            flight = self._flights.get(key)
+            owner = flight is None
+            if flight is None:
+                flight = _Flight()
+                self._flights[key] = flight
+            flight.references += 1
+        try:
+            if owner:
+                cached = self.get(key)
+                try:
+                    value = cached if cached is not None else factory()
+                    if cached is None:
+                        self.put(key, value)
+                except BaseException as exc:
+                    flight.error = exc
+                    flight.event.set()
+                    raise
+                flight.value = value
+                flight.event.set()
+                return value
+            flight.event.wait()
+            if flight.error is not None:
+                raise flight.error
+            if flight.value is None:  # pragma: no cover - event/result invariant
+                raise RuntimeError("digest flight completed without a result")
+            return flight.value
+        finally:
+            with self._lock:
+                flight.references -= 1
+                if flight.references == 0:
+                    self._flights.pop(key, None)
+
+
+def cache_key(path: str, stat: os.stat_result, algorithm: str) -> CacheKey:
+    """Key a digest by pathname and the identity facts used for the response."""
+    return (
+        os.path.realpath(path),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+        stat.st_size,
+        algorithm,
+    )
 
 
 def _parse_preferences(want: str) -> dict[str, float]:
@@ -93,13 +204,41 @@ def field_value_for_file(path: str, algorithm: str) -> str | None:
 
     The file is hashed in bounded chunks, so memory stays flat regardless of size.
     """
-    hasher = hashlib.new(SUPPORTED[algorithm])
     try:
         with open(path, "rb") as handle:  # noqa: PTH123 - os-level, mirrors the handler
-            while chunk := handle.read(_CHUNK):
-                hasher.update(chunk)
+            return field_value_for_handle(handle, algorithm)
     except OSError:
         return None
+
+
+def field_value_for_handle(
+    handle: BinaryIO,
+    algorithm: str,
+    expected_size: int | None = None,
+) -> str:
+    """Hash one opened identity in bounded chunks and restore its file position.
+
+    When ``expected_size`` is supplied, exactly that many bytes must still be
+    readable. This makes truncation fail before response headers are emitted and
+    hashes the same byte extent the response plan will send if a file grows.
+    """
+    position = handle.tell()
+    hasher = hashlib.new(SUPPORTED[algorithm])
+    remaining = expected_size
+    try:
+        handle.seek(0)
+        while remaining is None or remaining > 0:
+            amount = _CHUNK if remaining is None else min(_CHUNK, remaining)
+            chunk = handle.read(amount)
+            if not chunk:
+                if remaining:
+                    raise OSError("file changed while hashing the planned representation")
+                break
+            hasher.update(chunk)
+            if remaining is not None:
+                remaining -= len(chunk)
+    finally:
+        handle.seek(position)
     return _format(algorithm, hasher.digest())
 
 

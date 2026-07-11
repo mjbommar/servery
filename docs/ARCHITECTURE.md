@@ -25,8 +25,10 @@ CVE in frozen stdlib).
 The base class already implements the un-fun, security-sensitive HTTP plumbing
 correctly and keeps it patched by the CPython security team for free:
 
-- **Request line / header parsing** — `BaseHTTPRequestHandler.parse_request`,
-  including the `//` → `/` rewrite that closes the gh-87389 open-redirect.
+- **Buffered request loop and dispatch** — `BaseHTTPRequestHandler` owns socket
+  reads and `handle_one_request`; servery's targeted `parse_request` override uses
+  shared HTTP/1-specific request-line/header rules, including the `//` → `/`
+  rewrite that closes the gh-87389 open-redirect.
 - **Method dispatch** — `handle_one_request` resolves `do_<METHOD>` by name; we
   add behavior by *defining methods*, not by editing a dispatcher.
 - **Response framing** — `send_response`, `send_header`, `end_headers`,
@@ -85,7 +87,8 @@ Subclassing inherits the base's correct HTTP plumbing — and four of its 2026-e
 |---|---|---|
 | **HTTP/1.0 default, keep-alive off.** `protocol_version = "HTTP/1.0"` gates off persistent connections; a listing of N assets means N connections. | Set `protocol_version = "HTTP/1.1"` to flip keep-alive on via the base's existing logic; honor `Connection: close`; frame every streamed (`Content-Length`-less) body with chunked or `Connection: close` so a reused socket never hangs. (FR-CONN-01, NFR-STD-01) | `server.py`/`handler.py` (class attr); framing audit across `ranges`/`archive` |
 | **No zero-copy.** `copyfile` is a userspace `shutil.copyfileobj` read/write loop; never calls `sendfile`. | Override `copyfile` to use `socket.sendfile()` (kernel `os.sendfile`, internal fallback) on the full-file `200` path, with a bounded `copyfileobj` fallback — and **skip sendfile for `ssl.SSLSocket`** (TLS must encrypt in userspace). (NFR-PERF-03) | `handler.py` (override), TLS guard in `server.py` |
-| **No timeout, unbounded threads.** `socketserver` `timeout = None`; `ThreadingMixIn` spawns an uncapped thread per connection → Slowloris + thread/FD exhaustion exposure. | Set a 30 s socket timeout and a default 256-connection admission ceiling; retain a separate optional `max_workers` pool for blocking work. ASGI, HTTP/3, HTTP/2 streams, and TFTP have corresponding but distinct budgets. | `handler.py`; `server.py`; `asgi.py`; `http3.py`; `_tftp.py` |
+| **No timeout, unbounded threads.** `socketserver` `timeout = None`; `ThreadingMixIn` spawns an uncapped thread per connection → Slowloris + thread/FD exhaustion exposure. | Set a 30 s active socket timeout and a default 256-connection admission ceiling; expose separate optional HTTP/1 keep-alive idle, total request-head/body, and write-progress budgets, plus a separate optional `max_workers` pool. ASGI, HTTP/3, HTTP/2 streams, and TFTP have corresponding but distinct budgets. | `handler.py`; `_request.py`; `_body.py`; `server.py`; `asgi.py`; `http3.py`; `_tftp.py` |
+| **Unlimited keep-alive reuse.** A valid HTTP/1 connection can keep request-local state in one process indefinitely. | Keep unlimited reuse as the compatibility default, but expose `max_requests_per_connection`; a positive count makes the terminal response advertise close and prevents dispatch of later pipelined requests. The `cdn` and `app` profiles select 1,000. | `handler.py`; `asgi.py`; `config.py` |
 | **Logs straight to `sys.stderr`.** `log_message` writes to stderr with no level/handler; an embedder cannot redirect or silence it; access logs always show `-` for size. | Route through `logging.getLogger("servery")` with a library `NullHandler` (library quiet, CLI loud); track the real byte count and status; swallow expected client disconnects without tracebacks; optional CLF/Combined access log. (FR-LOG-05/06/07) | `_log.py`; `handler.py` (`log_message`/`log_request`) |
 
 These are additive overrides at named seams — never a fork of the base. Each is
@@ -110,6 +113,9 @@ servery/
 │       ├── py.typed          # PEP 561 marker (typed package)
 │       ├── _version.py       # __version__ (single source of the version string)
 │       ├── _body.py          # shared framing rules + bounded readers
+│       ├── _request.py       # threaded/selector HTTP/1 request rules + blocking/incremental adapters
+│       ├── _static.py        # opened-file identity + shared MIME/coding/validator facts
+│       ├── _response.py      # shared HTTP/2/3 status/header/body planning
 │       ├── _writecoord.py    # leak-free per-canonical-target lock registry
 │       ├── cli.py            # argparse → Config; main(); startup banner + warnings; --http2/--http3 wiring
 │       ├── config.py         # frozen Config dataclass (the single source of truth)
@@ -162,6 +168,41 @@ Note: listing HTML/CSS is rendered inline from `listing.py` (no separate
   request headers + `os.stat` result. Keeping the closely-coupled "decide status +
   emit headers" logic together avoids fragmenting the ladder from the
   `ETag`/`Cache-Control` it depends on.
+- **HTTP/1 parser sharing has a measured boundary.** `_request.py` owns strict
+  request-line, Host, field-syntax, framing, and persistence rules for the
+  threaded handler and selector research adapter. ASGI retains its specialized
+  byte parser: adapting it to the shared parser regressed minimal ASGI throughput
+  by 18–19%. Byte-native Host cardinality/authority validation and the 100-field
+  budget are implemented directly. Non-Host lines now use the same compiled
+  strict grammar: ordinary small heads match per line, while heads above eight
+  fields use one possessive block scan to avoid linear Python/regex crossings.
+  Malformed syntax is never a configurable compatibility mode.
+- **ASGI response events obey transport backpressure.** Intermediate
+  `http.response.body` events drain before control returns to the application;
+  the final event uses the exchange's existing drain. This bounds producer-ahead
+  buffering while preserving the one-event hot path. The opt-in write-progress
+  deadline and ordinary task cancellation both release blocked drains. A strict
+  start/body/trailer state machine delays header commit until the first body,
+  enforces exact `Content-Length`, owns connection/transfer framing, and rejects
+  incomplete application returns. HTTP scopes advertise response trailers;
+  HTTP/1 writes them only for a request with `TE: trailers`, while still
+  consuming the declared ASGI sequence when they are not negotiated.
+- **ASGI peer disconnect observation is lazy and non-consuming.** A post-body
+  `receive()` temporarily observes the existing stream protocol's EOF/loss
+  callbacks rather than reading a possible pipelined byte. No future, watcher,
+  or protocol wrapper exists on the ordinary request path; cancelling a listener
+  restores the original callbacks. Response completion separately wakes only
+  terminal `receive()` subscribers and marks the one-request ASGI scope
+  disconnected without closing or consuming from the reusable HTTP/1 stream.
+  `send()` after scope completion or peer closure raises a server-specific
+  `OSError`; the exchange treats an uncaught instance as lifecycle, not an app
+  fault, and retains a fully framed pipelined connection.
+- **ASGI lifespan distinguishes compatibility from readiness.** `auto` treats an
+  initial application exception as unsupported; `on` requires protocol support;
+  `off` skips the task. Explicit startup failure or timeout prevents listener
+  bind, and shutdown failure/timeout is surfaced during termination. Successful
+  lifespan state is shallow-copied into HTTP and WebSocket scopes; unsupported
+  and disabled paths omit the state key and per-request copy.
 - **`_log.py` IS its own module**, because routing through `logging` + a library
   `NullHandler` + the request/access-log formatting is a distinct responsibility
   (FR-LOG-05/06) that the handler should call into, not own. The handler's
@@ -220,6 +261,44 @@ touching the file-serving core. The request-handling pipeline (`send_head` /
 (`self.server.config`). Optional features are *gated* by `Config` so the default
 path (plain GET, no auth, no upload) stays minimal.
 
+After a valid HTTP/1 request head, the threaded handler and ASGI exchange apply
+`max_requests_per_connection`. Zero leaves reuse unlimited. On a positive limit,
+the terminal request is dispatched with non-persistent response state, emits
+`Connection: close`, and ends the loop before any later pipelined request. WSGI
+uses the threaded handler. HTTP/2 and HTTP/3 have multiplexed stream lifecycles
+and are intentionally outside this HTTP/1 count.
+
+When configured, `keepalive_timeout` governs the idle boundary after a response
+and before the next HTTP/1 request; unset inherits the active `timeout`. The
+threaded loop waits for first activity under this budget and restores the active
+socket timeout before dispatch. ASGI selects a separate configured loop once per
+connection; first activity ends the idle phase before active head work begins.
+This avoids adding per-request policy work to the default ASGI hot path.
+
+`request_head_timeout`, when configured, is a total HTTP/1 budget from that
+first byte through the terminating blank line. The threaded adapter retains
+body/pipeline ownership while capping fragmented buffered reads by an absolute
+deadline; complete buffered heads take one exact-read fast path. ASGI
+reschedules one phase timer after reading the first byte. The shorter active or
+remaining total limit wins. Disabled connections retain the inherited threaded
+loop and original single-`readuntil` ASGI loop. Expiry closes an incomplete head.
+
+`write_timeout`, when configured, scopes each blocking socket write and bounds
+ASGI/WebSocket drains plus HTTP/3 capacity waits. Synchronous writers restore the
+active read timeout after each write so WSGI applications can still consume input
+after starting a response. Async transports allocate a timer only above their
+write-buffer low-water threshold; the unset hot path retains direct drains.
+Timeout expiry aborts rather than gracefully flushing queued bytes.
+
+`request_body_timeout`, when configured, is a separate total HTTP/1 budget from
+the first nonempty body read through framing completion. It does not reset as
+bytes arrive and includes application pauses between reads. Blocking upload,
+WSGI, CGI, proxy, and WebDAV consumers share one lazy reader that repeatedly
+caps the existing progress timeout by the absolute remaining budget. ASGI uses
+an enabled-only timed body subclass across declared/chunked data and trailers.
+Bodyless and disabled requests allocate no deadline state. Expiry closes instead
+of reusing a partially aligned connection.
+
 ### GET / HEAD (`send_head` override)
 
 ```
@@ -262,7 +341,9 @@ Where each cross-cutting concern fires:
 - **CORS** — preflight `OPTIONS` is its own `do_OPTIONS` (→ `204`); simple-request
   CORS headers are added at step [6].
 - **SPA / clean-URL fallback** — step [4], an internal *rewrite* (no redirect),
-  guarded so it does not rewrite real asset paths.
+  guarded so it does not rewrite real asset paths. The fallback `index.html` is
+  independently realpath-contained; a symlinked root index cannot bypass the
+  path-safety choke-point.
 
 ### POST (`do_POST` override — upload)
 
@@ -470,9 +551,13 @@ def copyfile(self, source, outputfile):
     shutil.copyfileobj(source, outputfile, length=64 * 1024)
 ```
 
-The file object from `open(path, "rb")` is streamed straight to `self.wfile`; RAM
-use is one buffer regardless of file size. HTTP/2 and HTTP/3 use a hybrid shared
-response: `bytes` at or below `max_buffered_response`, `FileBody` above it. HTTP/2
+Plain HTTP/1 files at or below `small_file_buffer_size` (16 KiB by default) use
+one bounded read and socket write; measured syscall setup makes that faster than
+`sendfile` for tiny warm-cache files. Larger plaintext files retain zero-copy
+`sendfile`, and setting the threshold to zero forces that path. TLS and platforms
+without native `sendfile` use bounded userspace copies. HTTP/2 and HTTP/3 use a
+separate hybrid shared response: `bytes` at or below `max_buffered_response`,
+`FileBody` above it. HTTP/2
 schedules reads against both flow-control windows; HTTP/3 reads off-loop and bounds
 the QUIC sender buffer.
 

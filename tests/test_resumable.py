@@ -291,6 +291,10 @@ class PartialUploadLimitTest(_ServerCase):
             quiet=True,
             upload=True,
             max_partial_uploads=1,
+            # This test isolates partial-upload accounting. A zero-timeout target
+            # lock can race the preceding handler's post-response cleanup and
+            # turn the immediate retry into an unrelated transient 409.
+            write_lock_timeout=0.1,
         )
 
     def test_completion_releases_capacity(self):

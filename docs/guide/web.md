@@ -37,6 +37,79 @@ byte-bounded `--compression-cache-size` can reuse hot encoded representations; i
 is off by default to preserve the minimal-memory posture, while the `cdn` profile
 sets 32 MiB. Cache keys include canonical path, mtime, size, coding, and level, and
 concurrent misses are coalesced.
+Coalescing is transient and also applies when the retained byte budget is zero:
+concurrent requests for one representation share the in-flight result, but no
+encoded bytes remain after those callers finish. Different keys are not globally
+serialized.
+
+## Small-file delivery
+
+Plain HTTP/1 uses two size-dependent paths. Files at or below 16 KiB are read into
+one bounded buffer and sent with one socket write; larger files retain the
+zero-copy `sendfile` path. The crossover is configurable because a memory-limited
+origin may prefer streaming even when it costs some small-response throughput:
+
+```bash
+servery --small-file-buffer-size 0       # always sendfile/stream
+servery --small-file-buffer-size 16384   # measured default
+```
+
+The limit applies per active plaintext HTTP/1 response. It does not make large
+files buffered, and it does not replace the separate HTTP/2/3
+`--max-buffered-response` policy. TLS already requires bounded userspace copying,
+so this particular sendfile crossover does not apply there.
+
+## HTTP/1 connection reuse
+
+By default, a valid persistent HTTP/1 connection may serve any number of requests
+until the client closes it or the socket timeout fires. Long-running origins can
+put a generous bound on reuse:
+
+```bash
+servery --max-requests-per-connection 1000
+servery --max-requests-per-connection 0      # unlimited (general default)
+servery --keepalive-timeout 10               # shorter idle reuse window
+servery --request-head-timeout 30            # total request-line + fields window
+servery --request-body-timeout 300           # total body-consumption window
+servery --write-timeout 30                   # abort a stalled response writer
+```
+
+The final response advertises `Connection: close`; a later pipelined request is
+not dispatched. The `cdn` and `app` profiles select 1,000 while other profiles
+keep the unlimited default. Lower values recycle connections more often but add
+TCP and, for HTTPS, TLS handshake work. This is a request-count policy, not a
+slow-client defense: `--timeout`, body limits, `--request-head-timeout`,
+`--request-body-timeout`, and `--write-timeout` address different resources.
+
+`--keepalive-timeout` is independent of the count. It bounds an idle persistent
+HTTP/1 connection between responses and the next request; when omitted it inherits
+the existing 30-second `--timeout`. A shorter value releases connection slots,
+threads, tasks, and file descriptors sooner, but clients that pause longer must
+reconnect. No profile shortens it yet because origin traffic patterns and TLS
+handshake costs differ materially.
+
+`--request-head-timeout` is an opt-in total HTTP/1 budget from the first byte of
+the request line through the terminating blank line. It does not reset as a
+slow client dribbles fields. The keep-alive idle clock ends at that first byte;
+the shorter active/total head budget then applies. Leave it unset to avoid the
+measurable first-byte/timer bookkeeping and tolerate unrestricted slow/large
+heads, or size it for the slowest legitimate cookies, proxies, and links.
+Expiry closes the incomplete connection.
+
+`--request-body-timeout` is an opt-in total HTTP/1 budget. Its clock starts at
+the first nonempty body read and spans byte progress plus application pauses
+between reads. It complements the per-operation `--timeout`: a client cannot
+retain an upload/WSGI/ASGI/proxy/WebDAV body indefinitely merely by sending a
+small amount before each progress deadline. Leave it unset for unrestricted
+large/slow uploads, or size it for the slowest legitimate body and application
+processing cadence. Expiry closes the partially received connection.
+
+`--write-timeout` is opt-in and cross-transport. It bounds how long a socket
+write, asyncio drain, or HTTP/3 capacity wait may remain stalled, then aborts the
+connection or stream. Progress resets the deadline, so it does not impose a
+maximum download duration or minimum bandwidth. Leaving it unset avoids timer
+bookkeeping on hot ASGI responses; choose it for exposed origins based on the
+slowest legitimate clients and links you intend to support.
 
 ## Large directory policy
 
@@ -108,9 +181,22 @@ Writes one line per response to a file, separate from the stderr request log:
 | `combined` | CLF + `"referer" "user-agent"` |
 | `json` | one JSON object per line (method, path, status, size, …) |
 
-It's thread-safe and records the real status and response size. Each server instance
-owns its own file handler, so embedded servers may log to separate destinations and
-close in either order without detaching one another.
+Synchronous writing remains the default because the first production-shaped
+bounded-writer benchmark did not pass the protected p99 gate. Set
+`--access-log-queue 256` to opt into one server-owned bounded writer thread with
+an 8 MiB retained-record budget and batches of up to eight lines. Its default
+`block` overflow policy preserves records through backpressure. For a service
+where a slow log disk must not stall responses, `--access-log-overflow drop`
+preserves request progress but can lose substantial records under saturation;
+drops are counted and summarized at shutdown. Queue size, byte budget, batching,
+overload, and finite shutdown drain are separately configurable.
+
+CLF and combined fields escape quotes, backslashes, and control characters so a
+request cannot inject a second log line. Each server instance owns its own file
+handler and writer. Multiworker file logging remains rejected until the parent can
+own a single bounded aggregation channel. WSGI, ASGI, CGI/proxy, HTTP/2, and HTTP/3
+do not yet share this file-access hook, so do not treat the current file as a
+complete all-transport audit log.
 
 ## See also
 

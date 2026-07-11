@@ -118,6 +118,10 @@ def build_head(
     whether this connection may be reused (HTTP/1.1 and nothing forced a close).
     ``body_len`` supplies a Content-Length when the body is already materialized.
     """
+    # Connection persistence is a server decision. In particular, an app must
+    # not override a request-count terminal response with ``keep-alive``.
+    if not keep_alive:
+        headers = [(name, value) for name, value in headers if name.lower() != "connection"]
     present = {name.lower() for name, _ in headers}
     lines = [f"{version} {status}"]
     lines += [f"{name}: {value}" for name, value in headers]

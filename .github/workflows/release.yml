@@ -1,32 +1,119 @@
 name: Publish to PyPI
 
-# Publishes on a version tag (vX.Y.Z), or manually via the Actions tab. Uses
-# PyPI Trusted Publishing (OIDC): no API token is ever stored — the publish job
-# mints a short-lived token scoped to this repo + the `pypi` environment.
+# A tag is the only publication trigger. Every publish job consumes artifacts
+# built from that exact tag after the supported functional matrix passes.
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build:
-    name: Build & verify distributions
+  verify-source:
+    name: Verify source, tag, docs, and security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
-      # No build cache in the publish path: a poisoned cache could taint the
-      # released artifacts (zizmor cache-poisoning). Releases build clean.
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: false
+          python-version: "3.14"
+      - name: Require the tag to equal the package version
+        shell: bash
+        run: |
+          version="$(uv run --python 3.14 --no-default-groups python -c 'from servery._version import __version__; print(__version__)')"
+          test "${GITHUB_REF_NAME}" = "v${version}" || {
+            echo "tag ${GITHUB_REF_NAME} does not match package version ${version}"
+            exit 1
+          }
+      - run: uv run --python 3.14 ruff check .
+      - run: uv run --python 3.14 ruff format --check .
+      - run: uvx --with "httpx[http2]" --with qrcode ty check src tests scripts
+      - run: uv run --python 3.14 bandit -q -c pyproject.toml -r src
+      - run: uv run --python 3.14 --group docs mkdocs build --strict
+
+  verify-platform:
+    name: Functional (${{ matrix.os }}, py${{ matrix.python }})
+    needs: verify-source
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: false
+          python-version: ${{ matrix.python }}
+      - run: >-
+          uv run --python ${{ matrix.python }} --no-default-groups --group test
+          python -m unittest discover -s tests -v
+
+  verify-coverage:
+    name: Branch coverage (Linux, py3.14)
+    needs: verify-source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: false
+          python-version: "3.14"
+      - run: uv run --python 3.14 --no-default-groups --group test coverage run -m unittest discover -s tests -v
+      - run: uv run --python 3.14 --no-default-groups --group test coverage combine
+      - run: uv run --python 3.14 --no-default-groups --group test coverage report
+
+  verify-freethreaded:
+    name: Free-threaded functional (py${{ matrix.python }})
+    needs: verify-source
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13t", "3.14t"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: false
+          python-version: ${{ matrix.python }}
+      - name: Run without the GIL
+        env:
+          PYTHON_GIL: "0"
+        run: >-
+          uv run --python ${{ matrix.python }} --no-default-groups --group test
+          python -m unittest discover -s tests -v
+
+  build:
+    name: Build exact-tag distributions
+    needs: [verify-platform, verify-coverage, verify-freethreaded]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: false
+          python-version: "3.14"
       - run: uv build
       - name: Enforce zero runtime dependencies
-        run: uv run python scripts/check_zero_deps.py
+        run: uv run --python 3.14 python scripts/check_zero_deps.py
       - name: Validate distribution metadata
         run: uvx twine check dist/*
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -35,12 +122,10 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  bundle:
-    name: Single-file bundle + GitHub release
-    needs: build # only publish the bundle once the dists build + verify clean
+  verify-wheel:
+    name: Install and smoke exact wheel
+    needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # create the release and upload servery.py / servery.pyz
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -48,21 +133,85 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: false
+          python-version: "3.14"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist/
+      - name: Install outside the checkout and smoke static, WSGI, ASGI, and workers
+        shell: bash
+        run: |
+          uv venv /tmp/servery-release-venv --python 3.14
+          uv pip install --python /tmp/servery-release-venv/bin/python dist/*.whl
+          cd "$(mktemp -d)"
+          /tmp/servery-release-venv/bin/python "${GITHUB_WORKSPACE}/scripts/smoke_installed.py" \
+            --expected-version "${GITHUB_REF_NAME#v}"
+
+  bundle:
+    name: Build and verify single-file artifacts
+    needs: [build, verify-wheel]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: false
+          python-version: "3.14"
       - name: Build single-file artifacts
         run: |
           mkdir -p dist
-          uv run python scripts/amalgamate.py > dist/servery.py
-          uv run python -m zipapp src -m "servery.cli:main" -o dist/servery.pyz -p "/usr/bin/env python3"
-      - name: Smoke-test the bundle (no network)
+          uv run --python 3.14 python scripts/amalgamate.py > dist/servery.py
+          uv run --python 3.14 python -m zipapp src -m "servery.cli:main" -o dist/servery.pyz -p "/usr/bin/env python3"
+      - name: Functional smoke for both single-file artifacts
+        shell: bash
         run: |
-          want="servery $(uv run python -c 'from servery._version import __version__; print(__version__)')"
-          got="$(python3 dist/servery.py --version)"
-          test "$got" = "$want" || { echo "servery.py --version: '$got' != '$want'"; exit 1; }
-          python3 dist/servery.pyz --version
-      - name: Create / update the GitHub release with the bundle
+          version="${GITHUB_REF_NAME#v}"
+          uv run --python 3.14 --no-default-groups python scripts/smoke_installed.py \
+            --artifact dist/servery.py --expected-version "$version"
+          uv run --python 3.14 --no-default-groups python scripts/smoke_installed.py \
+            --artifact dist/servery.pyz --expected-version "$version"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bundles
+          path: |
+            dist/servery.py
+            dist/servery.pyz
+          if-no-files-found: error
+
+  publish:
+    name: Publish exact wheel/sdist to PyPI
+    needs: [build, verify-wheel, bundle]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/servery
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+
+  github-release:
+    name: Publish GitHub release after PyPI
+    needs: [bundle, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: bundles
+          path: dist/
+      - name: Create or update the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+        shell: bash
         run: |
           {
             echo '## Run without installing — one file, straight from a pipe'
@@ -73,24 +222,12 @@ jobs:
             echo
             echo "Pin a version with \`.../download/${TAG}/servery.py\`, or grab \`servery.pyz\` and run \`python3 servery.pyz ./public\`. Or \`pip install servery\`."
             echo
-            echo "Both single-file artifacts are pure stdlib (zero runtime dependencies). Full notes: [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/CHANGELOG.md)."
+            echo "Both single-file artifacts are pure stdlib. Full notes: [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/CHANGELOG.md)."
           } > /tmp/notes.md
-          gh release create "$TAG" --title "servery ${TAG#v}" --notes-file /tmp/notes.md \
-              dist/servery.py dist/servery.pyz \
-            || gh release upload "$TAG" dist/servery.py dist/servery.pyz --clobber
-
-  publish:
-    name: Publish to PyPI (Trusted Publishing)
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/servery
-    permissions:
-      id-token: write # OIDC token for Trusted Publishing — the only privilege needed
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "servery ${TAG#v}" --notes-file /tmp/notes.md
+            gh release upload "$TAG" dist/servery.py dist/servery.pyz --clobber
+          else
+            gh release create "$TAG" --title "servery ${TAG#v}" --notes-file /tmp/notes.md \
+              dist/servery.py dist/servery.pyz
+          fi

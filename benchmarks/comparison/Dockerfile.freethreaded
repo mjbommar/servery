@@ -1,0 +1,13 @@
+FROM ghcr.io/astral-sh/uv:bookworm-slim
+
+# Docker Official Images do not currently publish `python:*t` tags.  Install a
+# pinned python-build-standalone free-threaded runtime so benchmark artifacts
+# can prove the server, rather than only the host harness, ran without the GIL.
+ARG PYTHON_VERSION=3.14.3t
+ENV UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_PYTHON_PREFERENCE=only-managed \
+    PYTHON_GIL=0 \
+    PIP_BREAK_SYSTEM_PACKAGES=1
+RUN uv python install "${PYTHON_VERSION}" && \
+    ln -s "$(uv python find "${PYTHON_VERSION}")" /usr/local/bin/python && \
+    python -c "import sys; assert sys._is_gil_enabled() is False"

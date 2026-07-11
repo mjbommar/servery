@@ -74,3 +74,18 @@ def is_not_modified(
     if if_modified_since:
         return not_modified_since(if_modified_since, mtime)
     return False
+
+
+def if_range_matches(header: str | None, etag: str, mtime: float) -> bool:
+    """Whether a Range request may use ``header`` for this representation.
+
+    A missing condition permits the range. Entity-tags require strong equality;
+    an HTTP date permits the range only when the representation has not changed.
+    Invalid dates fail closed to a full response, as required for If-Range.
+    """
+    if header is None:
+        return True
+    condition = header.strip()
+    if condition.startswith(('"', "W/")):
+        return condition == etag
+    return not_modified_since(condition, mtime)

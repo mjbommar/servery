@@ -524,7 +524,7 @@ def _read_body(handler: ServeryHandler) -> bytes | None:
     if length > handler._server.config.max_request_body:
         handler._reject_unread_body(413, "Request body exceeds the size limit")
         return None
-    reader = _body.LimitedReader(handler.rfile, length)
+    reader = _body.LimitedReader(handler._request_body_stream(), length)
     body = reader.read()
     if reader.remaining:
         handler.close_connection = True
@@ -540,13 +540,19 @@ def _write_file(handler: ServeryHandler, fs_path: str, parent: str) -> bool:
     if length > handler._server.config.max_upload_size:
         handler._reject_unread_body(413, "Upload exceeds the size limit")
         return False
-    reader = _body.LimitedReader(handler.rfile, length)
+    reader = _body.LimitedReader(handler._request_body_stream(), length)
     tmp = tempfile.NamedTemporaryFile(dir=parent, delete=False)  # noqa: SIM115 (closed before replace)
     try:
         while chunk := reader.read(65536):
             tmp.write(chunk)
         tmp.close()
         os.replace(tmp.name, fs_path)
+    except _body.BodyTimeoutError:
+        tmp.close()
+        with contextlib.suppress(OSError):
+            os.remove(tmp.name)
+        handler.close_connection = True
+        raise
     except OSError:  # pragma: no cover - disk/permission failure mid-write
         tmp.close()
         with contextlib.suppress(OSError):

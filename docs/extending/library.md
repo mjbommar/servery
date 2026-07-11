@@ -72,19 +72,60 @@ Config.create(
     max_compress_size=10 * 1024 * 1024,
     compression_cache_size=32 * 1024 * 1024,
     max_buffered_response=1024 * 1024,
+    small_file_buffer_size=16 * 1024,
     max_connections=256,
+    keepalive_timeout=10.0,
+    request_head_timeout=30.0,
+    request_body_timeout=300.0,
+    write_timeout=30.0,
+    max_requests_per_connection=1000,
     http2=True,              # --http2
     max_h2_streams=100,
     max_workers=8,           # --max-workers
 )
 ```
 
+For an ASGI application, lifecycle policy is explicit:
+
+```python
+Config.create(
+    ".",
+    asgi_app="myapp:app",
+    lifespan="on",          # auto | on | off
+    lifespan_timeout=10.0,  # per startup/shutdown phase
+)
+```
+
 The resource settings describe observable policy rather than internal chunk sizes.
 For example, lower `max_buffered_response` to trade a little small-file throughput
 for lower per-stream memory, set it to zero to force streaming, or keep the default
-1 MiB hybrid path. `max_connections`, `max_workers`, `max_h2_streams`, and
+1 MiB hybrid path. `small_file_buffer_size` controls the separate plaintext HTTP/1
+crossover: small files use one bounded read/write while larger files retain
+zero-copy `sendfile`; zero forces `sendfile` for every nonempty file.
+`max_connections`, `max_workers`, `max_h2_streams`, and
 `max_tftp_transfers` are deliberately independent because their resources have
-different costs.
+different costs. `max_requests_per_connection` is a separate HTTP/1 lifecycle
+policy: `0` permits unlimited reuse, while a positive value closes after that
+many requests. A finite count trades reconnect/TLS work for bounded connection
+reuse; it does not replace idle, read, or write timeouts.
+`keepalive_timeout` separately bounds idle HTTP/1 reuse between requests. Leave
+it as `None` to inherit `timeout`, or choose a shorter positive value to release
+idle connection/thread/task capacity sooner at the cost of more reconnects and
+TLS handshakes.
+`request_head_timeout` is a distinct optional total HTTP/1 request-line and
+field budget. It starts after the first byte satisfies the idle phase and does
+not reset on progress. Leave it as `None` to avoid configured parser/timer cost
+and tolerate unrestricted slow heads, or choose a positive value for exposed
+origins based on the slowest legitimate cookie/proxy head and link.
+`request_body_timeout` is a distinct optional total HTTP/1 body-consumption
+budget. It starts on the first nonempty read, does not reset on progress, and
+includes application pauses between reads. Leave it as `None` for unrestricted
+large/slow bodies or choose a positive value based on the slowest legitimate
+upload and chunk-processing cadence.
+`write_timeout` is an independent, optional progress deadline for response
+writes across transports. It resets after progress; it is neither a maximum
+response duration nor a bandwidth limit. Leave it as `None` to preserve native
+transport behavior and avoid async timer overhead.
 
 Invalid combinations (e.g. `--dav-write` without `--dav`) raise `ValueError` at
 `create()` time, not mid-request. See the [CLI reference](../reference/cli.md) for

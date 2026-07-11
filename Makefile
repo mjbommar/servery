@@ -19,6 +19,7 @@ security:
 
 test:
 	uv run coverage run -m unittest discover -s tests -v
+	uv run coverage combine
 	uv run coverage report
 
 build:

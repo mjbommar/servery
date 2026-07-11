@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import socket
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -64,6 +67,33 @@ class WSGIServerTest(unittest.TestCase):
                     self.assertEqual(resp.status_code, 200, method)
                     self.assertTrue(resp.text.startswith(method), resp.text)
 
+    def test_total_body_timeout_stops_a_progressing_client(self):
+        config = Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            wsgi_app=_SPEC,
+            timeout=1.0,
+            request_body_timeout=0.15,
+        )
+        with serving(config) as (host, port):
+            sock = socket.create_connection((host, port), timeout=5)
+            try:
+                sock.sendall(
+                    b"POST /slow HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n"
+                    b"Connection: close\r\n\r\na"
+                )
+                for byte in b"bcd":
+                    time.sleep(0.07)
+                    with contextlib.suppress(OSError):
+                        sock.sendall(bytes((byte,)))
+                sock.settimeout(2)
+                with contextlib.suppress(OSError):
+                    self.assertEqual(sock.recv(4096), b"")
+            finally:
+                sock.close()
+
     def test_static_files_not_served_in_wsgi_mode(self):
         # The WSGI app owns every path — the static file is invisible.
         with serving(self.cfg) as (host, port):
@@ -72,6 +102,21 @@ class WSGIServerTest(unittest.TestCase):
             )
             self.assertEqual(status_of(resp), 200)
             self.assertIn(b"GET /static.txt", body_of(resp))  # app echo, not the file
+
+    def test_environ_reports_configured_process_concurrency(self):
+        cfg = Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            wsgi_app="tests._wsgiapp:multiprocess_flag",
+            workers=2,
+        )
+        with serving(cfg) as (host, port):
+            response = raw_exchange(
+                host, port, b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            )
+        self.assertEqual(body_of(response), b"True")
 
     def test_negative_content_length_is_rejected(self):
         # Never normalize an invalid length: parser disagreement can desynchronize
@@ -95,6 +140,43 @@ class WSGIServerTest(unittest.TestCase):
             self.assertEqual(resp.count(b"200 OK"), 2)
             self.assertIn(b"GET /a", resp)
             self.assertIn(b"GET /b", resp)
+
+    def test_request_limit_overrides_app_keep_alive_field(self):
+        cfg = Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            wsgi_app="tests._wsgiapp:forces_keep_alive",
+            max_requests_per_connection=1,
+        )
+        with serving(cfg) as (host, port):
+            response = raw_exchange(host, port, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        head = response.split(b"\r\n\r\n", 1)[0].lower()
+        self.assertEqual(head.count(b"connection:"), 1)
+        self.assertIn(b"connection: close", head)
+
+    def test_keepalive_idle_timeout_closes_after_a_response(self):
+        cfg = Config.create(
+            self._tmp.name,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            wsgi_app="tests._wsgiapp:ignores_body",
+            timeout=2.0,
+            keepalive_timeout=0.1,
+        )
+        with serving(cfg) as (host, port):
+            sock = socket.create_connection((host, port), timeout=5)
+            try:
+                sock.sendall(b"GET /a HTTP/1.1\r\nHost: x\r\n\r\n")
+                response = b""
+                while b"ignored" not in response:
+                    response += sock.recv(4096)
+                sock.settimeout(2)
+                self.assertEqual(sock.recv(1), b"")
+            finally:
+                sock.close()
 
 
 class WSGIBodyDisposalTest(unittest.TestCase):

@@ -1,0 +1,29 @@
+schema_version = 1
+profile = "production"
+
+[runtime]
+workers = "auto"
+
+[listener]
+host = "0.0.0.0"
+port = 8443
+http2 = true
+
+[tls]
+mode = "manual"
+
+[tls.manual]
+certificate_file = "/etc/servery/site.crt"
+private_key_file = "/etc/servery/site.key"
+
+[resources]
+max_connections = 2048
+
+[logging]
+access_file = "/var/log/servery/access.json"
+
+[application]
+mode = "static"
+
+[application.static]
+root = "/srv/www"

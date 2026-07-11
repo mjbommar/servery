@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import functools
 import html
+import http.cookies
 import mimetypes
 import os
 import re
 import time
 import urllib.parse
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from servery import _log
@@ -43,6 +45,7 @@ _CODE_TO_SORT = {code: name for name, code in _SORT_TO_CODE.items()}
 # Rows per page before pagination kicks in. 0 disables it (used by callers that
 # want the whole listing at once, e.g. the tests).
 DEFAULT_PAGE_SIZE = 1000
+_THEMES = frozenset({"auto", "light", "dark"})
 
 # How many extension facet chips to show, most-common first.
 _MAX_FACETS = 12
@@ -61,6 +64,56 @@ class EntryInfo(NamedTuple):
     is_symlink: bool
     size: int | None
     mtime: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class RequestOptions:
+    """Pure request-derived inputs for one directory listing render."""
+
+    display: str
+    sort: str
+    order: str
+    query: str
+    ext: str
+    page: int
+    theme: str
+    set_theme_cookie: bool
+
+
+def request_options(target: str, cookie: str | None = None) -> RequestOptions:
+    """Parse listing query/theme policy without depending on a transport handler."""
+    parts = urllib.parse.urlsplit(target)
+    params = urllib.parse.parse_qs(parts.query)
+    try:
+        page = max(1, int(params.get("page", ["1"])[0]))
+    except ValueError:
+        page = 1
+    theme_param = params.get("theme", [None])[0]
+    set_theme_cookie = isinstance(theme_param, str) and theme_param in _THEMES
+    theme = (
+        theme_param if isinstance(theme_param, str) and set_theme_cookie else _theme_cookie(cookie)
+    )
+    return RequestOptions(
+        display=urllib.parse.unquote(parts.path, errors="surrogatepass"),
+        sort=code_to_sort(params.get("C", ["N"])[0]),
+        order="desc" if params.get("O", ["A"])[0] == "D" else "asc",
+        query=params.get("q", [""])[0],
+        ext=params.get("ext", [""])[0],
+        page=page,
+        theme=theme,
+        set_theme_cookie=set_theme_cookie,
+    )
+
+
+def _theme_cookie(raw: str | None) -> str:
+    if not raw:
+        return "auto"
+    try:
+        jar = http.cookies.SimpleCookie(raw)
+    except http.cookies.CookieError:
+        return "auto"
+    morsel = jar.get("servery_theme")
+    return morsel.value if morsel is not None and morsel.value in _THEMES else "auto"
 
 
 def code_to_sort(code: str) -> str:

@@ -6,6 +6,228 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-11
+
+### Changed
+
+- Added backend-neutral bounded blocking-work primitives with exact job and
+  retained-byte admission, inline leases for threaded handlers, physically
+  separate work lanes, cancellation/late-result ownership, and stable overload
+  snapshots. The first production consumer is an opt-in count- and byte-bounded
+  batched access-log writer with configurable lossless backpressure or explicit
+  drop policy and finite drain. Synchronous file logging remains the default
+  because the lossless async shapes missed the protected p99 gate. The comparison
+  load generator can run synchronized cheap/expensive cohorts with separate
+  latency/throughput and per-second completion accounting.
+- On-the-fly archive and checkbox-selection bodies can be bounded per worker with
+  `--max-archive-streams`. Admission happens before response headers, saturation
+  returns `503` plus `Retry-After: 1`, and the lease is held through completion or
+  abort. When `--max-workers` is also configured, validation preserves at least
+  one ordinary handler.
+- Read-only static, WSGI, and ASGI deployments can now use `--workers N|auto`
+  without an external process manager. A spawn-compatible stdlib supervisor owns
+  one listener, gates admission on full application/lifespan readiness, drains
+  all workers to finite terminate/kill deadlines, and detects parent-control
+  loss. The default remains the direct one-process path; write/singleton modes
+  are rejected with multiple workers until shared ownership is implemented.
+- Adopted ASGI listeners now make their runtime duplicate nonblocking and
+  explicitly enable `TCP_NODELAY` on accepted TCP sockets. This avoids a
+  Nagle/delayed-ACK stall that appeared under multi-worker small responses while
+  leaving the caller-owned listener unchanged.
+- Regular-file `200`/`206`/`304`/`416` selection now uses one opened-identity
+  primitive shared by production HTTP/1 and the benchmark-only selector
+  prototype. `If-Range` and validator precedence no longer live in the handler;
+  the common no-Range/no-conditional path retains an allocation-free adapter
+  fast path. Public wire semantics and configuration are unchanged.
+- Directory slash redirects and contained index lookup now use narrow shared
+  static primitives. Production archive/listing ordering is unchanged; the
+  benchmark-only selector serves indexes with explicit cache policy. Listing
+  query/theme interpretation and generated-page CSP are also shared; an optional
+  bounded selector worker/queue renders listings without blocking its event loop,
+  while disabled support remains an explicit `501`.
+- Download-query interpretation and injection-safe `Content-Disposition` values
+  now use shared static primitives. The benchmark-only selector also supports
+  disabled-by-default SPA fallback through the existing contained opened-file
+  plan; shipped SPA policy remains opt-in.
+- HTTP/1 request-line and header semantics now live in one internal parser module
+  shared by the production threaded adapter and connection-architecture research.
+  The production socket loop and public configuration are unchanged.
+- HTTP/1 connection reuse can now be bounded with
+  `--max-requests-per-connection`; `0` retains unlimited reuse, while the `cdn`
+  and `app` profiles select 1,000. The final response advertises close and
+  pipelined requests beyond the limit are not dispatched. Threaded/static, WSGI,
+  and ASGI paths enforce the policy; HTTP/2/3 stream lifecycles are unchanged.
+- HTTP/1 idle reuse can be bounded independently with `--keepalive-timeout`.
+  Unset inherits the existing active `--timeout`; a shorter positive value
+  releases dormant connection/thread/task capacity sooner while leaving active
+  request/body timeouts unchanged. Static, WSGI, CGI/proxy, and ASGI paths honor
+  it; no profile changes the default yet.
+- Slow-but-progressing HTTP/1 request heads can be bounded with the opt-in
+  `--request-head-timeout`. Its total clock starts after the first byte ends the
+  idle phase and spans the request line plus fields without resetting on
+  progress. Threaded and ASGI paths preserve pipelined bytes and close on
+  expiry; the disabled path retains the original parser loops and no profile
+  selects a value.
+- Stalled response writers can be bounded with the opt-in `--write-timeout`.
+  It scopes synchronous HTTP/1/WSGI/proxy and HTTP/2 socket writes, ASGI HTTP and
+  WebSocket drains, and HTTP/3 capacity waits. Progress resets the deadline; a
+  timed-out ASGI transport is aborted rather than flushing queued bytes. The
+  unset path retains native transport behavior and no profile selects a value.
+- Slow-but-progressing HTTP/1 request bodies can be bounded with the opt-in
+  `--request-body-timeout`. Its total clock starts on the first nonempty read,
+  spans progress and application pauses, and closes on expiry. Upload, resumable
+  PUT, WSGI, CGI, proxy, WebDAV, and ASGI declared/chunked consumers share the
+  policy; bodyless/disabled requests allocate no deadline state and no profile
+  selects a value.
+- ASGI `receive()` now reports real peer EOF/connection loss after the final
+  request-body event instead of immediately claiming every connected peer had
+  disconnected. Observation is installed only for an actual post-body listener,
+  consumes no pipelined bytes, and restores original protocol callbacks when
+  cancelled. It also reports request-scope `http.disconnect` after response
+  completion without closing the reusable HTTP/1 socket. Response subscribers
+  are allocated only when an application actually waits; multiple listeners
+  share the signal and cancellation restores the original completion callable.
+- ASGI HTTP `send()` now fulfills the advertised spec 2.4 closed-connection
+  contract. Sends after response completion, to a closing writer, or through a
+  native peer write failure raise `ClientDisconnectError`, an `OSError`
+  subclass. Uncaught lifecycle errors are quiet and preserve a fully framed
+  pipelined connection; write-progress `TimeoutError` remains server-owned.
+- ASGI HTTP responses now enforce start/body/trailer ordering, exact
+  `Content-Length`, strict byte-native response fields, server-owned connection
+  and transfer framing, body suppression, and completion before application
+  return. HTTP scopes advertise the response-trailers extension. HTTP/1 emits
+  trailer fields only for client `TE: trailers` negotiation, consumes the same
+  declared application sequence otherwise, and rejects trailers that can alter
+  routing or message framing.
+- ASGI lifespan now has explicit `auto`, `on`, and `off` policy plus a positive
+  configurable startup/shutdown timeout. Explicit startup failure prevents
+  socket bind; shutdown failure and premature/timeout exits are surfaced.
+  Successful lifespan state is shallow-copied into HTTP and WebSocket scopes,
+  while unsupported/disabled paths avoid the state key and request-copy cost.
+- The specialized ASGI HTTP/1 parser now rejects malformed non-`Host` field
+  syntax with `400`, including missing colons, invalid token names, whitespace
+  before colons, forbidden value controls, and obsolete folding. Small heads use
+  per-line compiled grammar checks; heads above eight fields use one possessive
+  block scan. Malformed-wire acceptance is not configurable.
+- The external harness adds pinned, benchmark-only Starlette/FastAPI apps and
+  within-trial servery-versus-Uvicorn ratios. Starlette 1.3.1 JSON and
+  `StreamingResponse` run on CPython 3.15; FastAPI 0.139.0 JSON and exact `422`
+  validation use an explicit Python 3.14 image because current Pydantic Core has
+  no cp315 wheel. No framework dependency enters the servery package.
+- The external harness now labels portable Uvicorn (`asyncio`/h11) separately
+  from opt-in native Uvicorn (`uvloop`/`httptools`) on Python 3.14. Configurable
+  bounded latency sampling, persistent warmup, connection ramping, connect
+  deadlines, response-status histograms, and transport/status error counters
+  make high-concurrency overload evidence auditable without changing legacy
+  benchmark defaults or servery's zero-dependency runtime.
+
+### Performance
+
+- The total head-deadline disabled path stays within the protected budget for
+  static (-2.3%) and WSGI (-2.4%) paired RPS; an unexplained favorable ASGI
+  source gate is not claimed as a gain. Same-image enabled 64-connection cost is
+  noisy-neutral static, -13.9% WSGI, and -8.2% ASGI RPS; concurrency-one resolves
+  to noisy -1.2% WSGI and -6.5% ASGI. Rejected per-line/two-timer and redundant
+  socket-transition shapes cost 8–11% before optimization. The real configured
+  capacity tradeoff is why the abuse-control policy remains opt-in.
+- Lazy ASGI post-response disconnect is neutral on the protected keep-alive
+  path (-2.3% RPS/-0.4% p99, with RPS dispersion wider than the effect). Churn
+  direction is unresolved rather than claimed: the five-trial c32 point is
+  -10.2% with 9.3-point MAD, the preceding probe is +7.1%, and concurrency one
+  is +8.8% with 7.4-point MAD; churn p99 and memory remain neutral.
+- ASGI 2.4 closed-send checks remain inside the protected budget: -3.4% paired
+  keep-alive RPS/+1.3% p99 and -2.9% churn RPS/+0.7% p99. The preceding short
+  probe was favorable, so this is classified as neutral rather than a loss.
+- Strict ASGI response ordering/framing is neutral for the protected 16-event
+  64 KiB stream (-1.0% RPS/+3.0% p99, with 13–15-point dispersion); churn is
+  unresolved (+6.7% RPS with 22.1-point dispersion). Minimal saturated
+  keep-alive remains a documented exception at -13.7% RPS/+6.7% p99, despite a
+  +2.2% preceding probe, about +3% isolated one-event state-machine cost, and a
+  noisy -7.2% concurrency-one control. Safety semantics remain unconditional;
+  the minimal capacity gate needs a dedicated-host rerun.
+- In same-image framework gates, servery is 72–96% above portable Uvicorn RPS
+  for pinned Starlette JSON/streaming on CPython 3.15 and 35–63% above for pinned
+  FastAPI JSON on CPython 3.14; p99 is 26–46% lower and all exact probes/timed
+  requests are error-free. These narrow in-process cohorts demonstrate
+  compatibility, not parity with Uvicorn's deployment ecosystem.
+- In the labeled Python 3.14 native framework tier, all Starlette/FastAPI exact
+  probes remain error-free. Servery is 53–100% above explicitly portable
+  Uvicorn RPS but 26–50% below explicitly native Uvicorn; native Uvicorn is
+  119–228% above its portable path across Starlette JSON/streaming and FastAPI
+  JSON. The result records a native performance ceiling without changing
+  servery's zero-dependency policy.
+- The lifespan/state source gate is neutral against the frozen pre-change image:
+  +3.6% RPS for an auto-detected unsupported minimal app, -1.8% FastAPI, and
+  noisy -0.7% Starlette; p99 and memory are neutral. A five-trial Starlette
+  `off` control is also neutral (+1.2% RPS with wider dispersion).
+
+- The total body-deadline disabled path is neutral in five-trial gates: +0.2%
+  static, -3.9% WSGI, and -3.0% ASGI paired RPS. Same-image enabled 64 KiB POST
+  gates measure -4.4% WSGI RPS/+6.9% p99 and noisy-neutral ASGI (+9.3%/-8.0%,
+  RPS dispersion wider than the effect), with zero errors. Rejected eager state
+  and bodyless-wrapper shapes regressed static 14%, ASGI 6.2%, or WSGI 8.5%.
+  The harness now includes opt-in `wsgi-body-64k` and `asgi-body-64k`.
+- The strict ASGI field validator stays at the protected throughput boundary:
+  -3.35% RPS/+3.66% p99 for minimal 64-connection traffic and -5.01%/+3.60%
+  for a new 32-field cohort. Its concurrency-one header result is -4.17% RPS;
+  churn was too dispersed for a directional claim (-0.65% point estimate).
+  Per-line-only, ordinary block-regex, and valid-name-cache large-head shapes
+  regressed 6.7–15.5% and were rejected. The harness adds opt-in
+  `asgi-headers-32`.
+- The lazy ASGI peer-disconnect shape is neutral in five-trial protected gates:
+  +4.1% RPS/+0.1% p99 for 64-connection keep-alive (dispersion wider than the
+  effects) and -0.3% RPS/-0.3% p99 for 32-connection churn. Eager per-request
+  event/protocol shapes regressed 5–9% throughput or 18–36% churn p99 and were
+  rejected. The harness now includes opt-in `asgi-churn-1k`.
+- The benchmark-only selector now hands access records to one dedicated writer
+  through a bounded budget with explicit availability (`drop`) or lossless
+  (`wait`) saturation policy and graceful drain. Batch size and collection window
+  are research controls; the comparison harness audits timed log-line delivery
+  rather than crediting omitted records. The final one-CPU drop cohort was 8.1%
+  above current logged production RPS with 3.1% lower p99 and 1.2 MiB lower peak
+  memory, with 100% record delivery. No public backend or logging default changes.
+- Generated selector listings now use separately bounded scan/render workers and
+  queue slots while retaining existing per-listing entry/page/detail limits. On
+  one server CPU, one worker matched or improved production throughput for 100
+  and 1,000 entries, reduced p99 by 65.0–71.1%, and used 49.5–61.9 MiB less peak
+  memory. Four workers helped only the smaller page, so worker count remains
+  experimental policy rather than a new default.
+- Concurrent representation-digest requests for the same opened file identity
+  now share one transient hash result while retaining zero cache entries. Digest
+  and body can no longer diverge after an atomic pathname replacement, and
+  truncation fails before file headers. A paired 64 KiB digest-miss gate measured
+  +15.9% RPS with neutral p99; no new public cache setting is introduced.
+- Concurrent compression requests for the same representation now share one
+  transient result even when `--compression-cache-size=0`; no bytes remain after
+  the concurrent callers finish. Distinct keys no longer serialize behind one
+  global cache-miss lock. A paired 64 KiB uncached gzip gate measured +91.2% RPS
+  and -24.8% p99, while the warm retained-cache path remained neutral.
+- Plain HTTP/1 static files up to 16 KiB now use one bounded read and socket
+  write instead of paying `sendfile` setup cost. Larger files retain zero-copy
+  `sendfile`. `--small-file-buffer-size` makes the memory/throughput crossover
+  explicit and configurable; `0` restores sendfile for every nonempty file.
+- ASGI streaming responses now drain between intermediate body events, applying
+  asyncio transport backpressure before the application can produce the next
+  chunk. The one-event response retains its original final drain. Fair comparison
+  fixtures now include identical 16-event/chunk 64 KiB and 1 MiB ASGI/WSGI
+  workloads and are mounted into paired baseline images to prevent fixture drift.
+  A four-client, 64 MiB allocated-chunk slow-reader gate measured 40.4 MiB peak
+  cgroup memory versus 283.5 MiB without intermediate drains, with cancellation
+  propagation covered while a drain is blocked.
+
+### Fixed
+
+- SPA fallback now revalidates containment of the root `index.html`. A symlinked
+  fallback index can no longer serve a target outside the configured root.
+- HTTP/1.1 now rejects missing, duplicate, or invalid `Host` fields with `400`
+  plus connection close in threaded and ASGI serving. The threaded buffered and
+  selector incremental adapters also reject malformed request-field syntax;
+  header-count excess remains a distinct `431` across the HTTP/1 paths.
+- HTTP/2 and HTTP/3 streaming bodies now retain the opened file used for `fstat`
+  and validators instead of reopening its path later. Atomic replacement can no
+  longer make response headers describe one file while the body streams another;
+  HEAD, reset, cancellation, error, and connection teardown close ownership.
+
 ## [1.5.0] - 2026-07-10
 
 ### Added
@@ -542,7 +764,8 @@ First stable release. A zero-dependency, pure-Python HTTP file server.
 - **Free-threading** support (3.13t/3.14t), full type hints (`ty`-checked), and a
   CI gate that enforces zero runtime dependencies in the core wheel.
 
-[Unreleased]: https://github.com/mjbommar/servery/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/mjbommar/servery/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/mjbommar/servery/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/mjbommar/servery/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/mjbommar/servery/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/mjbommar/servery/compare/v1.3.1...v1.3.2

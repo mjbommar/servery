@@ -16,10 +16,12 @@ HTTP/2 path yet; the HTTP/1.1 handler remains the full-featured path.
 from __future__ import annotations
 
 import contextlib
+import socket
 import ssl
-from typing import TYPE_CHECKING, BinaryIO
+import threading
+from typing import TYPE_CHECKING
 
-from servery import _log, _response, auth
+from servery import _log, _response, _write, auth
 from servery.http2 import frames, hpack
 from servery.http2.frames import ErrorCode, Flag, FrameType
 
@@ -43,7 +45,6 @@ class _Outbound:
         self.stream_id = stream_id
         self.body = body
         self.offset = 0
-        self.handle: BinaryIO | None = None
         self.total = len(body) if isinstance(body, bytes) else body.size
 
     @property
@@ -54,16 +55,13 @@ class _Outbound:
         if isinstance(self.body, bytes):
             chunk = self.body[self.offset : self.offset + size]
         else:
-            if self.handle is None:
-                self.handle = open(self.body.path, "rb")  # noqa: SIM115 - closed by close()
-            chunk = self.handle.read(size)
+            chunk = self.body.handle.read(size)
         self.offset += len(chunk)
         return chunk
 
     def close(self) -> None:
-        if self.handle is not None:
-            self.handle.close()
-            self.handle = None
+        if isinstance(self.body, _response.FileBody):
+            self.body.close()
 
 
 class H2Connection:
@@ -93,9 +91,24 @@ class H2Connection:
         self.rst_count = 0
         self.control_count = 0
         self.running = True
+        self._send_lock = threading.Lock()
+        # Admission and GOAWAY's last-stream snapshot must be one atomic
+        # boundary, including on free-threaded Python.
+        self._drain_lock = threading.Lock()
+        self._draining = threading.Event()
+        self._last_accepted_stream_id = 0
 
     def _stream_window(self, stream_id: int) -> int:
         return self.stream_windows.get(stream_id, self.peer_window)
+
+    def _send(self, data: bytes) -> None:
+        with self._send_lock:
+            timeout = self.config.write_timeout
+            if timeout is None:
+                self.sock.sendall(data)
+                return
+            with _write.socket_timeout(self.sock, timeout):
+                self.sock.sendall(data)
 
     # -- main loop --------------------------------------------------------
 
@@ -103,6 +116,7 @@ class H2Connection:
         if self._read_exact(len(frames.CONNECTION_PREFACE)) != frames.CONNECTION_PREFACE:
             return
         self._send_settings()
+        self.handler._server.register_connection_drainer(self.sock, self._begin_draining)
         try:
             while self.running:
                 # read1: return whatever a single read yields (don't block for a
@@ -120,8 +134,29 @@ class H2Connection:
             _log.logger.debug("HTTP/2 connection error: %r", exc)
             self._goaway(ErrorCode.PROTOCOL_ERROR)
         finally:
+            self.handler._server.unregister_connection_drainer(self.sock)
             for response in self.outbound.values():
                 response.close()
+
+    def _begin_draining(self) -> None:
+        """Advertise graceful shutdown while allowing already accepted streams."""
+        with self._drain_lock:
+            if self._draining.is_set():
+                return
+            self._draining.set()
+            last_accepted = self._last_accepted_stream_id
+            idle = not self.active_streams
+        _log.logger.debug("HTTP/2 graceful GOAWAY last_stream_id=%s", last_accepted)
+        self._send(
+            frames.serialize(frames.GoAwayFrame(0, Flag(0), last_accepted, ErrorCode.NO_ERROR, b""))
+        )
+        if idle:
+            # Wake read1() after the terminal control frame is on the wire.  An
+            # idle H2 connection has no accepted work that could require further
+            # client WINDOW_UPDATE frames.
+            self.running = False
+            with contextlib.suppress(OSError):
+                self.sock.shutdown(socket.SHUT_RD)
 
     def _read_exact(self, count: int) -> bytes:
         chunks: list[bytes] = []
@@ -141,7 +176,7 @@ class H2Connection:
             (frames.SettingsParameter.MAX_HEADER_LIST_SIZE, _MAX_HEADER_LIST),
             (frames.SettingsParameter.ENABLE_PUSH, 0),
         )
-        self.sock.sendall(frames.serialize(frames.SettingsFrame(0, Flag(0), settings)))
+        self._send(frames.serialize(frames.SettingsFrame(0, Flag(0), settings)))
 
     # -- frame dispatch ---------------------------------------------------
 
@@ -179,7 +214,7 @@ class H2Connection:
             if not self._control_allowed():
                 return
             if not frame.ack:
-                self.sock.sendall(frames.serialize(frames.ping_ack(frame.opaque_data)))
+                self._send(frames.serialize(frames.ping_ack(frame.opaque_data)))
         elif isinstance(frame, frames.RstStreamFrame):
             if frame.stream_id > self.last_client_stream_id:
                 self._goaway(ErrorCode.PROTOCOL_ERROR)
@@ -217,7 +252,7 @@ class H2Connection:
                         return
                     self.stream_windows[stream_id] = updated
                 self.peer_window = value
-        self.sock.sendall(frames.serialize(frames.settings_ack()))
+        self._send(frames.serialize(frames.settings_ack()))
 
     def _handle_header_block(self, frame: frames.HeadersFrame | frames.ContinuationFrame) -> None:
         stream_id = frame.stream_id
@@ -236,10 +271,17 @@ class H2Connection:
                 self._goaway(ErrorCode.PROTOCOL_ERROR)
                 return
             self.last_client_stream_id = stream_id
-            if len(self.active_streams) >= self.config.max_h2_streams:
+            with self._drain_lock:
+                refuse_for_drain = self._draining.is_set() or self.handler._server.is_draining
+                if not refuse_for_drain and len(self.active_streams) < self.config.max_h2_streams:
+                    self.active_streams.add(stream_id)
+                    self._last_accepted_stream_id = stream_id
+            if refuse_for_drain:
                 self._reset(stream_id, ErrorCode.REFUSED_STREAM)
                 return
-            self.active_streams.add(stream_id)
+            if stream_id not in self.active_streams:
+                self._reset(stream_id, ErrorCode.REFUSED_STREAM)
+                return
             block = bytearray()
             self.blocks[stream_id] = block
             self._header_end_stream[stream_id] = frame.end_stream
@@ -269,8 +311,8 @@ class H2Connection:
             return
         if frame.data:
             increment = len(frame.data)
-            self.sock.sendall(frames.serialize(frames.WindowUpdateFrame(0, Flag(0), increment)))
-            self.sock.sendall(
+            self._send(frames.serialize(frames.WindowUpdateFrame(0, Flag(0), increment)))
+            self._send(
                 frames.serialize(frames.WindowUpdateFrame(frame.stream_id, Flag(0), increment))
             )
         if frame.end_stream:
@@ -303,6 +345,8 @@ class H2Connection:
 
         accept_encoding = regular.get(b"accept-encoding", b"").decode("latin-1")
         status, headers_out, body = self._build_response(path, accept_encoding, regular)
+        if method == "HEAD" and isinstance(body, _response.FileBody):
+            body.close()
         self._respond(stream_id, status, headers_out, body if method == "GET" else None)
 
     def _authorized(self, regular: dict[bytes, bytes]) -> bool:
@@ -348,9 +392,14 @@ class H2Connection:
         body_size = 0 if body is None else (len(body) if isinstance(body, bytes) else body.size)
         end_stream = body_size == 0
         flags = Flag.END_HEADERS | (Flag.END_STREAM if end_stream else Flag(0))
-        self.sock.sendall(
-            frames.build_header9(len(block), FrameType.HEADERS, flags, stream_id) + block
-        )
+        try:
+            self._send(
+                frames.build_header9(len(block), FrameType.HEADERS, flags, stream_id) + block
+            )
+        except BaseException:
+            if isinstance(body, _response.FileBody):
+                body.close()
+            raise
         if end_stream:
             self._complete_stream(stream_id)
         elif body is not None:
@@ -381,7 +430,7 @@ class H2Connection:
                     continue
                 last = response.remaining == 0
                 flags = Flag.END_STREAM if last else Flag(0)
-                self.sock.sendall(
+                self._send(
                     frames.build_header9(len(chunk), FrameType.DATA, flags, stream_id) + chunk
                 )
                 self.stream_windows[stream_id] -= len(chunk)
@@ -394,9 +443,13 @@ class H2Connection:
         response = self.outbound.pop(stream_id, None)
         if response is not None:
             response.close()
-        self.active_streams.discard(stream_id)
+        with self._drain_lock:
+            self.active_streams.discard(stream_id)
+            drained = self._draining.is_set() and not self.active_streams
         self.stream_windows.pop(stream_id, None)
         self._pending_headers.pop(stream_id, None)
+        if drained:
+            self.running = False
 
     def _drop_stream(self, stream_id: int) -> None:
         self.blocks.pop(stream_id, None)
@@ -404,13 +457,13 @@ class H2Connection:
         self._complete_stream(stream_id)
 
     def _reset(self, stream_id: int, error: int) -> None:
-        self.sock.sendall(frames.serialize(frames.RstStreamFrame(stream_id, Flag(0), error)))
+        self._send(frames.serialize(frames.RstStreamFrame(stream_id, Flag(0), error)))
         self._drop_stream(stream_id)
 
     def _goaway(self, error: int) -> None:
         _log.logger.debug("HTTP/2 GOAWAY error=%s", error)
         with contextlib.suppress(OSError):
-            self.sock.sendall(
+            self._send(
                 frames.serialize(
                     frames.GoAwayFrame(0, Flag(0), self.last_client_stream_id, error, b"")
                 )

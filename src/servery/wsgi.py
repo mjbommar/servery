@@ -43,7 +43,8 @@ def build_environ(
     path, _, query = handler.path.partition("?")
     headers = handler.headers
     length = handler._body_plan.length or 0
-    body_reader = body_reader or _BodyReader(handler.rfile, length)
+    source = handler._request_body_stream() if length else handler.rfile
+    body_reader = body_reader or _BodyReader(source, length)
     server_host, server_port = handler.server.server_address[:2]  # ty: ignore[not-subscriptable]
     environ: dict[str, Any] = {
         "REQUEST_METHOD": handler.command,
@@ -62,7 +63,7 @@ def build_environ(
         "wsgi.input": body_reader,
         "wsgi.errors": sys.stderr,
         "wsgi.multithread": True,
-        "wsgi.multiprocess": False,
+        "wsgi.multiprocess": handler._server.config.workers > 1,
         "wsgi.run_once": False,
     }
     for name, value in headers.items():
@@ -149,7 +150,8 @@ class _Exchange:
         if length > h._server.config.max_request_body:
             h._reject_unread_body(413, "Request body exceeds the size limit")
             return
-        body_reader = _BodyReader(h.rfile, length)
+        source = h._request_body_stream() if length else h.rfile
+        body_reader = _BodyReader(source, length)
         try:
             result = self._app(build_environ(h, body_reader), self._start_response)
             try:
@@ -167,6 +169,9 @@ class _Exchange:
                 close = getattr(result, "close", None)
                 if close is not None:
                     close()
+        except _body.BodyTimeoutError:
+            h.close_connection = True
+            raise
         except Exception:
             # The app (or its iterator) raised. Log with traceback; send a 500 if
             # nothing was committed yet, otherwise just close the connection.
@@ -186,7 +191,7 @@ class WSGIHandler(ServeryHandler):
 
     def handle(self) -> None:
         # WSGI is HTTP/1.1 only — skip ServeryHandler's HTTP/2 dispatch.
-        super(ServeryHandler, self).handle()
+        self._handle_http1()
 
     def _run_wsgi(self) -> None:
         if not self._authorized():  # --auth gates the app, like file serving

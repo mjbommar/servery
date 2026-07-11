@@ -71,12 +71,23 @@ because the implementation has a number in it.
 | 7 | Each `AccessLog` owns and closes one handler; construction occurs only after successful handler setup and bind. Independent-server, close-order, failed-bind, and end-to-end tests cover ownership. |
 | 8 | `dav_lock_mode` is `class1`, `compat`, or `enforced` (default for writable DAV). Enforced mode stores exclusive depth-infinity locks, refreshes/expires tokens, and checks affected ancestors/descendants on writes. Compat warns at startup. Read-only DAV honestly advertises class 1. |
 | 9 | `max_listing_entries`, `listing_page_size`, and `listing_details_threshold` bound HTML work; truncation is reported and expensive metadata/metrics degrade above the threshold. `max_propfind_entries` returns explicit `507` rather than a partial `207`. |
-| 10 | `max_compress_size` and a byte-bounded `compression_cache_size` control compression. The cache is keyed by canonical path, mtime, size, coding, and level; miss computation is serialized to prevent hot-file stampedes. The `cdn` profile enables a 32 MiB cache. Weekly/manual benchmarks retain per-request and concurrent throughput, p50/p95/p99, errors, and RSS evidence. |
+| 10 | `max_compress_size` and a byte-bounded `compression_cache_size` control compression. The cache is keyed by canonical path, mtime, size, coding, and level; same-key work is transiently coalesced even with zero retention, while distinct keys may compute concurrently under the server's worker budget. The `cdn` profile enables a 32 MiB cache. Weekly/manual benchmarks retain per-request and concurrent throughput, p50/p95/p99, errors, and RSS evidence. |
 
 Defaults are conservative compatibility choices, not protocol rules. Operators can
 trade memory for latency with the buffering/cache thresholds and trade reuse for
 body-drain work with `keepalive_drain_limit`; framing, state transitions, atomic
 commit, and log ownership are never configurable relaxations.
+
+### Unreleased performance follow-up
+
+External comparison and paired size sweeps found that `sendfile` setup dominates
+enough of the 1–16 KiB plaintext HTTP/1 body path to justify a second bounded
+strategy. Files at or below `small_file_buffer_size` (16 KiB by default) now use
+one read/socket write; larger files retain zero-copy `sendfile`. Zero forces the
+old all-sendfile policy. The accepted threshold improved paired small-file
+throughput by roughly 13–21% without regressing protected large-file, WSGI, or
+ASGI workloads; 64 KiB buffering was rejected because it lost concurrent
+throughput and increased memory.
 
 ### 1.5.0 verification snapshot
 

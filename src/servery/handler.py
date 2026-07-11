@@ -1,9 +1,10 @@
 """The servery request handler.
 
 We subclass the stdlib ``SimpleHTTPRequestHandler`` rather than reimplementing
-HTTP: the base gives us correct request parsing, HEAD/GET dispatch, directory
+HTTP: the base gives us the buffered request loop, HEAD/GET dispatch, directory
 redirects, and MIME typing. servery overrides what it improves:
 
+* ``parse_request`` — adapts the shared strict HTTP/1 request-head policy;
 * ``translate_path`` — routes every path through the :mod:`servery.security`
   containment check (closing the symlink-escape gap);
 * ``list_directory`` — renders the rich, sortable, searchable listing;
@@ -16,7 +17,6 @@ redirects, and MIME typing. servery overrides what it improves:
 from __future__ import annotations
 
 import contextlib
-import http.cookies
 import http.server
 import io
 import logging
@@ -26,24 +26,30 @@ import socket
 import ssl
 import urllib.parse
 from http import HTTPStatus
-from typing import TYPE_CHECKING, BinaryIO, ClassVar, cast, overload
+from typing import TYPE_CHECKING, BinaryIO, ClassVar, cast
 
 from servery import (
     __version__,
     _body,
     _compress,
-    _conditional,
     _digest,
     _http1,
     _log,
+    _request,
     _resumable,
+    _static,
+    _work,
+    _write,
     archive,
     auth,
     listing,
-    ranges,
     security,
     upload,
 )
+
+_HeaderError = _request.HeaderError
+_RequestHeaders = _request.RequestHeaders
+_read_request_headers = _request.read_headers
 
 if TYPE_CHECKING:
     from _typeshed import SupportsRead, SupportsWrite
@@ -63,13 +69,6 @@ _HAS_SENDFILE = hasattr(os, "sendfile")
 # instead of tens of thousands, which matters on Windows. TLS keeps the smaller
 # ``_COPY_BUFSIZE`` — OpenSSL re-chunks every write into ~16 KiB records regardless.
 _RAW_COPY_BUFSIZE = 1024 * 1024
-# CSP for servery-GENERATED pages (listing / error): no scripts, inline styles
-# only, self forms. Served files are NOT given a CSP (it would break real sites).
-_CSP = (
-    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
-    "form-action 'self'; frame-ancestors 'self'"
-)
-
 # On-brand error page, replacing the bland stdlib default — same design language as
 # the directory listing (system font, OS light/dark, the listing's accent). A
 # `%`-format template (no literal `%`): the base class fills code/message/explain,
@@ -125,14 +124,7 @@ def _copy_n(
         remaining -= len(chunk)
 
 
-def _content_disposition(filename: str) -> str:
-    """Build a Content-Disposition with an ASCII fallback + UTF-8 (RFC 6266/8187)."""
-    ascii_name = filename.encode("ascii", "replace").decode("ascii")
-    # Drop control characters (incl. CR/LF) so a filesystem-derived name can never
-    # inject a response header. The filename* form is percent-encoded already.
-    ascii_name = "".join(c for c in ascii_name if c.isprintable()).replace('"', "")
-    extended = urllib.parse.quote(filename, safe="")
-    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{extended}"
+_content_disposition = _static.content_disposition
 
 
 class _ChunkedWriter:
@@ -180,11 +172,14 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     _body_plan = _body.BodyPlan(0)
     _body_forced_close: bool = False
     _body_original_close: bool = True
+    _requests_served: int = 0
+    _request_limit_close: bool = False
     _version_string_cache: ClassVar[str | None] = None  # the Server header is constant
     # Our parse_request() populates these (replacing the email-based parser).
     headers: _RequestHeaders
     command: str | None  # may be None on a malformed first line
     raw_requestline: bytes
+    _headers_buffer: list[bytes]
 
     @property
     def _server(self) -> ServeryHTTPServer:
@@ -205,6 +200,11 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         # Nagle + delayed-ACK adds a ~40 ms stall to every small response.
         with contextlib.suppress(OSError):
             self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        write_timeout = self._server.config.write_timeout
+        if write_timeout is not None:
+            self.wfile = _write.DeadlineWriter(
+                cast("BinaryIO", self.wfile), self.connection, write_timeout
+            )
 
     def handle(self) -> None:
         if self._server.config.http2 and self._is_http2():
@@ -212,7 +212,122 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
             H2Connection(self).run()
             return
-        super().handle()
+        self._handle_http1()
+
+    def _handle_http1(self) -> None:
+        """Run HTTP/1, optionally separating keep-alive idle time from active I/O."""
+        config = self._server.config
+        idle_timeout = config.keepalive_timeout
+        head_timeout = config.request_head_timeout
+        if self._server.is_draining:
+            return
+
+        if head_timeout is not None:
+            self._handle_http1_with_head_deadline(head_timeout, idle_timeout)
+            return
+
+        # Mirror BaseHTTPRequestHandler.handle(), but wait for only the first byte
+        # of a subsequent request under the idle budget. Once activity begins the
+        # existing active socket timeout applies to request parsing/body/response.
+        self.close_connection = True
+        self.handle_one_request()
+        while not self.close_connection:
+            if self._server.is_draining:
+                self.close_connection = True
+                return
+            if idle_timeout is not None:
+                self.connection.settimeout(idle_timeout)
+                try:
+                    cast("io.BufferedReader", self.rfile).peek(1)
+                except TimeoutError:
+                    self.close_connection = True
+                    return
+                finally:
+                    with contextlib.suppress(OSError):
+                        self.connection.settimeout(config.timeout)
+            self.handle_one_request()
+
+    def _handle_http1_with_head_deadline(
+        self,
+        head_timeout: float,
+        idle_timeout: float | None,
+    ) -> None:
+        """Run configured request-head deadlines without changing the default loop."""
+        config = self._server.config
+        source = cast("io.BufferedReader", self.rfile)
+        self.close_connection = True
+        first_request = True
+        while True:
+            # First-byte wait is an idle/progress policy, not part of the total
+            # head budget. Buffered pipelined input returns from peek immediately.
+            use_idle_timeout = not first_request and idle_timeout is not None
+            if use_idle_timeout:
+                self.connection.settimeout(idle_timeout)
+            try:
+                buffered = source.peek(1)
+                if not buffered:
+                    self.close_connection = True
+                    return
+            except TimeoutError:
+                self.close_connection = True
+                return
+            finally:
+                if use_idle_timeout:
+                    with contextlib.suppress(OSError):
+                        self.connection.settimeout(config.timeout)
+
+            self._handle_one_request_with_head_deadline(source, head_timeout, buffered)
+            if self.close_connection or self._server.is_draining:
+                self.close_connection = True
+                return
+            first_request = False
+
+    def _handle_one_request_with_head_deadline(
+        self,
+        source: io.BufferedReader,
+        timeout: float,
+        buffered: bytes,
+    ) -> None:
+        """Mirror the stdlib dispatcher with a deadline-aware head reader."""
+        reader = _request.HeadDeadlineReader(source, self.connection, timeout, buffered)
+        try:
+            complete_head = reader.buffered_head()
+            head_source = io.BytesIO(complete_head) if complete_head is not None else reader
+            self.raw_requestline = head_source.readline(_request.MAX_REQUEST_LINE + 1)
+            if len(self.raw_requestline) > _request.MAX_REQUEST_LINE:
+                self.requestline = ""
+                self.request_version = ""
+                self.command = ""
+                self.send_error(HTTPStatus.REQUEST_URI_TOO_LONG)
+                return
+            if not self.raw_requestline:
+                self.close_connection = True
+                return
+
+            # parse_request() deliberately keeps its default hot path unchanged.
+            # The configured-only adapter temporarily supplies the bounded line
+            # source; it never consumes beyond the terminating blank line, so
+            # body/pipeline bytes remain in the BufferedReader restored below.
+            original = self.rfile
+            self.rfile = cast("io.BufferedIOBase", head_source)
+            try:
+                accepted = self.parse_request()
+            finally:
+                self.rfile = original
+            if not accepted:
+                return
+            method_name = "do_" + cast("str", self.command)
+            if not hasattr(self, method_name):
+                self.send_error(
+                    HTTPStatus.NOT_IMPLEMENTED,
+                    f"Unsupported method ({self.command!r})",
+                )
+                return
+            getattr(self, method_name)()
+            self.wfile.flush()
+        except TimeoutError as exc:
+            self.log_error("Request timed out: %r", exc)
+            self.close_connection = True
 
     def _is_http2(self) -> bool:
         sock = self.connection
@@ -234,102 +349,63 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         of a small request's CPU doing MIME work that HTTP never needs.
         """
         self.command = None  # set in case of error on the first line
-        self.request_version = version = self.default_request_version
+        self.request_version = self.default_request_version
         self.close_connection = True
         self._body_forced_close = False
         self._body_original_close = True
-        requestline = str(self.raw_requestline, "iso-8859-1").rstrip("\r\n")
-        self.requestline = requestline
-        words = requestline.split()
-        if not words:
+        try:
+            parsed = _request.parse_request_line(
+                self.raw_requestline,
+                protocol_version=self.protocol_version,
+                default_request_version=self.default_request_version,
+            )
+        except _request.RequestLineError as err:
+            if err.response_version is not None:
+                self.request_version = err.response_version
+            self.close_connection = err.close_connection
+            self.requestline = self.raw_requestline.decode("iso-8859-1").rstrip("\r\n")
+            self.send_error(err.status, err.message)
             return False
-
-        if len(words) >= 3:  # the version is present
-            version = words[-1]
-            if not self._accept_http_version(version):
-                return False
-            self.request_version = version
-
-        if not 2 <= len(words) <= 3:
-            self.send_error(HTTPStatus.BAD_REQUEST, f"Bad request syntax ({requestline!r})")
+        if parsed is None:
             return False
-        command, path = words[:2]
-        if len(words) == 2:
-            self.close_connection = True
-            if command != "GET":
-                self.send_error(HTTPStatus.BAD_REQUEST, f"Bad HTTP/0.9 request type ({command!r})")
-                return False
-            self.command, self.path, self.headers = command, path, _RequestHeaders([])
+        self.requestline = parsed.requestline
+        self.command = parsed.method
+        self.path = parsed.target
+        self.request_version = parsed.version
+        self.close_connection = parsed.close_connection
+        if not parsed.has_headers:
+            self.headers = _RequestHeaders([])
             self._body_plan = _body.BodyPlan(0)
             return True
-        self.command, self.path = command, path
-
-        # gh-87389: collapse a leading "//" so a client can't read the path as an
-        # absolute "//authority" URI (open-redirect protection).
-        if self.path.startswith("//"):
-            self.path = "/" + self.path.lstrip("/")
 
         try:
             self.headers = _read_request_headers(self.rfile)
         except _HeaderError as err:
-            self.send_error(HTTPStatus.REQUEST_HEADER_FIELDS_TOO_LARGE, str(err))
-            return False
-
-        try:
-            self._body_plan = _body.parse_framing(
-                self.headers.get_all("Content-Length"),
-                self.headers.get_all("Transfer-Encoding"),
-            )
-        except _body.FramingError as err:
             self.close_connection = True
             self.send_error(err.status, str(err))
             return False
 
-        conntype = self.headers.get("Connection", "")
-        if conntype.lower() == "close":
-            self.close_connection = True
-        elif conntype.lower() == "keep-alive" and self.protocol_version >= "HTTP/1.1":
-            self.close_connection = False
-        self._body_original_close = self.close_connection
-        expect = self.headers.get("Expect", "")
-        if (
-            expect.lower() == "100-continue"
-            and self.protocol_version >= "HTTP/1.1"
-            and self.request_version >= "HTTP/1.1"
-        ):
-            return self.handle_expect_100()
-        return True
-
-    def _accept_http_version(self, version: str) -> bool:
-        """Validate the request version; send an error and return False if bad."""
-        # Fast path for the only two versions a real HTTP/1.x client sends, so the
-        # hot path skips the split/isdigit/int parsing below.
-        if version == "HTTP/1.1":
-            if self.protocol_version >= "HTTP/1.1":
-                self.close_connection = False
-            return True
-        if version == "HTTP/1.0":
-            return True
         try:
-            if not version.startswith("HTTP/"):
-                raise ValueError
-            base = version.split("/", 1)[1]
-            parts = base.split(".")
-            if (
-                len(parts) != 2
-                or any(not p.isdigit() for p in parts)
-                or any(len(p) > 10 for p in parts)
-            ):
-                raise ValueError
-            number = (int(parts[0]), int(parts[1]))
-        except (ValueError, IndexError):
-            self.send_error(HTTPStatus.BAD_REQUEST, f"Bad request version ({version!r})")
+            head = _request.finalize_request_head(
+                parsed,
+                self.headers,
+                protocol_version=self.protocol_version,
+            )
+        except (_body.FramingError, _request.RequestHeadError) as err:
+            self.close_connection = True
+            self.send_error(err.status, str(err))
             return False
-        if number >= (1, 1) and self.protocol_version >= "HTTP/1.1":
-            self.close_connection = False
-        if number >= (2, 0):
-            self.send_error(HTTPStatus.HTTP_VERSION_NOT_SUPPORTED, f"Invalid HTTP version ({base})")
-            return False
+        self._body_plan = head.body
+        self.close_connection = head.close_connection
+        request_limit = self._server.config.max_requests_per_connection
+        if request_limit:
+            self._requests_served += 1
+            if self._requests_served >= request_limit:
+                self.close_connection = True
+                self._request_limit_close = True
+        self._body_original_close = self.close_connection
+        if head.expect_continue:
+            return self.handle_expect_100()
         return True
 
     # --- path safety -----------------------------------------------------
@@ -357,22 +433,25 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         # Check the (rare) SPA flag first so the os.path.exists() stat is skipped
         # entirely on the common, non-SPA path.
         if self._server.config.spa and not os.path.exists(path):
-            index = os.path.join(self._server.root_real, "index.html")
-            if os.path.isfile(index):
+            index = _static.find_contained_index(
+                self._server.root_real,
+                self._server.root_real,
+                ("index.html",),
+            )
+            if index is not None:
                 return self._serve_file(index)
         return self._serve_file(path)
 
     def _serve_directory(self, path: str) -> BinaryIO | None:
         # Redirect to add the trailing slash so relative links resolve.
-        parts = urllib.parse.urlsplit(self.path)
-        if not parts.path.endswith(("/", "%2f", "%2F")):
+        location = _static.directory_redirect(self.path)
+        if location is not None:
             self.send_response(HTTPStatus.MOVED_PERMANENTLY)
-            self.send_header(
-                "Location", urllib.parse.urlunsplit(parts._replace(path=parts.path + "/"))
-            )
+            self.send_header("Location", location)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return None
+        parts = urllib.parse.urlsplit(self.path)
         query = urllib.parse.parse_qs(parts.query)
         archive_format = query.get("archive", [""])[0]
         if archive_format in {"tar.gz", "zip"}:
@@ -382,57 +461,84 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             return self._serve_selection(path, selected)
         # Index lookup goes through the SAME containment check as everything else:
         # an index.html symlinked outside the root must not be served.
-        for name in self.index_pages:
-            candidate = os.path.join(path, name)
-            if os.path.isfile(candidate) and security.is_contained(
-                self._server.root_real, candidate
-            ):
-                return self._serve_file(candidate)
+        index = _static.find_contained_index(self._server.root_real, path, self.index_pages)
+        if index is not None:
+            return self._serve_file(index)
         return self.list_directory(path)
 
     def _serve_selection(self, path: str, names: list[str]) -> None:
         """Stream the checkbox-selected entries of ``path`` as one zip."""
         base_name = os.path.basename(path.rstrip("/" + os.sep)) or "selection"
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "application/zip")
-        self.send_header("Content-Disposition", _content_disposition(f"{base_name}.zip"))
-        self.send_header("Transfer-Encoding", "chunked")
-        self.end_headers()
-        if self.command == "HEAD":
+        lease = self._reserve_archive_stream()
+        if lease is False:
             return
-        writer = _ChunkedWriter(self.wfile)
-        try:
-            archive.stream_zip_selection(path, names, base_name, writer)
-            writer.close()
-        except OSError as exc:  # pragma: no cover - client hung up, or a file changed
-            _log.logger.debug("selection zip aborted: %r", exc)
-            self.close_connection = True
+        ownership = lease if isinstance(lease, _work.WorkLease) else contextlib.nullcontext()
+        with ownership:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", _content_disposition(f"{base_name}.zip"))
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            writer = _ChunkedWriter(self.wfile)
+            try:
+                archive.stream_zip_selection(path, names, base_name, writer)
+                writer.close()
+            except OSError as exc:  # pragma: no cover - client hung up, or a file changed
+                if isinstance(lease, _work.WorkLease):
+                    lease.release(failed=True)
+                _log.logger.debug("selection zip aborted: %r", exc)
+                self.close_connection = True
 
     def _serve_archive(self, path: str, archive_format: str) -> None:
         base_name = os.path.basename(path.rstrip("/" + os.sep)) or "archive"
         filename = f"{base_name}.{archive_format}"
         content_type = "application/gzip" if archive_format == "tar.gz" else "application/zip"
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Disposition", _content_disposition(filename))
-        self.send_header("Transfer-Encoding", "chunked")
-        self.end_headers()
-        if self.command == "HEAD":
+        lease = self._reserve_archive_stream()
+        if lease is False:
             return
-        writer = _ChunkedWriter(self.wfile)
-        try:
-            if archive_format == "tar.gz":
-                archive.stream_targz(path, base_name, writer)
-            else:
-                archive.stream_zip(path, base_name, writer)
-            writer.close()
-        except OSError as exc:  # pragma: no cover - client hung up, or file changed mid-walk
-            # The chunked body is partly sent and unrecoverable; close the
-            # connection so the client gets a definite end-of-message rather than
-            # a truncated, terminator-less body.
-            _log.logger.debug("archive stream aborted: %r", exc)
-            self.close_connection = True
+        ownership = lease if isinstance(lease, _work.WorkLease) else contextlib.nullcontext()
+        with ownership:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Disposition", _content_disposition(filename))
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            writer = _ChunkedWriter(self.wfile)
+            try:
+                if archive_format == "tar.gz":
+                    archive.stream_targz(path, base_name, writer)
+                else:
+                    archive.stream_zip(path, base_name, writer)
+                writer.close()
+            except OSError as exc:  # pragma: no cover - client hung up, or file changed mid-walk
+                if isinstance(lease, _work.WorkLease):
+                    lease.release(failed=True)
+                # The chunked body is partly sent and unrecoverable; close the
+                # connection so the client gets a definite end-of-message rather than
+                # a truncated, terminator-less body.
+                _log.logger.debug("archive stream aborted: %r", exc)
+                self.close_connection = True
         return
+
+    def _reserve_archive_stream(self) -> _work.WorkLease | None | bool:
+        """Reserve a body producer before headers; ``False`` means 503 was sent."""
+        if self.command == "HEAD":
+            return None
+        limiter = self._server.archive_limiter
+        if limiter is None:
+            return None
+        try:
+            return limiter.reserve()
+        except (_work.WorkRejectedError, _work.WorkPoolClosedError):
+            self.send_response(HTTPStatus.SERVICE_UNAVAILABLE)
+            self.send_header("Retry-After", "1")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
 
     def _maybe_proxy(self) -> bool:
         """Forward the request to an upstream if a ``--proxy`` route matches."""
@@ -579,7 +685,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             )
             return
 
-        reader = upload.BoundedReader(self.rfile, length)
+        reader = upload.BoundedReader(self._request_body_stream(), length)
         try:
             upload.save(
                 reader,
@@ -684,9 +790,12 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 HTTPStatus.INSUFFICIENT_STORAGE, "Too many partial uploads are outstanding"
             )
             return
-        reader = upload.BoundedReader(self.rfile, length)
+        reader = upload.BoundedReader(self._request_body_stream(), length)
         try:
             written = _resumable.append(part, reader, length)
+        except _body.BodyTimeoutError:
+            self.close_connection = True
+            raise
         except OSError:
             if not os.path.exists(part):
                 self._server.partial_uploads.release(part)
@@ -710,9 +819,13 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         part = _resumable.part_path(target)
         _resumable.discard(part)
         self._server.partial_uploads.release(part)
-        reader = upload.BoundedReader(self.rfile, length)
+        reader = upload.BoundedReader(self._request_body_stream(), length)
         try:
             _resumable.write_whole(target, reader, length)
+        except _body.BodyTimeoutError:
+            _resumable.discard(part)
+            self.close_connection = True
+            raise
         except OSError:
             self._put_reject(
                 HTTPStatus.INTERNAL_SERVER_ERROR, "Could not write upload", drain_body=False
@@ -771,7 +884,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             # A client may start reading as soon as it has finished sending.  Make
             # the rejection visible before spending time on the bounded drain.
             self.wfile.flush()
-            if not _body.LimitedReader(self.rfile, length).drain(limit):
+            if not _body.LimitedReader(self._request_body_stream(), length).drain(limit):
                 return False
         except (OSError, TimeoutError):
             return False
@@ -790,6 +903,17 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self._body_forced_close = True
             self.close_connection = True
 
+    def _request_body_stream(self) -> _body.BodyStream:
+        """Return this request's raw or total-deadline-bounded body stream."""
+        timeout = self._server.config.request_body_timeout
+        if timeout is None:
+            return cast("_body.BodyStream", self.rfile)
+        return _body.DeadlineReader(
+            cast("_body.BodyStream", self.rfile),
+            self.connection,
+            timeout,
+        )
+
     def _body_consumed(self) -> None:
         """Restore the request's original keep-alive policy after exact consumption."""
         if self._body_forced_close:
@@ -797,28 +921,32 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self._body_forced_close = False
 
     def _serve_file(self, path: str) -> BinaryIO | None:
+        ctype = _compress.with_charset(self.guess_type(path))
+        range_header = self.headers.get("Range")
         try:
-            f = open(path, "rb")  # noqa: SIM115 (handed to the caller / closed on error)
+            opened = _static.open_file(
+                path,
+                ctype,
+                self.headers.get("Accept-Encoding", ""),
+                compression_enabled=self._server.config.compress,
+                max_compress_size=self._server.config.max_compress_size,
+                allow_compression=range_header is None,
+            )
         except OSError:
             self.send_error(HTTPStatus.NOT_FOUND, "File not found")
             return None
+        f = opened.handle
         try:
-            stat = os.fstat(f.fileno())
+            stat = opened.stat
             size = stat.st_size
-            last_modified = self.date_time_string(stat.st_mtime)
-            # Declare UTF-8 on text types so browsers don't mis-decode them (e.g. a
-            # .md/.txt with em dashes or emoji rendered as mojibake).
-            ctype = _compress.with_charset(self.guess_type(path))
+            last_modified = opened.last_modified
             cache_control = self._server.config.cache_control
-            # ?download=1 forces a save dialog instead of inline rendering. The
-            # substring pre-check skips urlsplit+parse_qs (the common case has no
-            # query at all); "download" not in the path => it can't be a query key.
-            download = "download" in self.path and "download" in urllib.parse.parse_qs(
-                urllib.parse.urlsplit(self.path).query
+            disposition = (
+                _static.content_disposition(os.path.basename(path))
+                if _static.download_requested(self.path)
+                else None
             )
-            disposition = _content_disposition(os.path.basename(path)) if download else None
 
-            range_header = self.headers.get("Range")
             # Compression and ranges are mutually exclusive: a Range over the
             # *encoded* bytes is incoherent on the fly, so we only compress when no
             # Range is asked for (RFC 9110 §14.1.2). Compressible resources always
@@ -826,23 +954,28 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             # (§12.5.5). The coding is zstd (3.14+) when offered and accepted, else
             # gzip, else None — one shared decision (see _compress.choose_encoding).
             self._vary_accept_encoding = _compress.compressible(ctype)
-            coding = (
-                None
-                if range_header
-                else _compress.choose_encoding(
-                    ctype,
-                    size,
-                    self.headers.get("Accept-Encoding", ""),
-                    enabled=self._server.config.compress,
-                    max_size=self._server.config.max_compress_size,
-                )
-            )
+            coding = opened.coding
             # The coded representation needs a distinct (still strong) ETag (§8.8.3.3);
             # decide the coding BEFORE conditionals so a 304/If-None-Match echoes the
             # tag for the representation the client would actually get.
-            etag = _conditional.coding_variant(_conditional.make_etag(stat), coding)
+            etag = opened.etag
+            if_none_match = self.headers.get("If-None-Match")
+            if_modified_since = self.headers.get("If-Modified-Since")
+            selection = (
+                _static.select_identity(
+                    opened,
+                    range_header=range_header,
+                    if_range=self.headers.get("If-Range"),
+                    if_none_match=if_none_match,
+                    if_modified_since=if_modified_since,
+                )
+                if range_header is not None
+                or if_none_match is not None
+                or if_modified_since is not None
+                else None
+            )
 
-            if self._is_not_modified(etag, stat.st_mtime):
+            if selection is not None and selection.status == HTTPStatus.NOT_MODIFIED:
                 self.send_response(HTTPStatus.NOT_MODIFIED)
                 self.send_header("ETag", etag)
                 self.send_header("Last-Modified", last_modified)
@@ -869,35 +1002,45 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 self._body_remaining = len(body)
                 return io.BytesIO(body)
 
-            if range_header and not self._if_range_ok(etag, stat.st_mtime):
-                range_header = None
-            requested = ranges.parse(range_header, size)
-
-            if requested is ranges.UNSATISFIABLE:
+            if (
+                selection is not None
+                and selection.status == HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE
+            ):
                 self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Range", selection.content_range or "")
                 self.send_header("Content-Length", "0")
                 self.send_header("Accept-Ranges", "bytes")
                 self.end_headers()
                 f.close()
                 return None
 
-            if isinstance(requested, ranges.ByteRange):
+            try:
+                repr_digest = self._repr_digest(opened)
+            except OSError:
+                # The opened identity no longer contains the byte extent whose
+                # metadata would describe this response. Fail before committing
+                # headers instead of emitting an unverifiable or short body.
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "File changed while hashing")
+                f.close()
+                return None
+
+            if selection is not None and selection.status == HTTPStatus.PARTIAL_CONTENT:
                 self.send_response(HTTPStatus.PARTIAL_CONTENT)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Cache-Control", cache_control)
-                self.send_header("Content-Range", f"bytes {requested.start}-{requested.end}/{size}")
-                self.send_header("Content-Length", str(requested.length))
+                self.send_header("Content-Range", selection.content_range or "")
+                self.send_header("Content-Length", str(selection.count))
                 self.send_header("Accept-Ranges", "bytes")
                 self.send_header("ETag", etag)
                 self.send_header("Last-Modified", last_modified)
-                self._send_repr_digest(path)
+                if repr_digest is not None:
+                    self.send_header("Repr-Digest", repr_digest)
                 if disposition is not None:
                     self.send_header("Content-Disposition", disposition)
                 self.end_headers()
-                f.seek(requested.start)
-                self._body_remaining = requested.length
-                self._body_offset = requested.start
+                f.seek(selection.offset)
+                self._body_remaining = selection.count
+                self._body_offset = selection.offset
                 return f
 
             self.send_response(HTTPStatus.OK)
@@ -907,7 +1050,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("ETag", etag)
             self.send_header("Last-Modified", last_modified)
-            self._send_repr_digest(path)
+            if repr_digest is not None:
+                self.send_header("Repr-Digest", repr_digest)
             if disposition is not None:
                 self.send_header("Content-Disposition", disposition)
             self.end_headers()
@@ -924,6 +1068,23 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if count == 0:
             return  # socket.sendfile treats count==0 as "whole file"; never that
         sock = self.connection
+        small_file_buffer = self._server.config.small_file_buffer_size
+        if (
+            count is not None
+            and small_file_buffer > 0
+            and count <= small_file_buffer
+            and not isinstance(sock, ssl.SSLSocket)
+        ):
+            source.seek(self._body_offset)
+            data = source.read(count)
+            if data:
+                write_timeout = self._server.config.write_timeout
+                if write_timeout is None:
+                    sock.sendall(data)
+                else:
+                    with _write.socket_timeout(sock, write_timeout):
+                        sock.sendall(data)
+            return
         # Zero-copy fast path for plain sockets. (socket.sendfile transparently
         # handles non-regular sources like BytesIO via its own send loop; TLS
         # sockets cannot sendfile, so they take the userspace path below.)
@@ -934,7 +1095,12 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             # source.tell() lseek on every request.
             offset = self._body_offset
             try:
-                sock.sendfile(source, offset, count)
+                write_timeout = self._server.config.write_timeout
+                if write_timeout is None:
+                    sock.sendfile(source, offset, count)
+                else:
+                    with _write.socket_timeout(sock, write_timeout):
+                        sock.sendfile(source, offset, count)
                 return
             except (OSError, ValueError):
                 # If bytes were already sent the stream is broken — re-raise
@@ -970,18 +1136,8 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         return False
 
-    # --- conditional requests -------------------------------------------
-
-    def _is_not_modified(self, etag: str, mtime: float) -> bool:
-        return _conditional.is_not_modified(
-            etag,
-            mtime,
-            if_none_match=self.headers.get("If-None-Match"),
-            if_modified_since=self.headers.get("If-Modified-Since"),
-        )
-
-    def _send_repr_digest(self, path: str) -> None:
-        """Emit an RFC 9530 ``Repr-Digest`` over the full file if the client asked.
+    def _repr_digest(self, opened: _static.FileBody) -> str | None:
+        """Return an RFC 9530 digest over the opened identity if the client asked.
 
         Only on identity (un-coded) responses, where the representation *is* the file
         on disk; computed lazily (it reads the whole file) so the default download
@@ -990,52 +1146,34 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         """
         algorithm = _digest.choose_algorithm(self.headers.get("Want-Repr-Digest"))
         if algorithm is None:
-            return
-        value = _digest.field_value_for_file(path, algorithm)
-        if value is not None:
-            self.send_header("Repr-Digest", value)
-
-    def _if_range_ok(self, etag: str, mtime: float) -> bool:
-        condition = self.headers.get("If-Range")
-        if condition is None:
-            return True
-        condition = condition.strip()
-        if condition.startswith(('"', "W/")):
-            return condition == etag  # strong comparison
-        return _conditional.not_modified_since(condition, mtime)
+            return None
+        key = _digest.cache_key(opened.path, opened.stat, algorithm)
+        return self._server.digest_cache.get_or_compute(
+            key,
+            lambda: _digest.field_value_for_handle(
+                opened.handle,
+                algorithm,
+                opened.size,
+            ),
+        )
 
     # --- directory listing (v0.2) ---------------------------------------
 
     def list_directory(self, path: str | os.PathLike[str]) -> io.BytesIO | None:
         self._generated_page = True
-        parts = urllib.parse.urlsplit(self.path)
-        params = urllib.parse.parse_qs(parts.query)
-        sort = listing.code_to_sort(params.get("C", ["N"])[0])
-        order = "desc" if params.get("O", ["A"])[0] == "D" else "asc"
-        query = params.get("q", [""])[0]
-        ext = params.get("ext", [""])[0]
-        try:
-            page = max(1, int(params.get("page", ["1"])[0]))
-        except ValueError:
-            page = 1
-        # Theme: an explicit ?theme= wins and is persisted in a cookie; otherwise
-        # fall back to the cookie, then "auto". No JavaScript involved.
-        theme_param = params.get("theme", [None])[0]
-        set_theme_cookie = theme_param in {"auto", "light", "dark"}
-        theme = theme_param if theme_param in {"auto", "light", "dark"} else self._theme_cookie()
-        display = urllib.parse.unquote(parts.path, errors="surrogatepass")
+        options = listing.request_options(self.path, self.headers.get("Cookie"))
         try:
             body = listing.render(
                 os.fspath(path),
-                display,
+                options.display,
                 show_hidden=self._server.config.show_hidden,
-                sort=sort,
-                order=order,
-                query=query,
-                ext=ext,
-                page=page,
+                sort=options.sort,
+                order=options.order,
+                query=options.query,
+                ext=options.ext,
+                page=options.page,
                 per_page=self._server.config.listing_page_size,
-                theme=theme,
+                theme=options.theme,
                 upload=self._server.config.upload,
                 max_entries=self._server.config.max_listing_entries,
                 details_threshold=self._server.config.listing_details_threshold,
@@ -1055,39 +1193,40 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if encoding is not None:
             self.send_header("Content-Encoding", encoding)
         self.send_header("Content-Length", str(len(body)))
-        if set_theme_cookie:
+        if options.set_theme_cookie:
             # Lax + one-year; the value is one of three literals so it is safe.
             self.send_header(
                 "Set-Cookie",
-                f"servery_theme={theme}; Path=/; Max-Age=31536000; SameSite=Lax",
+                f"servery_theme={options.theme}; Path=/; Max-Age=31536000; SameSite=Lax",
             )
         self.end_headers()
         return io.BytesIO(body)
-
-    def _theme_cookie(self) -> str:
-        """Return the persisted theme from the request cookie, or "auto"."""
-        raw = self.headers.get("Cookie")
-        if not raw:
-            return "auto"
-        try:
-            jar = http.cookies.SimpleCookie(raw)
-        except http.cookies.CookieError:
-            return "auto"
-        morsel = jar.get("servery_theme")
-        if morsel is not None and morsel.value in {"auto", "light", "dark"}:
-            return morsel.value
-        return "auto"
 
     # --- universal response shaping -------------------------------------
 
     def end_headers(self) -> None:
         config = self._server.config
+        draining = self._server.is_draining
+        if (
+            (self._request_limit_close or draining)
+            and isinstance(self._access_status, int)
+            and self._access_status >= 200
+        ):
+            # Connection persistence is server-owned. A CGI/proxy response must
+            # not override the terminal request with ``keep-alive`` or leave
+            # contradictory duplicate fields on the wire.
+            self._headers_buffer[:] = [
+                line for line in self._headers_buffer if not line.lower().startswith(b"connection:")
+            ]
+            self.send_header("Connection", "close")
+            if draining:
+                self.close_connection = True
         if config.security_headers:
             # nosniff everywhere (we serve arbitrary files); CSP + Referrer-Policy
             # only on servery-generated HTML; HSTS only over TLS.
             self.send_header("X-Content-Type-Options", "nosniff")
             if self._generated_page:
-                self.send_header("Content-Security-Policy", _CSP)
+                self.send_header("Content-Security-Policy", _static.GENERATED_CSP)
                 self.send_header("Referrer-Policy", "no-referrer")
             if isinstance(self.connection, ssl.SSLSocket):
                 self.send_header("Strict-Transport-Security", "max-age=63072000")
@@ -1158,77 +1297,3 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         # the line (or call address_string) when logging is disabled (quiet mode).
         if _log.logger.isEnabledFor(logging.INFO):
             _log.logger.info("%s %s", self.address_string(), format % args)
-
-
-_MAX_HEADER_LINE = 65536  # bytes per line; matches http.client._MAXLINE
-_MAX_HEADER_COUNT = 100  # matches http.client._MAXHEADERS
-
-
-class _HeaderError(Exception):
-    """An over-long header line or too many headers (-> 431)."""
-
-
-class _RequestHeaders:
-    """Minimal case-insensitive request-header map (first occurrence wins).
-
-    A fast stand-in for ``email.message.Message``: the handler only ever calls
-    ``.get()``, and email's MIME parsing is most of a small request's CPU.
-    """
-
-    __slots__ = ("_map", "_pairs")
-
-    def __init__(self, pairs: list[tuple[str, str]]) -> None:
-        self._pairs = pairs
-        mapping: dict[str, str] = {}
-        for name, value in pairs:
-            key = name.lower()
-            if key not in mapping:  # first wins, matching email.Message.get
-                mapping[key] = value
-        self._map = mapping
-
-    @overload
-    def get(self, name: str) -> str | None: ...
-    @overload
-    def get(self, name: str, default: str) -> str: ...
-    def get(self, name: str, default: str | None = None) -> str | None:
-        return self._map.get(name.lower(), default)
-
-    def __getitem__(self, name: str) -> str | None:  # email.Message returns None, not KeyError
-        return self._map.get(name.lower())
-
-    def __contains__(self, name: object) -> bool:
-        return isinstance(name, str) and name.lower() in self._map
-
-    def items(self) -> list[tuple[str, str]]:
-        return list(self._pairs)
-
-    def get_all(self, name: str) -> list[str]:
-        key = name.lower()
-        return [value for field, value in self._pairs if field.lower() == key]
-
-
-def _read_request_headers(rfile: io.BufferedIOBase) -> _RequestHeaders:
-    """Read the header block as ``(name, value)`` pairs (RFC 9112 §5).
-
-    Enforces the same line/count limits as ``http.client``. ``obs-fold``
-    continuations are folded into a single space (RFC 9112 §5.2).
-    """
-    pairs: list[tuple[str, str]] = []
-    while True:
-        line = rfile.readline(_MAX_HEADER_LINE + 1)
-        if len(line) > _MAX_HEADER_LINE:
-            raise _HeaderError("Header line too long")
-        if line in (b"\r\n", b"\n", b""):
-            break
-        if line[:1] in (b" ", b"\t"):  # obs-fold continuation
-            if pairs:
-                name, value = pairs[-1]
-                pairs[-1] = (name, f"{value} {line.strip().decode('latin-1')}")
-            continue
-        if len(pairs) >= _MAX_HEADER_COUNT:
-            raise _HeaderError("Too many headers")
-        name, sep, value = line.partition(b":")
-        if not sep:
-            continue  # a line without a colon is not a header field; ignore it
-        pairs.append((name.decode("latin-1").strip(), value.strip().decode("latin-1")))
-    return _RequestHeaders(pairs)

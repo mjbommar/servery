@@ -12,12 +12,23 @@ import os
 import socket
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from servery import _compress, _log, _resumable, _tls, _writecoord, auth
+from servery import (
+    _compress,
+    _digest,
+    _listener,
+    _log,
+    _resumable,
+    _tls,
+    _work,
+    _writecoord,
+    auth,
+)
 from servery.config import Config
 from servery.handler import ServeryHandler
 
@@ -36,24 +47,52 @@ class ServeryHTTPServer(ThreadingHTTPServer):
     cgi_root: str = ""
 
     def __init__(
-        self, config: Config, *, target_locks: _writecoord.TargetLocks | None = None
+        self,
+        config: Config,
+        *,
+        target_locks: _writecoord.TargetLocks | None = None,
+        listener: socket.socket | None = None,
     ) -> None:
         self.config = config
         self.root_real = os.path.realpath(config.directory)
         self.credential = auth.parse(config.auth)
         self.access_log = None
         self._executor: ThreadPoolExecutor | None = None
+        self._drain_condition = threading.Condition()
+        # The hot request path reads Event.is_set() without taking the registry
+        # condition. begin_draining() still mutates the registry/deadline under
+        # that condition, while Event supplies a free-threading-safe published
+        # admission bit.
+        self._drain_event = threading.Event()
+        self._drain_deadline: float | None = None
+        self._forced_drain_reported = False
+        self._active_sockets: set[Any] = set()
+        # A socket enters this set only after its max-connections permit was
+        # acquired.  Removing it is the single authority for releasing that
+        # permit, which makes cleanup idempotent across submit/start failures,
+        # normal handler completion, and forced shutdown.
+        self._connection_permits: set[Any] = set()
+        self._connection_drainers: dict[Any, Any] = {}
         self._slots = (
             threading.BoundedSemaphore(config.max_workers * 4) if config.max_workers else None
         )
         self._connections = (
             threading.BoundedSemaphore(config.max_connections) if config.max_connections else None
         )
+        self.archive_limiter = (
+            _work.BoundedWorkLimiter("archive", active=config.max_archive_streams)
+            if config.max_archive_streams is not None
+            else None
+        )
         self.target_locks = target_locks or _writecoord.TargetLocks()
         self.partial_uploads = _resumable.PartialUploadBudget(
             self.root_real, config.max_partial_uploads
         )
         self.compression_cache = _compress.CompressionCache(config.compression_cache_size)
+        # Digest retention stays disabled until an explicit operator policy has
+        # evidence behind it. The zero-sized cache still coalesces concurrent
+        # requests for one opened file identity.
+        self.digest_cache = _digest.DigestCache()
         self.dav_locks: Any = None
         self.http3_port: int | None = None
         if ":" in config.host:
@@ -73,12 +112,47 @@ class ServeryHTTPServer(ThreadingHTTPServer):
             if not Path(self.cgi_root).is_dir():
                 raise ValueError(f"--cgi: {config.cgi_dir!r} is not a directory")
             self._handler_cls = cgi.CGIHandler
-        super().__init__((config.host, config.port), self._handler_cls)
+        super().__init__(
+            (config.host, config.port),
+            self._handler_cls,
+            bind_and_activate=listener is None,
+        )
+        if listener is not None:
+            initial_socket = self.socket
+            try:
+                self.socket = _listener.adopt_tcp_listener(listener, host=config.host)
+            except BaseException:
+                initial_socket.close()
+                raise
+            initial_socket.close()
+            self.server_address = self.socket.getsockname()
+            host, port = self.server_address[:2]
+            self.server_name = socket.getfqdn(host)
+            self.server_port = port
+            try:
+                self._wrap_listener_tls()
+            except BaseException:
+                super().server_close()
+                raise
         try:
             if config.access_log:
                 from servery import _accesslog
 
-                self.access_log = _accesslog.AccessLog(config.access_log, config.access_log_format)
+                if config.access_log_queue:
+                    self.access_log = _accesslog.AsyncAccessLog(
+                        config.access_log,
+                        config.access_log_format,
+                        queue_capacity=config.access_log_queue,
+                        queue_byte_capacity=config.access_log_queue_bytes,
+                        overflow=config.access_log_overflow,
+                        batch_size=config.access_log_batch_size,
+                        batch_wait=config.access_log_batch_wait,
+                    )
+                else:
+                    self.access_log = _accesslog.AccessLog(
+                        config.access_log,
+                        config.access_log_format,
+                    )
             if config.max_workers:
                 self._executor = ThreadPoolExecutor(max_workers=config.max_workers)
             if config.dav:
@@ -96,31 +170,43 @@ class ServeryHTTPServer(ThreadingHTTPServer):
             _log.logger.warning("connection limit reached; rejecting %s", client_address)
             self.shutdown_request(request)
             return
+        reject_for_drain = False
+        with self._drain_condition:
+            if self._connections is not None:
+                self._connection_permits.add(request)
+            if self._drain_event.is_set():
+                reject_for_drain = True
+            else:
+                self._active_sockets.add(request)
+        if reject_for_drain:
+            self._finish_connection(request)
+            self.shutdown_request(request)
+            return
         if self._executor is not None and self._slots is not None:
             if not self._slots.acquire(blocking=False):
                 _log.logger.warning("worker queue limit reached; rejecting %s", client_address)
-                self._release_connection()
+                self._finish_connection(request)
                 self.shutdown_request(request)
                 return
             try:
                 self._executor.submit(self._process_request_pooled, request, client_address)
             except RuntimeError:
                 self._slots.release()
-                self._release_connection()
+                self._finish_connection(request)
                 self.shutdown_request(request)
                 raise
         else:
             try:
                 super().process_request(request, client_address)
             except BaseException:
-                self._release_connection()
+                self._finish_connection(request)
                 raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._release_connection()
+            self._finish_connection(request)
 
     def _process_request_pooled(self, request: Any, client_address: Any) -> None:
         try:
@@ -131,11 +217,98 @@ class ServeryHTTPServer(ThreadingHTTPServer):
             self.shutdown_request(request)
             if self._slots is not None:
                 self._slots.release()
-            self._release_connection()
+            self._finish_connection(request)
 
-    def _release_connection(self) -> None:
-        if self._connections is not None:
+    @property
+    def is_draining(self) -> bool:
+        """Whether this process has stopped admitting new connection work."""
+        return self._drain_event.is_set()
+
+    def register_connection_drainer(self, request: Any, callback: Any) -> None:
+        """Register a protocol hook (currently HTTP/2 GOAWAY) for ``request``."""
+        call_now = False
+        with self._drain_condition:
+            if request in self._active_sockets:
+                self._connection_drainers[request] = callback
+                call_now = self._drain_event.is_set()
+        if call_now:
+            self._notify_drainer(callback)
+
+    def unregister_connection_drainer(self, request: Any) -> None:
+        with self._drain_condition:
+            self._connection_drainers.pop(request, None)
+
+    def begin_draining(self) -> None:
+        """Stop admission and notify active protocols without waiting for them."""
+        callbacks: tuple[Any, ...] = ()
+        with self._drain_condition:
+            if not self._drain_event.is_set():
+                self._drain_event.set()
+                if self.archive_limiter is not None:
+                    self.archive_limiter.close()
+                self._drain_deadline = time.monotonic() + self.config.drain_timeout
+                callbacks = tuple(self._connection_drainers.values())
+                self._drain_condition.notify_all()
+        for callback in callbacks:
+            self._notify_drainer(callback)
+
+    @staticmethod
+    def _notify_drainer(callback: Any) -> None:
+        """Run a protocol notification without putting socket I/O on shutdown's thread."""
+
+        def notify() -> None:
+            with contextlib.suppress(OSError):
+                callback()
+
+        threading.Thread(
+            target=notify,
+            name="servery-drain-notify",
+            daemon=True,
+        ).start()
+
+    def _finish_connection(self, request: Any) -> None:
+        release = False
+        with self._drain_condition:
+            self._connection_drainers.pop(request, None)
+            self._active_sockets.discard(request)
+            if request in self._connection_permits:
+                self._connection_permits.remove(request)
+                release = True
+            self._drain_condition.notify_all()
+        if release and self._connections is not None:
             self._connections.release()
+
+    def _wait_for_drain(self) -> None:
+        """Wait to the fixed drain deadline, then interrupt remaining sockets."""
+        report: tuple[int, int] | None = None
+        with self._drain_condition:
+            while self._active_sockets:
+                deadline = self._drain_deadline
+                if deadline is None:
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._drain_condition.wait(remaining)
+            remaining_sockets = tuple(self._active_sockets)
+            if remaining_sockets and not self._forced_drain_reported:
+                protocol_connections = sum(
+                    request in self._connection_drainers for request in remaining_sockets
+                )
+                report = (len(remaining_sockets) - protocol_connections, protocol_connections)
+                self._forced_drain_reported = True
+        if report is not None:
+            _log.logger.warning(
+                "graceful drain deadline reached; force-closing "
+                "%d HTTP/1/application and %d protocol connection(s)",
+                report[0],
+                report[1],
+            )
+        for request in remaining_sockets:
+            with contextlib.suppress(OSError):
+                request.shutdown(socket.SHUT_RDWR)
+            with contextlib.suppress(OSError):
+                request.close()
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         # A failed TLS handshake or a dropped connection is a client-side problem,
@@ -148,12 +321,39 @@ class ServeryHTTPServer(ThreadingHTTPServer):
             return
         _log.logger.error("unhandled error serving %s", client_address, exc_info=True)
 
+    def shutdown(self) -> None:
+        """Stop accepting, drain active work to the configured deadline, then abort it."""
+        self.begin_draining()
+        super().shutdown()
+        self._wait_for_drain()
+
     def server_close(self) -> None:
+        self.begin_draining()
         super().server_close()
+        self._wait_for_drain()
         if self._executor is not None:
-            self._executor.shutdown(wait=True)
+            # A stuck application callable must not turn graceful cleanup into an
+            # unbounded wait. A future supervisor can terminate the worker process.
+            self._executor.shutdown(wait=False, cancel_futures=True)
         if self.access_log is not None:  # release the access-log file handle
-            self.access_log.close()
+            from servery import _accesslog
+
+            if isinstance(self.access_log, _accesslog.AsyncAccessLog):
+                snapshot = self.access_log.close(timeout=self.config.access_log_drain_timeout)
+                if snapshot.writer_alive:
+                    _log.logger.warning(
+                        "access-log drain deadline expired with %d queued and %d active records",
+                        snapshot.queued,
+                        snapshot.active,
+                    )
+                if snapshot.dropped_capacity or snapshot.dropped_bytes:
+                    _log.logger.warning(
+                        "access-log dropped %d capacity-limited and %d byte-limited records",
+                        snapshot.dropped_capacity,
+                        snapshot.dropped_bytes,
+                    )
+            else:
+                self.access_log.close()
 
     def server_bind(self) -> None:
         # Accept both IPv4 and IPv6 when bound to an IPv6 wildcard.
@@ -164,6 +364,10 @@ class ServeryHTTPServer(ThreadingHTTPServer):
 
     def server_activate(self) -> None:
         super().server_activate()
+        self._wrap_listener_tls()
+
+    def _wrap_listener_tls(self) -> None:
+        """Wrap this runtime's listener descriptor, never the caller's socket."""
         config = self.config
         if not config.uses_tls:
             return
@@ -187,6 +391,7 @@ def make_server(
     *,
     port_scan: int = 64,
     target_locks: _writecoord.TargetLocks | None = None,
+    listener: socket.socket | None = None,
 ) -> ServeryHTTPServer:
     """Create (bind + activate) a server for ``config``.
 
@@ -194,27 +399,35 @@ def make_server(
     ``port_scan`` ports) instead of failing — the port actually bound is reported on
     ``server.server_address``. An ephemeral port (``0``) binds directly, and bind
     errors other than "address in use" (e.g. permission denied) are never retried.
-    """
-    import dataclasses
-    import errno
 
-    if config.port == 0:  # the OS already picks a free port — nothing to scan
-        return ServeryHTTPServer(config, target_locks=target_locks)
-    in_use = {errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", errno.EADDRINUSE)}
-    last: OSError | None = None
-    for port in range(config.port, min(config.port + port_scan + 1, 65536)):
-        candidate = config if port == config.port else dataclasses.replace(config, port=port)
-        try:
-            server = ServeryHTTPServer(candidate, target_locks=target_locks)
-        except OSError as exc:
-            if exc.errno not in in_use:
-                raise
-            last = exc
-            continue
-        if port != config.port:
-            _log.logger.warning("port %d is in use — bound %d instead", config.port, port)
-        return server
-    raise last if last is not None else OSError("no free port found")  # pragma: no cover
+    When ``listener`` is supplied it is already bound and listening; scanning is
+    skipped. The caller retains that socket, while the returned server owns a
+    validated descriptor duplicate.
+    """
+    if listener is not None:
+        return ServeryHTTPServer(config, target_locks=target_locks, listener=listener)
+
+    import dataclasses
+
+    bound = _listener.bind_tcp_listener(
+        config.host,
+        config.port,
+        port_scan=port_scan,
+        backlog=ServeryHTTPServer.request_queue_size,
+    )
+    try:
+        actual_port = int(bound.getsockname()[1])
+        candidate = (
+            dataclasses.replace(config, port=actual_port)
+            if config.port != 0 and actual_port != config.port
+            else config
+        )
+        server = ServeryHTTPServer(candidate, target_locks=target_locks, listener=bound)
+    finally:
+        bound.close()
+    if actual_port != config.port and config.port != 0:
+        _log.logger.warning("port %d is in use — bound %d instead", config.port, actual_port)
+    return server
 
 
 def server_url(server: ServeryHTTPServer) -> str:
@@ -356,7 +569,7 @@ def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (C
         config = dataclasses.replace(config, tls_cert=cert_path, tls_key=key_path)
     cert_context = (
         _tls.self_signed_files(config)
-        if config.http3 and config.tls_self_signed
+        if (config.http3 or config.workers > 1) and config.tls_self_signed
         else contextlib.nullcontext(None)
     )
     with cert_context as generated:
@@ -371,6 +584,11 @@ def serve(config: Config) -> None:  # pragma: no cover - blocking server loop (C
 
 def _serve_prepared(config: Config) -> None:  # pragma: no cover - lifecycle integration
     """Run listeners after ACME/self-signed certificate material is prepared."""
+    if config.workers > 1:
+        from servery import _supervisor
+
+        _supervisor.serve(config)
+        return
     target_locks = _writecoord.TargetLocks()
     tftp_server = _start_tftp(config, target_locks) if config.tftp else None
     try:

@@ -39,9 +39,14 @@ is one of exactly three things, in order of preference:
    `string.Template` — most of what a file server needs is already there.
 2. **Scope the feature down** to the part that *is* reachable with the stdlib,
    and document the boundary.
-3. **Drop the feature.** A missing feature is cheaper than a betrayed promise.
+3. **Use a narrowly scoped optional extra or drop the feature.** An extra must
+   remain outside the default/core install, publish its complete dependency and
+   native-code surface, and justify why stdlib and OS-library paths are
+   insufficient. A missing feature is cheaper than a betrayed core promise.
 
-**Never** add a third-party dependency. There is no "just this once."
+**Never** add a required third-party dependency to the core. Optional transport
+extras follow the explicit tier policy above; there is no hidden "just this
+once" exception for the default install.
 
 ### Consequences we accept on purpose
 
@@ -70,11 +75,12 @@ nobody re-litigates them later:
   the discipline — only **keygen + signing-our-own-cert once at startup** is
   hand-rolled; the TLS handshake/record encryption stay in OpenSSL via `ssl`, and
   the side-channel concerns of hand-rolled crypto don't apply to one-shot
-  self-cert generation. The *real* boundary is **publicly-trusted / auto-renewed
-  (ACME / Let's Encrypt)** certs: that needs the full ACME protocol + a public
-  domain, which is exactly where an optional **`servery[acme]`** extra would be
-  warranted — the same rule-of-three logic that makes HTTP/3 a `servery[http3]`
-  extra. Not implemented; documented as the boundary.
+  self-cert generation. A narrow pure-Python ACME HTTP-01 acquisition path now
+  ships without an extra. The production boundary is continuous renewal:
+  scheduled jittered retry, atomic persistence, expiry visibility, and live TLS
+  replacement must pass the production-edge checklist before ACME is described
+  as unattended. Protocol code remains stdlib; no `servery[acme]` extra is
+  required.
 - **No async framework, no template engine, no rich-text/UI toolkit.** Our
   listing UI is server-rendered HTML/CSS built with stdlib string tooling
   (`html.escape`, `string.Template`), shipped inline. No build step, no asset
@@ -89,8 +95,11 @@ nobody re-litigates them later:
 
 ## 1. Safe by default, honest about limits
 
-servery is a dev / LAN / ad-hoc-sharing tool. We will not pretend otherwise.
-But we can still be meaningfully *safer than the stdlib out of the box*:
+The default profile is a dev / LAN / ad-hoc-sharing tool. The separate
+production profile is intended to become a directly exposed, single-service
+edge only after every production release gate passes. We do not transfer that
+responsibility to a required reverse proxy or process manager, and we do not
+describe unfinished production machinery as shipped.
 
 - **Bind to localhost by default.** Serving the whole network is an explicit,
   opt-in choice (`--host 0.0.0.0`), not the default. `http.server`'s historical
@@ -111,12 +120,13 @@ But we can still be meaningfully *safer than the stdlib out of the box*:
   enabled. When on, enforce size limits, refuse path traversal in filenames,
   and never overwrite outside the upload target.
 
-**Out of scope:** production hardening — rate limiting, WAF behavior,
-DoS resistance, hostile-internet exposure, CSRF frameworks, multi-tenant
-isolation. The honest posture: *safe defaults for trusted networks; put a real
-reverse proxy in front of it if you need more.* We keep `http.server`'s spirit
-of "not for production," but we move the safe-default needle as far as the
-stdlib lets us.
+**Production boundary:** bounded admission, overload recovery, worker
+supervision, graceful replacement, observability, certificate renewal, and
+hostile-input assurance are in scope for the production profile. A general WAF,
+multi-tenant isolation, distributed coordination, and arbitrary upstream
+routing remain out. Until the production checklist passes, the honest current
+posture remains *safe defaults for trusted networks; production target in
+progress*—not a recommendation that another edge is required.
 
 ## 1a. Standards-compliant by default (RFC 9110 / 9111 / 9112)
 
@@ -166,22 +176,23 @@ out of the box — not opt-in hardening:
   mitigation) on by default; fail-closed path resolution (404, never a 403 leak).
 
 These are all `send_header`/stdlib calls — zero-dep — and **on by default**, with
-a `--no-security-headers` escape hatch. This principle **does not** promise
-production hardening: rate limiting, WAF behavior, DoS resistance, and CSRF
-frameworks remain out of scope (Principle 1) — the honest posture is "safe
-defaults for trusted networks; front it with a reverse proxy for exposure."
-Like Principle 1a, it is subordinate to Principle 0: every default here is
-reachable with the standard library alone.
+a `--no-security-headers` escape hatch. This principle alone does not establish
+production readiness. Production also requires the bounded-resource,
+lifecycle, observability, renewal, and assurance gates in Principle 1 and the
+production-edge checklist. Like Principle 1a, it is subordinate to Principle 0:
+every default here is reachable with the standard library alone.
 
 ## 2. File server, not framework — scope discipline
 
-servery serves a directory. It does not help you build an application.
+servery serves a directory or hosts one operator-provided WSGI/ASGI application.
+It does not help you build that application.
 
-- **No user-defined routes or handlers**, no app object, no middleware system,
-  no plugin API for request dispatch. If the request is "let me add an
-  endpoint," it is the framework lane (Flask/Bottle) and the answer is no.
-- The mental model never grows beyond **{directory, files, listing, browser}**
-  plus the four niceties (rich listing, auth, upload, HTTPS).
+- **No servery-defined routes or framework API**, no app object, no middleware
+  system, and no plugin API for constructing application dispatch. The operator
+  may supply a WSGI/ASGI callable whose routes and dependencies belong to it.
+- The built-in content model remains **{directory, files, listing, browser}**.
+  Dynamic behavior comes only from the single callable the operator explicitly
+  supplies; servery does not grow a second application model.
 - Internal abstractions (our own listing template, our own upload parser) are
   fine. *Exposing* them as an extension surface for building apps is not.
 
@@ -288,13 +299,13 @@ pass *all* gates to be in scope.
 1. **Zero-dependency gate.** Can it be built with the standard library alone,
    without vendoring a parser/engine/toolkit? If no → **out** (or scope it down
    to the stdlib-reachable subset). This gate is absolute; nothing overrides it.
-2. **File-server-lane gate.** Is it about *serving/sharing a folder*, or is it
-   about *building an application* (routes, app logic, dispatch)? If it's
-   framework-lane → **out**.
-3. **Safe-default gate.** Does it preserve safe-by-default behavior, or does it
-   push the project toward "production web server" promises we won't keep? If it
-   degrades the safe default with no opt-in → **out**, or **redesign** until the
-   risky behavior is explicit opt-in.
+2. **Server-lane gate.** Is it about serving files or correctly hosting and
+   operating one supplied WSGI/ASGI application, or is it about *building* that
+   application (routes, app logic, middleware)? Framework construction is out;
+   server lifecycle and protocol adaptation are in.
+3. **Safe-default gate.** Does it preserve the safe LAN default and, when used by
+   the production profile, carry measurable resource, lifecycle, failure, and
+   observability gates? If not, redesign it before inclusion.
 4. **Smallness gate.** Does the benefit justify the permanent maintenance,
    documentation, and security surface? When in doubt → **out**; the default
    answer to "should we add this?" is **no**.

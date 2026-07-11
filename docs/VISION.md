@@ -3,14 +3,17 @@
 > A batteries-included `python -m http.server`.
 
 **servery** is a zero-dependency, pure-Python (standard-library-only) HTTP file
-server. It serves a directory over HTTP with the niceties people actually expect
-in 2026 — a rich, sortable directory listing, optional basic auth, file upload,
-and HTTPS — while keeping the single property that makes `http.server` so
-beloved: nothing to install but Python itself.
+and application server. Its default remains the simple directory server: rich
+listings, optional auth and upload, and HTTPS without a runtime dependency tree.
+Its production target is one directly exposed service on one Linux host that
+owns TLS, worker lifecycle, overload behavior, and operational status without
+requiring nginx, Caddy, or an external process manager.
 
 You can run it three ways: `python -m servery`, a `servery` console script, or
-`import servery` from your own code. It is `pip install servery` away, and it
-has **zero third-party dependencies, forever**.
+`import servery` from your own code. It is `pip install servery` away, and its
+default/core install has **zero third-party runtime dependencies**. Explicit
+transport extras may add a small, documented dependency set; today HTTP/3 uses
+`aioquic`.
 
 ---
 
@@ -98,23 +101,22 @@ servery --upload                 # let the other side send files back
 servery --tls cert.pem key.pem   # serve over HTTPS
 ```
 
-## 4. Positioning: the file-server lane
+## 4. Positioning: server, not framework
 
-There are two lanes for "small Python web tools," and servery lives firmly in
-one of them.
+There are two different jobs in a Python web deployment:
 
 - **The file-server lane** (miniserve, `npx serve`, `http-server`,
   `uploadserver`): *point me at a folder and serve it.* The mental model is a
   directory, files, and a browser. **servery is here.**
-- **The web-framework lane** (Flask, Bottle, the `quickserve` PyPI package):
-  *help me build an application* with routes, handlers, templates, and request
-  dispatch. **servery is emphatically NOT here.**
+- **The application-framework lane** (Django, Flask, Starlette, FastAPI): help
+  users build routes and application logic. **servery is not a framework.** It
+  can host one WSGI or ASGI application supplied by the operator, just as a
+  production server hosts an application without defining its routes.
 
-If a feature request starts with "I want to add an endpoint that…", it belongs
-to the framework lane and is out of scope. If it starts with "when I'm serving a
-folder, I wish it also…", it may belong to servery. Keeping this line crisp is
-how servery stays small, finishable, and honestly describable as "a
-batteries-included `http.server`" rather than "a worse Flask."
+If a feature request starts with "I want servery to define my application
+endpoint," it belongs to the framework lane and is out of scope. Correctly
+hosting an operator-provided WSGI/ASGI application, supervising it, and exposing
+readiness are server responsibilities and are in scope.
 
 Compared to the neighbors:
 
@@ -130,26 +132,24 @@ Compared to the neighbors:
 
 servery will **not**:
 
-- Be a **web framework**: no user-defined routes, no app object, no middleware
-  system, no templating-for-your-app. (Internal templating for our own listing
-  UI is fine; exposing one is not.)
-- Be a **production-grade public web server**. Like `http.server`, it is a dev /
-  LAN / ad-hoc-sharing tool. We aim for *safe defaults*, not hardened
-  internet-facing operation. Put it behind a real reverse proxy if you must
-  expose it.
-- Issue **publicly-trusted, auto-renewed TLS certificates (ACME / Let's
-  Encrypt).** servery's TLS is **Tier 0 — zero-dependency**: user-provided
-  cert/key (`--tls-cert`/`--tls-key`, with `--tls-help` printing an `openssl`
-  recipe) *and* an **ad-hoc self-signed cert** minted at startup in pure stdlib
-  (`--tls-self-signed`, via `_certgen.py`) for opportunistic encryption on a dev
-  box / LAN. Self-signed is **not a trust anchor** — clients see an "untrusted
-  certificate" warning. Going past that to publicly-trusted, auto-renewed certs
-  means the full ACME protocol against a public domain on :80/:443 — the
-  production-public-web-server lane servery deliberately doesn't occupy. If it
-  ever lands, it lands as an **optional `servery[acme]` extra** (mirroring the
-  `servery[http3]` precedent), never in the zero-dep core; it is **not
-  implemented**.
-- Add **third-party dependencies** for any feature, ever. (See `PRINCIPLES.md`.)
+- Be a **web framework**: no servery-defined application routes, app object,
+  middleware system, or application templating. Hosting one WSGI or ASGI app is
+  explicitly a server feature.
+- Claim the current build is production-ready before the release checklist in
+  `design/production-edge-execution-backlog.md` passes. The selected target is a
+  hardened, directly exposed single-service edge, but production status is an
+  evidence gate rather than an aspiration.
+- Require a separate public edge or process supervisor. The production profile
+  must own its public sockets, local worker lifecycle, TLS, and operational
+  endpoints. An operator may still place it in a larger architecture, but that
+  is not the product's safety story.
+- Treat ad-hoc self-signed certificates as publicly trusted. The current narrow
+  zero-dependency ACME path acquires and caches certificates; unattended
+  production additionally requires scheduled renewal, atomic replacement,
+  retry, expiry reporting, and hot TLS reload.
+- Add **third-party dependencies to the default/core install**. A narrowly
+  scoped opt-in transport extra must justify its dependency and native-code
+  surface under `PRINCIPLES.md`.
 - Render **arbitrary Markdown**. The stdlib has no Markdown parser, so README
   rendering is out of scope beyond, at most, escaped plaintext. We will not
   vendor a parser to get there.
@@ -160,12 +160,15 @@ servery will **not**:
 
 ## 6. What success looks like
 
-Success is when a Python developer who today types `python -m http.server` types
-`python -m servery` instead and never thinks about it again — because it
-installed with nothing extra, started just as fast, bound somewhere safe by
-default, and showed a listing with sizes, dates, and sorting that they did not
-have to apologize for. When they need a password, an upload box, or HTTPS, those
-are one flag away rather than a different tool away. servery wins not by being
-the most powerful folder server in any language, but by being the one that
-finally makes the *Python you already have* good enough that you stop reaching
-past it — while never asking you to install a single thing beyond Python itself.
+Success has two honest tiers. The default succeeds when a Python developer can
+replace `python -m http.server` without inheriting a dependency tree or unsafe
+network defaults. The production profile succeeds only when one documented
+command and configuration can operate a directly exposed HTTPS static, WSGI, or
+ASGI service through overload, worker crashes, reloads, and certificate renewal.
+The exact first-release scope and measurable gates live in
+`design/production-edge-execution-backlog.md`.
+
+The implementation is Python, whose language-level memory safety substantially
+reduces one class of server defects. CPython, OpenSSL, the operating system, and
+optional native dependencies remain part of the executable stack; servery does
+not claim that every layer is implemented in a memory-safe language.

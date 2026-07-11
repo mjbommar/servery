@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from servery import _digest
+from servery import _digest, _static
 from servery.config import Config
 from tests._harness import raw_exchange, serving
 
@@ -65,11 +69,117 @@ class FieldValueTest(unittest.TestCase):
     def test_missing_file_is_none(self):
         self.assertIsNone(_digest.field_value_for_file("/no/such/file", "sha-256"))
 
+    def test_handle_hash_restores_position_and_rejects_truncation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "identity.bin")
+            path.write_bytes(b"abcdef")
+            with path.open("r+b") as handle:
+                handle.seek(2)
+                self.assertEqual(
+                    _digest.field_value_for_handle(handle, "sha-256", 6),
+                    _digest.field_value("sha-256", b"abcdef"),
+                )
+                self.assertEqual(handle.tell(), 2)
+                os.truncate(path, 3)
+                with self.assertRaises(OSError):
+                    _digest.field_value_for_handle(handle, "sha-256", 6)
+                self.assertEqual(handle.tell(), 2)
+
+
+class DigestCacheTest(unittest.TestCase):
+    def _key(self, path: Path, algorithm: str = "sha-256") -> _digest.CacheKey:
+        return _digest.cache_key(str(path), path.stat(), algorithm)
+
+    def test_zero_retention_shares_only_concurrent_same_key_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "hot.bin")
+            path.write_bytes(b"hot")
+            cache = _digest.DigestCache(0)
+            key = self._key(path)
+            entered = threading.Event()
+            release = threading.Event()
+            calls = 0
+            results: list[str] = []
+
+            def factory() -> str:
+                nonlocal calls
+                calls += 1
+                entered.set()
+                release.wait(1)
+                return "sha-256=:value:"
+
+            first = threading.Thread(
+                target=lambda: results.append(cache.get_or_compute(key, factory))
+            )
+            second = threading.Thread(
+                target=lambda: results.append(cache.get_or_compute(key, factory))
+            )
+            first.start()
+            self.assertTrue(entered.wait(1))
+            second.start()
+            time.sleep(0.01)
+            release.set()
+            first.join(2)
+            second.join(2)
+
+            self.assertEqual(calls, 1)
+            self.assertEqual(results, ["sha-256=:value:"] * 2)
+            self.assertEqual(cache.current_entries, 0)
+            self.assertIsNone(cache.get(key))
+            self.assertEqual(cache.get_or_compute(key, lambda: "later"), "later")
+
+    def test_entry_bound_lru_and_algorithm_are_explicit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "hot.bin")
+            path.write_bytes(b"hot")
+            cache = _digest.DigestCache(1)
+            sha256 = self._key(path)
+            sha512 = self._key(path, "sha-512")
+            cache.put(sha256, "256")
+            cache.put(sha512, "512")
+            self.assertIsNone(cache.get(sha256))
+            self.assertEqual(cache.get(sha512), "512")
+            self.assertEqual(cache.current_entries, 1)
+
+    def test_distinct_keys_compute_concurrently_and_failures_are_reclaimed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first_path = Path(tmp, "first")
+            second_path = Path(tmp, "second")
+            first_path.write_bytes(b"1")
+            second_path.write_bytes(b"2")
+            cache = _digest.DigestCache()
+            rendezvous = threading.Barrier(2, timeout=1)
+            results: list[str] = []
+
+            def worker(path: Path) -> None:
+                results.append(
+                    cache.get_or_compute(
+                        self._key(path),
+                        lambda: (rendezvous.wait(), path.name)[1],
+                    )
+                )
+
+            threads = [
+                threading.Thread(target=worker, args=(path,)) for path in (first_path, second_path)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(2)
+            self.assertCountEqual(results, ["first", "second"])
+            self.assertEqual(cache._flights, {})
+
+            key = self._key(first_path)
+            with self.assertRaisesRegex(OSError, "hash failed"):
+                cache.get_or_compute(key, lambda: (_ for _ in ()).throw(OSError("hash failed")))
+            self.assertEqual(cache._flights, {})
+
 
 class _ServerCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         root = Path(self._tmp.name)
+        self.root = root
         # Incompressible bytes so it is served identity even when zstd/gzip is offered.
         self.data = bytes(range(256)) * 64  # 16 KiB, > the compression floor
         (root / "blob.bin").write_bytes(self.data)
@@ -128,6 +238,43 @@ class ReprDigestServerTest(_ServerCase):
         head, _ = self._get("/page.html", want="sha-256", extra=b"Accept-Encoding: gzip\r\n")
         self.assertIn(b"content-encoding", head.lower())
         self.assertIsNone(self._digest_line(head))
+
+    def test_digest_and_body_survive_atomic_path_replacement_as_one_identity(self):
+        original_open = _static.open_file
+        replaced = False
+
+        def open_then_replace(*args, **kwargs):
+            nonlocal replaced
+            opened = original_open(*args, **kwargs)
+            if not replaced and Path(args[0]).name == "blob.bin":
+                replaced = True
+                replacement = self.root / "replacement.tmp"
+                replacement.write_bytes(b"replacement")
+                replacement.replace(self.root / "blob.bin")
+            return opened
+
+        with mock.patch.object(_static, "open_file", side_effect=open_then_replace):
+            head, body = self._get("/blob.bin", want="sha-256")
+        self.assertEqual(body, self.data)
+        self.assertEqual(self._digest_line(head), _digest.field_value("sha-256", self.data))
+
+    def test_truncation_during_digest_fails_before_file_headers(self):
+        original_open = _static.open_file
+        truncated = False
+
+        def open_then_truncate(*args, **kwargs):
+            nonlocal truncated
+            opened = original_open(*args, **kwargs)
+            if not truncated and Path(args[0]).name == "blob.bin":
+                truncated = True
+                os.truncate(self.root / "blob.bin", 2)
+            return opened
+
+        with mock.patch.object(_static, "open_file", side_effect=open_then_truncate):
+            head, body = self._get("/blob.bin", want="sha-256")
+        self.assertIn(b"500", head.split(b"\r\n", 1)[0])
+        self.assertIsNone(self._digest_line(head))
+        self.assertNotEqual(body, self.data[:2])
 
 
 if __name__ == "__main__":

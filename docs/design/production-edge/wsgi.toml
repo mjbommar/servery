@@ -1,0 +1,26 @@
+schema_version = 1
+profile = "production"
+
+[runtime]
+workers = 4
+
+[listener]
+host = "0.0.0.0"
+port = 8443
+http2 = false
+
+[tls]
+mode = "manual"
+
+[tls.manual]
+certificate_file = "/etc/servery/site.crt"
+private_key_file = "/etc/servery/site.key"
+
+[resources]
+max_connections = 1024
+
+[application]
+mode = "wsgi"
+
+[application.wsgi]
+target = "example:wsgi_app"

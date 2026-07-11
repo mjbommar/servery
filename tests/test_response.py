@@ -160,7 +160,11 @@ class HeaderAndBuildTest(unittest.TestCase):
                 cfg, str(path), "/large.txt", "gzip", tls=True
             )
             self.assertEqual(status, 200)
-            self.assertEqual(body, _response.FileBody(str(path), 4096))
+            self.assertIsInstance(body, _response.FileBody)
+            assert isinstance(body, _response.FileBody)
+            self.assertEqual((body.path, body.size), (str(path), 4096))
+            self.assertFalse(body.handle.closed)
+            body.close()
             mapped = _headers_dict(headers)
             self.assertEqual(mapped[b"content-length"], b"4096")
             self.assertNotIn(b"content-encoding", mapped)
@@ -175,6 +179,8 @@ class HeaderAndBuildTest(unittest.TestCase):
                 cfg, str(path), "/one.bin", "", tls=False
             )
             self.assertIsInstance(body, _response.FileBody)
+            assert isinstance(body, _response.FileBody)
+            body.close()
 
     def test_large_binary_stream_has_no_accept_encoding_vary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,9 +191,32 @@ class HeaderAndBuildTest(unittest.TestCase):
                 cfg, str(path), "/large.bin", "gzip", tls=False
             )
             self.assertIsInstance(body, _response.FileBody)
+            assert isinstance(body, _response.FileBody)
+            body.close()
             self.assertNotIn(b"vary", _headers_dict(headers))
 
-    def test_file_disappearing_after_stat_returns_404(self):
+    def test_streaming_body_keeps_the_validated_open_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "asset.bin")
+            original = b"a" * 4096
+            path.write_bytes(original)
+            cfg = Config.create(tmp, quiet=True, max_buffered_response=1)
+
+            _status, headers, body = _response.build_static(
+                cfg, str(path), "/asset.bin", "", tls=False
+            )
+            self.assertIsInstance(body, _response.FileBody)
+            assert isinstance(body, _response.FileBody)
+            replacement = Path(tmp, "replacement.bin")
+            replacement.write_bytes(b"replacement")
+            replacement.replace(path)
+            try:
+                self.assertEqual(body.handle.read(), original)
+                self.assertEqual(_headers_dict(headers)[b"content-length"], b"4096")
+            finally:
+                body.close()
+
+    def test_file_open_failure_returns_404(self):
         with tempfile.TemporaryDirectory() as tmp:
             small = Path(tmp, "small.txt")
             small.write_bytes(b"x")

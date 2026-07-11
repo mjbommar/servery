@@ -247,18 +247,17 @@ responses MUST carry `Vary: Accept-Encoding` (M7). → **FR-SERVE-02**, **FR-HDR
 | H3 | A server NOT supporting persistence MUST send `Connection: close` in every non-1xx response. If servery keeps connections alive, it MUST honor a client `Connection: close`. | M | 9112 §9.3, §9.6 | **Yes** (base `close_connection` logic, once HTTP/1.1). |
 | H4 | A server receiving the `close` connection option MUST close after the final response and MUST NOT process further requests on it. | M / MN | 9112 §9.6 | **Yes** |
 | H5 | A server MUST read the entire request body (or close the connection) before reuse — relevant to upload (`do_POST`). | M | 9112 §9.3 | servery must ensure upload drains/closes. |
-| H6 | `Host`: MUST respond `400 (Bad Request)` to any HTTP/1.1 request lacking `Host`, with >1 `Host` field line, or an invalid `Host` value. | M | 9112 §3.2 | **Partial** — base validates request line but does not enforce the Host-presence `400`. |
+| H6 | `Host`: MUST respond `400 (Bad Request)` to any HTTP/1.1 request lacking `Host`, with >1 `Host` field line, or an invalid `Host` value. | M | 9112 §3.2 | **Yes** — shared threaded/selector policy and the specialized ASGI parser reject missing, duplicate, and invalid authority values. |
 | H7 | Request-target forms: accept **origin-form** (the normal case); MUST accept **absolute-form**; authority-form only for CONNECT; asterisk-form only for server-wide OPTIONS. | M | 9112 §3.2.1–§3.2.4 | **Partial** (base handles origin-form). |
 | H8 | Body length framing: MUST NOT send `Content-Length` together with `Transfer-Encoding`; `Transfer-Encoding` overrides `Content-Length`. | MN | 9112 §6.1, §6.2, §6.3 | **Yes** (base never combines them). |
-| H9 | Chunked is the final transfer-coding; usable when content length is unknown in advance — for streaming archives (`tar.gz`) and unknown-length responses. Format: `chunk-size`(hex) CRLF data CRLF … `0` CRLF [trailers] CRLF. | M (final coding) | 9112 §6.1, §7.1 | servery must emit valid chunked for streaming archives. |
-| H10 | Over-long request-target MUST → `414 (URI Too Long)`; malformed message SHOULD → `400` + close; whitespace between field-name and colon MUST → `400`; RECOMMENDED to support request-line ≥ 8000 octets. | M / S / RECOMMENDED | 9112 §3, §5.1, §2.2 | **Yes** (base `http.client`/`BaseHTTPRequestHandler` field parsing). |
-| H11 | obs-fold (line folding) is deprecated: a server receiving obs-fold outside `message/http` MUST reject (`400`) or replace each fold with SP. | M | 9112 §5.2 | **Yes** (base parser). |
+| H9 | Chunked is the final transfer-coding; usable when content length is unknown in advance — for streaming archives (`tar.gz`) and unknown-length responses. Format: `chunk-size`(hex) CRLF data CRLF … `0` CRLF [trailers] CRLF. | M (final coding) | 9112 §6.1, §7.1 | **Yes** — streaming responses use valid chunked framing; negotiated ASGI response trailers follow the zero chunk and forbidden routing/framing trailer fields are rejected. |
+| H10 | Over-long request-target MUST → `414 (URI Too Long)`; malformed message SHOULD → `400` + close; whitespace between field-name and colon MUST → `400`; RECOMMENDED to support request-line ≥ 8000 octets. | M / S / RECOMMENDED | 9112 §3, §5.1, §2.2 | **Partial** — threaded/selector enforce a 64 KiB request-line limit and all HTTP/1 adapters enforce strict field syntax. ASGI still closes an over-limit combined head without a distinct `414`. |
+| H11 | obs-fold (line folding) is deprecated: a server receiving obs-fold outside `message/http` MUST reject (`400`) or replace each fold with SP. | M | 9112 §5.2 | **Yes** — the shared parser replaces each continuation with one SP; ASGI rejects it with `400`. |
 
 **servery action.** Set `protocol_version = "HTTP/1.1"` (`server.py`/handler) to
 enable keep-alive (H1/H2) and the framing guarantees; rely on the base for H3, H4,
-H8, H10, H11. **Add an explicit `Host`-presence check (H6)** returning `400` for a
-missing/duplicate `Host` on HTTP/1.1 — the base class does not enforce this, and a
-modern HTTP/1.1 server MUST. For streaming archives (`FR-ARCHIVE-02`), emit valid
+H8. The shared request parser enforces H6, H10, and H11 rather than relying on the
+more permissive email-style base parser. For streaming archives (`FR-ARCHIVE-02`), emit valid
 **chunked** transfer-coding (H9) — `tarfile.open(fileobj=wfile, mode="w|gz")`
 streams with no `Content-Length`, so the response MUST be framed by chunked
 transfer-coding **or** `Connection: close`. → **FR-SERVE-01**, **FR-ARCHIVE-02**,
@@ -336,7 +335,7 @@ Priority: **P0** = correctness/standards gap a modern HTTP/1.1 server must close
 | P0 | **HTTP/1.1 + persistent connections** (9112 §2.3, §9.3) — base defaults to HTTP/1.0, keep-alive OFF. | **No** | Set `protocol_version="HTTP/1.1"`; honor `Connection: close`; frame streamed bodies with chunked or `Connection: close`. | **FR-CONN-01** (new) |
 | P0 | **Range / `206` / `Content-Range`** (9110 §14.2–§14.4) — no Range support at all. | **No** | `ranges.py`: single/suffix/open-ended → `206`; unsatisfiable → `416 + Content-Range: bytes */len`; malformed/multi → `200`. | FR-RANGE-01..06 |
 | P0 | **`416` + `Content-Range: bytes */len`** (9110 §14.4) | **No** | Emit on unsatisfiable range. | FR-RANGE-04 |
-| P0 | **`Host` presence → `400`** (9112 §3.2) — missing/duplicate `Host` on HTTP/1.1. | **Partial** | Reject with `400` in handler. | **FR-HOST-01** (new) |
+| P0 | **`Host` presence → `400`** (9112 §3.2) — missing/duplicate `Host` on HTTP/1.1. | **Partial** | **Done:** shared request-head policy rejects missing, duplicate, and invalid values with `400` and closes. | **FR-HOST-01** |
 | P0 | **Conditional precedence + `If-None-Match`/`If-Match`/`412`** (9110 §13.1, §13.2.2) — base only does `If-Modified-Since`. | **No** | Implement full precedence ladder; `412`; ignore `If-Modified-Since` when `If-None-Match` present. | **FR-COND-01** (new) |
 | P0 | **`304` echoes validators, no body** (9110 §15.4.5) | **Partial** | On `304` send `ETag`/`Date`/`Vary`/`Cache-Control`; no body (base already omits body). | FR-CACHE-02, **FR-COND-01** |
 | P1 | **`ETag` (weak, size+mtime_ns)** (9110 §8.8.3, §8.8.3.1) | **No** | Emit weak `ETag`; honor `If-None-Match` (weak compare). | FR-CACHE-02 |
@@ -408,7 +407,7 @@ Each maps to a `unittest` case (stdlib `http.client`, real server — see
 - **E16 — Over-long request-target → `414`.** A request-target beyond servery's
   parse limit → `414` (9112 §3; H10).
 - **E17 — Whitespace before colon → `400`.** `Foo : bar` header → `400` (9112
-  §5.1; H10/H11) — typically enforced by the base parser; assert it.
+  §5.1; H10/H11) — enforced by the shared parser and asserted over the wire.
 - **E18 — `nosniff` present.** Every file response carries
   `X-Content-Type-Options: nosniff` by default (M8/FR-SEC-04); a `.txt` cannot be
   sniffed as HTML.

@@ -105,7 +105,7 @@ def run(handler: ServeryHandler) -> None:
     if length > handler._server.config.max_request_body:
         handler._reject_unread_body(413, "Request body exceeds the size limit")
         return
-    reader = _body.LimitedReader(handler.rfile, length)
+    reader = _body.LimitedReader(handler._request_body_stream(), length)
     body = reader.read()
     if reader.remaining:
         handler.close_connection = True

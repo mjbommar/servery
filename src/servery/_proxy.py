@@ -52,7 +52,7 @@ def forward(handler: ServeryHandler, target: str) -> None:
     if length > config.max_request_body:
         handler._reject_unread_body(413, "Request body too large to proxy")
         return
-    body = _body.LimitedReader(handler.rfile, length) if length else None
+    body = _body.LimitedReader(handler._request_body_stream(), length) if length else None
 
     scheme = "https" if isinstance(handler.connection, ssl.SSLSocket) else "http"
     # When servery did its own --auth, the client's Authorization is servery's
@@ -81,6 +81,9 @@ def forward(handler: ServeryHandler, target: str) -> None:
         response = conn.getresponse()
         relay_headers = [(k, v) for k, v in response.getheaders() if k.lower() not in _HOP_BY_HOP]
         _relay(handler, response.status, response.reason, relay_headers, response)
+    except _body.BodyTimeoutError:
+        handler.close_connection = True
+        raise
     except (OSError, http.client.HTTPException) as exc:
         _log.logger.warning("proxy to %s failed: %r", target, exc)
         with contextlib.suppress(OSError):

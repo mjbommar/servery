@@ -49,6 +49,26 @@ def ignores_body(environ: dict[str, Any], start_response: Any) -> list[bytes]:
     return [payload]
 
 
+def multiprocess_flag(environ: dict[str, Any], start_response: Any) -> list[bytes]:
+    """Expose the PEP 3333 process-concurrency flag for integration tests."""
+    payload = str(environ["wsgi.multiprocess"]).encode("ascii")
+    start_response("200 OK", [("Content-Length", str(len(payload)))])
+    return [payload]
+
+
+def forces_keep_alive(environ: dict[str, Any], start_response: Any) -> list[bytes]:
+    """Non-compliant hop-by-hop field used to test server-owned close policy."""
+    payload = b"forced"
+    start_response(
+        "200 OK",
+        [
+            ("Content-Length", str(len(payload))),
+            ("Connection", "keep-alive"),
+        ],
+    )
+    return [payload]
+
+
 # Validator-wrapped: each request checks compliance on both sides. (The wrapper
 # returns a non-list iterable, so these exercise the streaming/chunked path.)
 application = validator(_echo)

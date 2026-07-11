@@ -14,10 +14,13 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from servery import _listener
 from servery.config import Config
+from servery.handler import ServeryHandler
 from servery.server import make_server, server_url
-from tests._harness import capturing_logs
+from tests._harness import capturing_logs, raw_exchange
 
 
 def _multipart_body(boundary: str, filename: str, content: bytes) -> bytes:
@@ -560,6 +563,23 @@ class FeatureFlagTest(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             self.assertIn(b"app", body)
 
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_spa_fallback_rejects_index_symlink_escape(self):
+        outside = self.dir.parent / f"{self.dir.name}-outside-spa.html"
+        outside.write_text("TOP SECRET")
+        (self.dir / "index.html").unlink()
+        try:
+            try:
+                (self.dir / "index.html").symlink_to(outside)
+            except (OSError, NotImplementedError):  # pragma: no cover - platform dependent
+                self.skipTest("symlink creation not permitted")
+            with _running(self._config(spa=True)) as (host, port):
+                resp, body = self._get(host, port, "/client/side/route")
+            self.assertEqual(resp.status, 404)
+            self.assertNotIn(b"TOP SECRET", body)
+        finally:
+            outside.unlink(missing_ok=True)
+
     def test_cache_max_age(self):
         with _running(self._config(cache_max_age=3600)) as (host, port):
             resp, _ = self._get(host, port, "/f.txt")
@@ -591,6 +611,12 @@ class FeatureFlagTest(unittest.TestCase):
                 resp, body = self._get(host, port, "/f.txt")
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(body, b"data")
+
+    def test_explicit_write_timeout_preserves_static_response(self):
+        with _running(self._config(write_timeout=1.0)) as (host, port):
+            resp, body = self._get(host, port, "/f.txt")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body, b"data")
 
 
 class ConnectionBudgetTest(unittest.TestCase):
@@ -636,6 +662,255 @@ class ConnectionBudgetTest(unittest.TestCase):
                     finally:
                         conn.close()
                 self.assertEqual(status, 200)
+
+
+class GracefulDrainTest(unittest.TestCase):
+    def _server(self, directory: str, **overrides):
+        return make_server(
+            Config.create(
+                directory,
+                host="127.0.0.1",
+                port=0,
+                quiet=True,
+                **overrides,
+            )
+        )
+
+    def test_worker_queue_rejection_removes_registry_and_releases_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = self._server(
+                directory,
+                max_workers=1,
+                max_connections=1,
+                drain_timeout=0,
+            )
+            left, right = socket.socketpair()
+            try:
+                assert server._slots is not None
+                for _ in range(4):
+                    self.assertTrue(server._slots.acquire(blocking=False))
+
+                server.process_request(left, ("local", 1))
+
+                self.assertEqual(server._active_sockets, set())
+                self.assertEqual(server._connection_permits, set())
+                assert server._connections is not None
+                self.assertTrue(server._connections.acquire(blocking=False))
+                self.assertFalse(server._connections.acquire(blocking=False))
+                # A duplicate cleanup must not over-release a bounded semaphore.
+                server._finish_connection(left)
+                self.assertFalse(server._connections.acquire(blocking=False))
+                server._connections.release()
+            finally:
+                right.close()
+                for _ in range(4):
+                    server._slots.release()
+                server.server_close()
+
+    def test_worker_submit_failure_releases_slot_and_connection_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = self._server(
+                directory,
+                max_workers=1,
+                max_connections=1,
+                drain_timeout=0,
+            )
+            left, right = socket.socketpair()
+            try:
+                assert server._executor is not None
+                with (
+                    mock.patch.object(
+                        server._executor,
+                        "submit",
+                        side_effect=RuntimeError("executor stopped"),
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "executor stopped"),
+                ):
+                    server.process_request(left, ("local", 1))
+
+                assert server._slots is not None
+                permits = 0
+                while server._slots.acquire(blocking=False):
+                    permits += 1
+                self.assertEqual(permits, 4)
+                for _ in range(permits):
+                    server._slots.release()
+                self.assertEqual(server._active_sockets, set())
+                self.assertEqual(server._connection_permits, set())
+                assert server._connections is not None
+                self.assertTrue(server._connections.acquire(blocking=False))
+                self.assertFalse(server._connections.acquire(blocking=False))
+                server._connections.release()
+            finally:
+                right.close()
+                server.server_close()
+
+    def test_protocol_notification_never_blocks_begin_draining(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = self._server(directory, drain_timeout=0)
+            request = object()
+            entered = threading.Event()
+            release = threading.Event()
+
+            def blocking_notification():
+                entered.set()
+                release.wait(2)
+
+            with server._drain_condition:
+                server._active_sockets.add(request)
+            server.register_connection_drainer(request, blocking_notification)
+            started = time.monotonic()
+            server.begin_draining()
+            elapsed = time.monotonic() - started
+            try:
+                self.assertLess(elapsed, 0.2)
+                self.assertTrue(entered.wait(1))
+            finally:
+                release.set()
+                server._finish_connection(request)
+                server.server_close()
+
+    def test_deadline_force_closes_unfinished_socket(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = self._server(directory, drain_timeout=0.05)
+            active, peer = socket.socketpair()
+            try:
+                with server._drain_condition:
+                    server._active_sockets.add(active)
+                started = time.monotonic()
+                with self.assertLogs("servery", level="WARNING") as logs:
+                    server.server_close()
+                elapsed = time.monotonic() - started
+                self.assertGreaterEqual(elapsed, 0.03)
+                self.assertLess(elapsed, 0.5)
+                peer.settimeout(1)
+                self.assertEqual(peer.recv(1), b"")
+                self.assertIn("force-closing 1 HTTP/1/application", "\n".join(logs.output))
+            finally:
+                server._finish_connection(active)
+                peer.close()
+
+    def test_server_close_does_not_wait_for_executor_threads(self):
+        class ExecutorProbe:
+            def __init__(self):
+                self.calls = []
+
+            def shutdown(self, *, wait, cancel_futures):
+                self.calls.append((wait, cancel_futures))
+
+        with tempfile.TemporaryDirectory() as directory:
+            server = self._server(directory, drain_timeout=0)
+            probe = ExecutorProbe()
+            server._executor = probe
+            server.server_close()
+            self.assertEqual(probe.calls, [(False, True)])
+
+    def test_inflight_http1_response_advertises_close_during_drain(self):
+        started = threading.Event()
+        continue_response = threading.Event()
+        body = b"ok" * (64 * 1024)
+
+        class BlockingHandler(ServeryHandler):
+            def do_GET(self):  # noqa: N802 - stdlib handler dispatch contract
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                started.set()
+                if not continue_response.wait(2):
+                    raise AssertionError("test did not release response")
+                self.end_headers()
+                self.wfile.write(body)
+
+        with tempfile.TemporaryDirectory() as directory:
+            server = self._server(directory, drain_timeout=1)
+            server._handler_cls = BlockingHandler
+            host, port = server.server_address[:2]
+            serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            serve_thread.start()
+            sock = socket.create_connection((host, port), timeout=2)
+            shutdown_thread = threading.Thread(target=server.shutdown, daemon=True)
+            try:
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                self.assertTrue(started.wait(1))
+                shutdown_thread.start()
+                deadline = time.monotonic() + 1
+                while not server.is_draining and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                self.assertTrue(server.is_draining)
+                continue_response.set()
+                response = bytearray()
+                while chunk := sock.recv(4096):
+                    response.extend(chunk)
+                shutdown_thread.join(2)
+                self.assertFalse(shutdown_thread.is_alive())
+                self.assertIn(b"Connection: close\r\n", response)
+                self.assertTrue(response.endswith(body))
+            finally:
+                continue_response.set()
+                sock.close()
+                if shutdown_thread.is_alive():
+                    shutdown_thread.join(2)
+                server.server_close()
+                serve_thread.join(2)
+
+    def test_admitted_upload_completes_during_drain(self):
+        started = threading.Event()
+        continue_upload = threading.Event()
+
+        class BlockingUploadHandler(ServeryHandler):
+            def do_POST(self):  # noqa: N802 - stdlib handler dispatch contract
+                started.set()
+                if not continue_upload.wait(2):
+                    raise AssertionError("test did not release upload")
+                super().do_POST()
+
+        with tempfile.TemporaryDirectory() as directory:
+            server = self._server(directory, upload=True, drain_timeout=1)
+            server._handler_cls = BlockingUploadHandler
+            host, port = server.server_address[:2]
+            serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            serve_thread.start()
+            body = _multipart_body("DRAIN", "accepted.txt", b"accepted-upload")
+            request = (
+                b"POST / HTTP/1.1\r\nHost: x\r\n"
+                b"Content-Type: multipart/form-data; boundary=DRAIN\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode()
+                + body
+            )
+            sock = socket.create_connection((host, port), timeout=2)
+            shutdown_thread = threading.Thread(target=server.shutdown, daemon=True)
+            try:
+                sock.sendall(request)
+                self.assertTrue(started.wait(1))
+                shutdown_thread.start()
+                deadline = time.monotonic() + 1
+                while not server.is_draining and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                self.assertTrue(server.is_draining)
+                continue_upload.set()
+                response = bytearray()
+                while chunk := sock.recv(4096):
+                    response.extend(chunk)
+                shutdown_thread.join(2)
+                self.assertFalse(shutdown_thread.is_alive())
+                self.assertIn(b" 303 ", response)
+                self.assertEqual(Path(directory, "accepted.txt").read_bytes(), b"accepted-upload")
+            finally:
+                continue_upload.set()
+                sock.close()
+                if shutdown_thread.is_alive():
+                    shutdown_thread.join(2)
+                server.server_close()
+                serve_thread.join(2)
+
+    def test_begin_draining_and_close_are_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = self._server(directory, drain_timeout=0)
+            server.begin_draining()
+            deadline = server._drain_deadline
+            server.begin_draining()
+            self.assertEqual(server._drain_deadline, deadline)
+            server.server_close()
+            server.server_close()
 
 
 class TlsServerTest(unittest.TestCase):
@@ -746,6 +1021,59 @@ class HandleErrorTest(unittest.TestCase):
             srv.server_close()
 
 
+class RequestLimitTest(unittest.TestCase):
+    def test_final_response_advertises_close_and_pipeline_stops(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "f.txt").write_text("limited-body")
+            config = Config.create(
+                directory,
+                host="127.0.0.1",
+                port=0,
+                quiet=True,
+                max_requests_per_connection=1,
+            )
+            request = (
+                b"GET /f.txt HTTP/1.1\r\nHost: x\r\n\r\n"
+                b"GET /f.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            )
+            with _running(config) as (host, port):
+                sock = socket.create_connection((host, port), timeout=5)
+                try:
+                    sock.sendall(request)
+                    response = bytearray()
+                    while chunk := sock.recv(65536):
+                        response.extend(chunk)
+                finally:
+                    sock.close()
+        self.assertIn(b"Connection: close", response)
+        self.assertEqual(response.count(b"limited-body"), 1)
+
+    def test_zero_keeps_unlimited_compatibility(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "f.txt").write_text("unlimited-body")
+            config = Config.create(
+                directory,
+                host="127.0.0.1",
+                port=0,
+                quiet=True,
+                max_requests_per_connection=0,
+            )
+            request = (
+                b"GET /f.txt HTTP/1.1\r\nHost: x\r\n\r\n"
+                b"GET /f.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            )
+            with _running(config) as (host, port):
+                sock = socket.create_connection((host, port), timeout=5)
+                try:
+                    sock.sendall(request)
+                    response = bytearray()
+                    while chunk := sock.recv(65536):
+                        response.extend(chunk)
+                finally:
+                    sock.close()
+        self.assertEqual(response.count(b"unlimited-body"), 2)
+
+
 class PortAutoScanTest(unittest.TestCase):
     @unittest.skipUnless(
         os.name == "posix",
@@ -779,6 +1107,114 @@ class PortAutoScanTest(unittest.TestCase):
             self.assertGreater(httpd.server_address[1], 0)
         finally:
             httpd.server_close()
+
+
+class ListenerAdoptionTest(unittest.TestCase):
+    @staticmethod
+    def _config() -> Config:
+        return Config.create(".", host="127.0.0.1", port=0, quiet=True)
+
+    def test_runtime_close_does_not_close_callers_listener(self):
+        listener = _listener.bind_tcp_listener("127.0.0.1", 0)
+        try:
+            httpd = make_server(self._config(), listener=listener)
+            self.assertEqual(httpd.server_address, listener.getsockname())
+            httpd.server_close()
+            self.assertGreaterEqual(listener.fileno(), 0)
+            self.assertTrue(listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
+        finally:
+            listener.close()
+
+    def test_callers_close_does_not_stop_adopted_runtime(self):
+        listener = _listener.bind_tcp_listener("127.0.0.1", 0)
+        address = listener.getsockname()
+        httpd = make_server(self._config(), listener=listener)
+        listener.close()
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            response = raw_exchange(
+                str(address[0]),
+                int(address[1]),
+                b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+            self.assertIn(b"200 OK", response)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=5)
+
+    def test_rejects_bound_socket_that_is_not_listening(self):
+        listener = socket.socket()
+        try:
+            listener.bind(("127.0.0.1", 0))
+            with self.assertRaisesRegex(ValueError, "already be listening"):
+                make_server(self._config(), listener=listener)
+            self.assertGreaterEqual(listener.fileno(), 0)
+        finally:
+            listener.close()
+
+    def test_two_runtime_generations_adopt_and_close_independently(self):
+        listener = _listener.bind_tcp_listener("127.0.0.1", 0)
+        address = listener.getsockname()
+        with (
+            tempfile.TemporaryDirectory() as first_dir,
+            tempfile.TemporaryDirectory() as second_dir,
+        ):
+            Path(first_dir, "generation.txt").write_text("first")
+            Path(second_dir, "generation.txt").write_text("second")
+            first = make_server(
+                Config.create(first_dir, host="127.0.0.1", port=0, quiet=True),
+                listener=listener,
+            )
+            second = make_server(
+                Config.create(second_dir, host="127.0.0.1", port=0, quiet=True),
+                listener=listener,
+            )
+
+            def serve_generation(server):
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    response = raw_exchange(
+                        str(address[0]),
+                        int(address[1]),
+                        b"GET /generation.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+                    )
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+                return response
+
+            try:
+                self.assertTrue(serve_generation(first).endswith(b"first"))
+                self.assertTrue(serve_generation(second).endswith(b"second"))
+                self.assertTrue(listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
+            finally:
+                first.server_close()
+                second.server_close()
+                listener.close()
+
+    def test_tls_wraps_only_the_runtime_duplicate(self):
+        listener = _listener.bind_tcp_listener("127.0.0.1", 0)
+        try:
+            config = Config.create(
+                ".",
+                host="127.0.0.1",
+                port=0,
+                quiet=True,
+                tls_self_signed=True,
+            )
+            httpd = make_server(config, listener=listener)
+            try:
+                self.assertIsInstance(httpd.socket, ssl.SSLSocket)
+                self.assertNotIsInstance(listener, ssl.SSLSocket)
+                self.assertTrue(listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
+            finally:
+                httpd.server_close()
+        finally:
+            listener.close()
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
-"""Shared buffered-response building for the HTTP/2 and HTTP/3 backends.
+"""Shared response planning for the HTTP/2 and HTTP/3 backends.
 
 The HTTP/1.1 handler streams files and does ranges/conditionals, so it keeps its
-own path. The buffered backends (HTTP/2, HTTP/3) resolve a request to an in-memory
-``(status, headers, body)`` triple through the *same* helpers here, so the gzip
-content-coding decision, the security/cache headers, and the directory-listing
-response can never drift between transports (they did before this was lifted).
+own path. HTTP/2 and HTTP/3 resolve a request to a ``(status, headers, body)``
+triple through the *same* helpers here. Small bodies are bytes; large identity
+files transfer an owned open handle, so validators and bytes describe one file
+even if its path is atomically replaced after planning.
 
 Headers are wire form: ``list[(bytes, bytes)]`` with lowercase names.
 """
@@ -13,25 +13,16 @@ from __future__ import annotations
 
 import mimetypes
 import os
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from servery import _compress, _conditional, _http1, listing
-from servery.handler import _CSP
+from servery import _compress, _conditional, _http1, _static, listing
+from servery._static import FileBody
 
 if TYPE_CHECKING:
     from servery.config import Config
 
 _HeaderList = list[tuple[bytes, bytes]]
 _LISTING_TYPE = "text/html; charset=utf-8"
-
-
-@dataclass(frozen=True, slots=True)
-class FileBody:
-    """A contained identity file response that transports must stream."""
-
-    path: str
-    size: int
 
 
 type ResponseBody = bytes | FileBody
@@ -141,53 +132,53 @@ def build_static(
         if config.security_headers:
             # The listing's own inline styles need the full CSP (style-src etc.);
             # "default-src 'none'" alone renders it unstyled.
-            headers.append((b"content-security-policy", _CSP.encode("latin-1")))
+            headers.append((b"content-security-policy", _static.GENERATED_CSP.encode("latin-1")))
             headers.append((b"referrer-policy", b"no-referrer"))
         coding = _compress.negotiate(accept_encoding, enabled=config.compress)
         return finalize_body(headers, _LISTING_TYPE, body, coding=coding)
+    ctype = guess_type(fs_path)
     try:
-        stat = os.stat(fs_path)  # noqa: PTH116 - os-level by design
+        opened = _static.open_file(
+            fs_path,
+            ctype,
+            accept_encoding,
+            compression_enabled=config.compress,
+            max_compress_size=min(config.max_compress_size, config.max_buffered_response),
+        )
     except OSError:
         return error(404)
-    ctype = guess_type(fs_path)
-    # Decide the coding from the identity size (no read needed) so the ETag for the
-    # representation the client would get is known before any conditional check.
-    coding = _compress.choose_encoding(
-        ctype,
-        stat.st_size,
-        accept_encoding,
-        enabled=config.compress,
-        max_size=min(config.max_compress_size, config.max_buffered_response),
-    )
-    etag = _conditional.coding_variant(_conditional.make_etag(stat), coding)
-    last_modified = _http1.format_http_date(stat.st_mtime)
-    headers.append((b"etag", etag.encode("ascii")))
-    headers.append((b"last-modified", last_modified.encode("latin-1")))
-    if _conditional.is_not_modified(
-        etag, stat.st_mtime, if_none_match=if_none_match, if_modified_since=if_modified_since
-    ):
-        return 304, headers, b""  # revalidated — no body, no file read
-    if stat.st_size > config.max_buffered_response:
-        if _compress.compressible(ctype):
-            headers.append((b"vary", b"accept-encoding"))
-        headers.append((b"content-type", ctype.encode("latin-1")))
-        headers.append((b"content-length", str(stat.st_size).encode("ascii")))
-        return 200, headers, FileBody(fs_path, stat.st_size)
-    if coding is not None and compression_cache is not None:
-        key = _compress.cache_key(fs_path, stat, coding)
-        try:
+    try:
+        stat = opened.stat
+        coding = opened.coding
+        headers.append((b"etag", opened.etag.encode("ascii")))
+        headers.append((b"last-modified", opened.last_modified.encode("latin-1")))
+        if _conditional.is_not_modified(
+            opened.etag,
+            stat.st_mtime,
+            if_none_match=if_none_match,
+            if_modified_since=if_modified_since,
+        ):
+            return 304, headers, b""  # revalidated — no body read
+        if stat.st_size > config.max_buffered_response:
+            if _compress.compressible(ctype):
+                headers.append((b"vary", b"accept-encoding"))
+            headers.append((b"content-type", ctype.encode("latin-1")))
+            headers.append((b"content-length", str(stat.st_size).encode("ascii")))
+            body = opened
+            opened = None
+            return 200, headers, body
+        if coding is not None and compression_cache is not None:
+            key = _compress.cache_key(fs_path, stat, coding)
 
             def encode_file() -> bytes:
-                with open(fs_path, "rb") as handle:  # noqa: PTH123 - os-level by design
-                    return _compress.encode(handle.read(), coding)
+                return _compress.encode(opened.handle.read(), coding)
 
-            body = compression_cache.get_or_compute(key, encode_file)
-        except OSError:
-            return error(404)
-        return finalize_body(headers, ctype, body, coding=coding, already_encoded=True)
-    try:
-        with open(fs_path, "rb") as handle:  # noqa: PTH123 - os-level by design
-            body = handle.read()
+            body_bytes = compression_cache.get_or_compute(key, encode_file)
+            return finalize_body(headers, ctype, body_bytes, coding=coding, already_encoded=True)
+        body_bytes = opened.handle.read()
+        return finalize_body(headers, ctype, body_bytes, coding=coding)
     except OSError:
         return error(404)
-    return finalize_body(headers, ctype, body, coding=coding)
+    finally:
+        if opened is not None:
+            opened.close()

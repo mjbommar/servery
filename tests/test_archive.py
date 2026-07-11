@@ -1,12 +1,15 @@
 """Unit tests for on-the-fly directory archives."""
 
+import http.client
 import io
 import os
 import tarfile
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from servery import archive
 
@@ -106,6 +109,92 @@ class SelectionDownloadTest(unittest.TestCase):
             conn.close()
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             self.assertEqual({n.split("/")[-1] for n in zf.namelist()}, {"one.txt", "three.txt"})
+
+
+class ArchiveAdmissionTest(unittest.TestCase):
+    def test_saturation_rejects_before_headers_preserves_cheap_progress_and_recovers(self):
+        from servery.config import Config
+        from tests._harness import serving
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "small.txt").write_text("cheap")
+            (root / "archive.txt").write_text("archive")
+            cfg = Config.create(
+                tmp,
+                host="127.0.0.1",
+                port=0,
+                quiet=True,
+                max_workers=2,
+                max_archive_streams=1,
+            )
+            entered = threading.Event()
+            release = threading.Event()
+            original = archive.stream_zip
+            calls = 0
+            calls_lock = threading.Lock()
+
+            def controlled(*args, **kwargs):
+                nonlocal calls
+                with calls_lock:
+                    calls += 1
+                    first = calls == 1
+                if first:
+                    entered.set()
+                    release.wait(2)
+                return original(*args, **kwargs)
+
+            first_result: list[int] = []
+            with (
+                mock.patch.object(archive, "stream_zip", side_effect=controlled),
+                serving(cfg) as (
+                    host,
+                    port,
+                ),
+            ):
+
+                def first_archive() -> None:
+                    conn = http.client.HTTPConnection(host, port, timeout=5)
+                    try:
+                        conn.request("GET", "/?archive=zip")
+                        response = conn.getresponse()
+                        response.read()
+                        first_result.append(response.status)
+                    finally:
+                        conn.close()
+
+                thread = threading.Thread(target=first_archive)
+                thread.start()
+                self.assertTrue(entered.wait(1))
+
+                conn = http.client.HTTPConnection(host, port, timeout=5)
+                conn.request("GET", "/?archive=zip")
+                saturated = conn.getresponse()
+                saturated.read()
+                self.assertEqual(saturated.status, 503)
+                self.assertEqual(saturated.getheader("Retry-After"), "1")
+
+                conn.request("GET", "/small.txt")
+                cheap = conn.getresponse()
+                self.assertEqual((cheap.status, cheap.read()), (200, b"cheap"))
+
+                conn.request("HEAD", "/?archive=zip")
+                head = conn.getresponse()
+                head.read()
+                self.assertEqual(head.status, 200)
+                conn.close()
+
+                release.set()
+                thread.join(3)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(first_result, [200])
+
+                recovery = http.client.HTTPConnection(host, port, timeout=5)
+                recovery.request("GET", "/?archive=zip")
+                response = recovery.getresponse()
+                response.read()
+                recovery.close()
+                self.assertEqual(response.status, 200)
 
 
 if __name__ == "__main__":
