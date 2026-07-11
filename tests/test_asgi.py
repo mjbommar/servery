@@ -1825,11 +1825,11 @@ class ASGIConnectionBudgetTest(unittest.TestCase):
             time.sleep(0.1)
             rejected = socket.create_connection((host, port), timeout=5)
             try:
-                rejected.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-                rejected.settimeout(2)
                 try:
+                    rejected.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    rejected.settimeout(2)
                     data = rejected.recv(4096)
-                except ConnectionResetError:
+                except (ConnectionAbortedError, ConnectionResetError):
                     data = b""
                 self.assertEqual(data, b"")
             finally:

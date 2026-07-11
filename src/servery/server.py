@@ -127,7 +127,10 @@ class ServeryHTTPServer(ThreadingHTTPServer):
             initial_socket.close()
             self.server_address = self.socket.getsockname()
             host, port = self.server_address[:2]
-            self.server_name = socket.getfqdn(host)
+            # WSGI/CGI derive SERVER_NAME from server_address, and no runtime
+            # consumer needs a reverse-resolved FQDN. DNS here can stall every
+            # freshly spawned worker before it reports PREPARED.
+            self.server_name = str(host)
             self.server_port = port
             try:
                 self._wrap_listener_tls()

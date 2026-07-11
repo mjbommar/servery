@@ -1126,6 +1126,19 @@ class ListenerAdoptionTest(unittest.TestCase):
         finally:
             listener.close()
 
+    def test_adopted_listener_avoids_reverse_dns(self):
+        listener = _listener.bind_tcp_listener("127.0.0.1", 0)
+        try:
+            with mock.patch("servery.server.socket.getfqdn") as getfqdn:
+                httpd = make_server(self._config(), listener=listener)
+            try:
+                getfqdn.assert_not_called()
+                self.assertEqual(httpd.server_name, "127.0.0.1")
+            finally:
+                httpd.server_close()
+        finally:
+            listener.close()
+
     def test_callers_close_does_not_stop_adopted_runtime(self):
         listener = _listener.bind_tcp_listener("127.0.0.1", 0)
         address = listener.getsockname()
