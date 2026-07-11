@@ -273,6 +273,10 @@ class LifespanPolicyTest(unittest.TestCase):
         listener = socket.socket()
         try:
             listener.bind(("127.0.0.1", 0))
+            try:
+                listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+            except OSError:
+                self.skipTest("platform cannot query SO_ACCEPTCONN")
             config = Config.create(
                 ".",
                 host="127.0.0.1",
@@ -1303,14 +1307,14 @@ class ASGIServerTest(unittest.TestCase):
         with serving_asgi(
             "tests._asgiapp:ignores_body",
             timeout=1.0,
-            request_head_timeout=0.15,
+            request_head_timeout=0.4,
         ) as (host, port):
             sock = socket.create_connection((host, port), timeout=5)
             try:
                 sock.sendall(b"G")
-                time.sleep(0.07)
+                time.sleep(0.08)
                 sock.sendall(b"ET /a HTTP/1.1\r\n")
-                time.sleep(0.07)
+                time.sleep(0.08)
                 sock.sendall(b"Host: x")
                 sock.settimeout(2)
                 self.assertEqual(sock.recv(1), b"")
@@ -1321,7 +1325,7 @@ class ASGIServerTest(unittest.TestCase):
         with serving_asgi(
             "tests._asgiapp:ignores_body",
             timeout=1.0,
-            keepalive_timeout=0.1,
+            keepalive_timeout=0.2,
         ) as (host, port):
             sock = socket.create_connection((host, port), timeout=5)
             try:
@@ -1329,9 +1333,9 @@ class ASGIServerTest(unittest.TestCase):
                 response = b""
                 while b"ignored" not in response:
                     response += sock.recv(4096)
-                time.sleep(0.04)
+                time.sleep(0.05)
                 sock.sendall(b"G")
-                time.sleep(0.08)
+                time.sleep(0.25)
                 sock.sendall(b"ET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
                 response = _read_to_close(sock)
                 self.assertIn(b"ignored", response)
