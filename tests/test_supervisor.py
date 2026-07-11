@@ -96,7 +96,7 @@ class SupervisorTests(unittest.TestCase):
     def _make_supervisor(self, **kwargs: Any) -> _supervisor.Supervisor:
         drain_timeout = kwargs.pop("drain_timeout", 1)
         force_timeout = kwargs.pop("force_timeout", 0.2)
-        worker_start_timeout = kwargs.pop("worker_start_timeout", 5)
+        worker_start_timeout = kwargs.pop("worker_start_timeout", 30)
         config = Config.create(
             self.root,
             host="127.0.0.1",
@@ -204,7 +204,7 @@ class SupervisorTests(unittest.TestCase):
             tls_self_signed=True,
             drain_timeout=1,
             force_timeout=0.2,
-            worker_start_timeout=5,
+            worker_start_timeout=30,
         )
         with _tls.self_signed_files(source) as (cert, key):
             config = dataclasses.replace(

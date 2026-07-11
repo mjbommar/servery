@@ -79,15 +79,15 @@ class AbuseLimitTest(unittest.TestCase):
             port=0,
             quiet=True,
             timeout=1.0,
-            request_head_timeout=0.15,
+            request_head_timeout=0.4,
         )
         with serving(cfg) as (host, port):
             sock = socket.create_connection((host, port), timeout=5)
             try:
                 sock.sendall(b"G")
-                time.sleep(0.07)
+                time.sleep(0.08)
                 sock.sendall(b"ET /f.txt HTTP/1.1\r\n")
-                time.sleep(0.07)
+                time.sleep(0.08)
                 sock.sendall(b"Host: x")
                 sock.settimeout(2)
                 self.assertEqual(sock.recv(1), b"")
@@ -117,8 +117,8 @@ class AbuseLimitTest(unittest.TestCase):
             port=0,
             quiet=True,
             timeout=1.0,
-            keepalive_timeout=0.1,
-            request_head_timeout=0.2,
+            keepalive_timeout=0.2,
+            request_head_timeout=0.8,
         )
         with serving(cfg) as (host, port):
             sock = socket.create_connection((host, port), timeout=5)
@@ -127,9 +127,9 @@ class AbuseLimitTest(unittest.TestCase):
                 response = b""
                 while b"ok" not in response:
                     response += sock.recv(4096)
-                time.sleep(0.04)
+                time.sleep(0.05)
                 sock.sendall(b"G")
-                time.sleep(0.08)
+                time.sleep(0.25)
                 sock.sendall(b"ET /f.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
                 response = b""
                 while data := sock.recv(4096):

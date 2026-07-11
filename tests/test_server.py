@@ -1195,7 +1195,8 @@ class ListenerAdoptionTest(unittest.TestCase):
             try:
                 self.assertTrue(serve_generation(first).endswith(b"first"))
                 self.assertTrue(serve_generation(second).endswith(b"second"))
-                self.assertTrue(listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
+                probe = socket.create_connection(listener.getsockname(), timeout=1)
+                probe.close()
             finally:
                 first.server_close()
                 second.server_close()
@@ -1215,7 +1216,8 @@ class ListenerAdoptionTest(unittest.TestCase):
             try:
                 self.assertIsInstance(httpd.socket, ssl.SSLSocket)
                 self.assertNotIsInstance(listener, ssl.SSLSocket)
-                self.assertTrue(listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
+                probe = socket.create_connection(listener.getsockname(), timeout=1)
+                probe.close()
             finally:
                 httpd.server_close()
         finally:

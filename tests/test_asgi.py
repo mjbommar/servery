@@ -164,7 +164,8 @@ class ListenerAdoptionTest(unittest.TestCase):
                 self.assertIn(b"200 OK", response)
                 self.assertTrue(response.endswith(b"asgi GET / "), response)
             self.assertGreaterEqual(listener.fileno(), 0)
-            self.assertTrue(listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
+            probe = socket.create_connection(listener.getsockname(), timeout=1)
+            probe.close()
         finally:
             listener.close()
 
