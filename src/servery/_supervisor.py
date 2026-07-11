@@ -64,8 +64,14 @@ def _send_status(status: Connection, message: tuple[str, int, str]) -> None:
 
 def _control_lost(liveness: Connection) -> bool:
     """Return true when the supervisor's write-only control end is gone."""
-    if not liveness.poll():
-        return False
+    try:
+        if not liveness.poll():
+            return False
+    except (BrokenPipeError, EOFError, OSError):
+        # POSIX poll() marks the read end ready and recv_bytes() observes EOF.
+        # Windows' named-pipe poll can report the same state directly as
+        # ERROR_BROKEN_PIPE instead.
+        return True
     with contextlib.suppress(EOFError, OSError):
         # The parent never writes application data. Treat either EOF or an
         # unexpected control byte as a conservative shutdown request.

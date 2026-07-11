@@ -424,7 +424,8 @@ class SelectorPrototypeTest(unittest.TestCase):
                 _digest.field_value("sha-256", original).encode(),
             )
 
-        asyncio.run(replacement_case())
+        if os.name != "nt":
+            asyncio.run(replacement_case())
 
         path.write_bytes(original)
 
@@ -605,6 +606,7 @@ class SelectorPrototypeTest(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    @unittest.skipIf(os.name == "nt", "Windows cannot replace an open file")
     def test_compression_keeps_opened_identity_across_atomic_replacement(self) -> None:
         path = self.root / "replace-compressed.txt"
         original = b"original compressed identity\n" * 2000
@@ -1125,6 +1127,7 @@ class SelectorPrototypeTest(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    @unittest.skipIf(os.name == "nt", "Windows cannot replace an open file")
     def test_opened_identity_survives_atomic_path_replacement(self) -> None:
         path = self.root / "replace.txt"
         path.write_bytes(b"original")

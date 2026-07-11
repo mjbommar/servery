@@ -217,6 +217,10 @@ All notable changes to servery are documented here. The format follows
 
 ### Fixed
 
+- Listener adoption, supervisor parent-loss detection, and idle HTTP/2 drain now
+  use portable macOS and Windows semantics. This keeps multi-worker startup and
+  finite shutdown working across the supported platform matrix while preserving
+  the stricter listener validation where the operating system exposes it.
 - SPA fallback now revalidates containment of the root `index.html`. A symlinked
   fallback index can no longer serve a target outside the configured root.
 - HTTP/1.1 now rejects missing, duplicate, or invalid `Host` fields with `400`

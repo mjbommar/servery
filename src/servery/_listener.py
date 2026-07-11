@@ -74,10 +74,16 @@ def adopt_tcp_listener(listener: socket.socket, *, host: str) -> socket.socket:
         )
     if listener.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM:
         raise ValueError("listener must be a TCP stream socket")
-    if hasattr(socket, "SO_ACCEPTCONN") and not listener.getsockopt(
-        socket.SOL_SOCKET, socket.SO_ACCEPTCONN
-    ):
-        raise ValueError("listener socket must already be listening")
+    if hasattr(socket, "SO_ACCEPTCONN"):
+        try:
+            accepting = listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+        except OSError:
+            # macOS arm64 exposes SO_ACCEPTCONN but may reject the query with
+            # ENOPROTOOPT.  There is no non-mutating portable replacement;
+            # getsockname() below still validates the socket descriptor.
+            accepting = None
+        if accepting == 0:
+            raise ValueError("listener socket must already be listening")
     # getsockname() also rejects descriptors that are not usable sockets on
     # platforms where SO_ACCEPTCONN is unavailable.
     listener.getsockname()

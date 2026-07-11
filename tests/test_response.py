@@ -8,6 +8,7 @@ can't drift.
 from __future__ import annotations
 
 import gzip
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -195,6 +196,7 @@ class HeaderAndBuildTest(unittest.TestCase):
             body.close()
             self.assertNotIn(b"vary", _headers_dict(headers))
 
+    @unittest.skipIf(os.name == "nt", "Windows cannot replace an open file")
     def test_streaming_body_keeps_the_validated_open_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp, "asset.bin")

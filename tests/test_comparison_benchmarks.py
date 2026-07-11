@@ -158,7 +158,7 @@ class ComparisonHarnessTest(unittest.TestCase):
                 {"pid": 101, "cpu_ticks": 50},
             ]
         }
-        with mock.patch("scripts.compare_servers.os.sysconf", return_value=100):
+        with mock.patch("scripts.compare_servers.os.sysconf", return_value=100, create=True):
             cpu = process_tree_cpu(before, after, 0.25)
         self.assertEqual(cpu["cpu_seconds"], 0.5)
         self.assertEqual(cpu["average_cores"], 2.0)

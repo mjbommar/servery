@@ -552,6 +552,11 @@ class SupervisorUnitTests(unittest.TestCase):
         self.assertTrue(_supervisor._control_lost(liveness))
         liveness.recv_bytes.assert_called_once_with()
 
+        # Windows named-pipe poll reports a closed write end as ERROR_BROKEN_PIPE
+        # instead of readiness followed by EOF from recv_bytes().
+        liveness.poll.side_effect = BrokenPipeError
+        self.assertTrue(_supervisor._control_lost(liveness))
+
         stop = threading.Event()
         stop.set()
         self.assertTrue(_supervisor._shutdown_requested(stop, liveness, timeout=0))
@@ -573,7 +578,7 @@ class SupervisorUnitTests(unittest.TestCase):
 
         with (
             mock.patch.object(_supervisor.os, "name", "posix"),
-            mock.patch.object(_supervisor.os, "setsid", side_effect=OSError),
+            mock.patch.object(_supervisor.os, "setsid", side_effect=OSError, create=True),
         ):
             _supervisor._isolate_process_tree()
         with mock.patch.object(_supervisor.os, "name", "nt"):
@@ -779,7 +784,7 @@ class SupervisorUnitTests(unittest.TestCase):
         worker = _supervisor._Worker(1, process, mock.Mock(), None, None, None)
         with (
             mock.patch.object(_supervisor.os, "name", "posix"),
-            mock.patch.object(_supervisor.os, "killpg", side_effect=OSError),
+            mock.patch.object(_supervisor.os, "killpg", side_effect=OSError, create=True),
         ):
             _supervisor.Supervisor._signal_tree(worker, kill=False)
         process.terminate.assert_called_once_with()
@@ -787,7 +792,9 @@ class SupervisorUnitTests(unittest.TestCase):
         process.reset_mock()
         with (
             mock.patch.object(_supervisor.os, "name", "posix"),
-            mock.patch.object(_supervisor.os, "killpg", side_effect=ProcessLookupError),
+            mock.patch.object(
+                _supervisor.os, "killpg", side_effect=ProcessLookupError, create=True
+            ),
         ):
             _supervisor.Supervisor._signal_tree(worker, kill=False)
         process.terminate.assert_called_once_with()

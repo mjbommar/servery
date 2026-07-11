@@ -153,10 +153,12 @@ class H2Connection:
         if idle:
             # Wake read1() after the terminal control frame is on the wire.  An
             # idle H2 connection has no accepted work that could require further
-            # client WINDOW_UPDATE frames.
+            # client WINDOW_UPDATE frames.  SHUT_RD is sufficient to interrupt a
+            # socket read on POSIX, but not reliably a buffered makefile() read on
+            # Windows; the completed sendall keeps GOAWAY ordered before SHUT_RDWR.
             self.running = False
             with contextlib.suppress(OSError):
-                self.sock.shutdown(socket.SHUT_RD)
+                self.sock.shutdown(socket.SHUT_RDWR)
 
     def _read_exact(self, count: int) -> bytes:
         chunks: list[bytes] = []

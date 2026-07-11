@@ -174,24 +174,15 @@ def resolve_scenario_expectation(scenario: Scenario, corpus: Path) -> Scenario:
     if fixture is None:
         raise ValueError(f"unknown expected fixture: {scenario.expected_fixture}")
     directory_name, display = fixture
-    previous_timezone = os.environ.get("TZ")
-    os.environ["TZ"] = "UTC"
-    time.tzset()
-    try:
-        body = listing.render(
-            str(corpus / directory_name),
-            display,
-            show_hidden=False,
-            per_page=1000,
-            max_entries=100_000,
-            details_threshold=10_000,
-        )
-    finally:
-        if previous_timezone is None:
-            os.environ.pop("TZ", None)
-        else:
-            os.environ["TZ"] = previous_timezone
-        time.tzset()
+    body = listing.render(
+        str(corpus / directory_name),
+        display,
+        show_hidden=False,
+        per_page=1000,
+        max_entries=100_000,
+        details_threshold=10_000,
+        utc_timestamps=True,
+    )
     return replace(
         scenario,
         expected_length=len(body),
@@ -1751,7 +1742,7 @@ def process_tree_cpu(
     )
     try:
         ticks_per_second = os.sysconf("SC_CLK_TCK")
-    except (OSError, ValueError):
+    except (AttributeError, OSError, ValueError):
         return {"cpu_seconds": None, "average_cores": None}
     cpu_seconds = delta_ticks / ticks_per_second
     return {"cpu_seconds": cpu_seconds, "average_cores": cpu_seconds / wall_s}

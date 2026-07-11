@@ -239,6 +239,7 @@ class ReprDigestServerTest(_ServerCase):
         self.assertIn(b"content-encoding", head.lower())
         self.assertIsNone(self._digest_line(head))
 
+    @unittest.skipIf(os.name == "nt", "Windows cannot replace an open file")
     def test_digest_and_body_survive_atomic_path_replacement_as_one_identity(self):
         original_open = _static.open_file
         replaced = False

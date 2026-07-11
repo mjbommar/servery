@@ -156,10 +156,17 @@ def _format_minute(minute: int) -> str:
     return f"{tm.tm_year:04d}-{tm.tm_mon:02d}-{tm.tm_mday:02d} {tm.tm_hour:02d}:{tm.tm_min:02d}"
 
 
-def _format_mtime(ts: float) -> str:
+@functools.lru_cache(maxsize=2048)
+def _format_utc_minute(minute: int) -> str:
+    tm = time.gmtime(minute * 60)
+    return f"{tm.tm_year:04d}-{tm.tm_mon:02d}-{tm.tm_mday:02d} {tm.tm_hour:02d}:{tm.tm_min:02d}"
+
+
+def _format_mtime(ts: float, *, utc: bool = False) -> str:
     # The display is minute-granular, so cache by whole minute: a directory of files
     # written together (an unpacked archive, a sync) collapses to one localtime call.
-    return _format_minute(int(ts // 60))
+    minute = int(ts // 60)
+    return _format_utc_minute(minute) if utc else _format_minute(minute)
 
 
 def _relative_time(ts: float, now: float) -> str:
@@ -563,7 +570,7 @@ def _facets(entries: list[EntryInfo], ext: str, base: dict[str, str]) -> str:
     return '<nav class="facets" aria-label="Filter by type">' + "".join(chips) + "</nav>"
 
 
-def _metrics(entries: list[EntryInfo], now: float) -> str:
+def _metrics(entries: list[EntryInfo], now: float, *, utc: bool = False) -> str:
     files = [e for e in entries if not e.is_dir]
     dirs = sum(1 for e in entries if e.is_dir)
     total_size = sum(e.size or 0 for e in files)
@@ -582,13 +589,13 @@ def _metrics(entries: list[EntryInfo], now: float) -> str:
     if mtimes:
         newest = max(mtimes)
         items.append(
-            f'<span title="{_format_mtime(newest)}">newest '
+            f'<span title="{_format_mtime(newest, utc=utc)}">newest '
             f"<b>{_relative_time(newest, now)}</b></span>"
         )
     return '<div class="metrics">' + " ".join(items) + "</div>"
 
 
-def _timeline_svg(entries: list[EntryInfo]) -> str:
+def _timeline_svg(entries: list[EntryInfo], *, utc: bool = False) -> str:
     """A pure-SVG histogram of entry modification times (no JS, CSP-safe)."""
     mtimes = sorted(e.mtime for e in entries if e.mtime is not None)
     if len(mtimes) < 2:
@@ -616,7 +623,7 @@ def _timeline_svg(entries: list[EntryInfo]) -> str:
         height = (count / peak) * (view_h - 2)
         x = i * bar_w
         y = view_h - height
-        start = _format_mtime(lo + (span * i / buckets))
+        start = _format_mtime(lo + (span * i / buckets), utc=utc)
         rects.append(
             f'<rect x="{x:.2f}" y="{y:.2f}" width="{bar_w - 0.6:.2f}" height="{height:.2f}">'
             f"<title>{count} item(s) · around {start}</title></rect>"
@@ -625,8 +632,8 @@ def _timeline_svg(entries: list[EntryInfo]) -> str:
         '<figure class="timeline">'
         f'<svg viewBox="0 0 {view_w:.0f} {view_h:.0f}" preserveAspectRatio="none" '
         'role="img" aria-label="Modification activity over time">' + "".join(rects) + "</svg>"
-        f"<figcaption>Modified ({_format_mtime(lo)}) "
-        f"\N{RIGHTWARDS ARROW} ({_format_mtime(hi)})</figcaption>"
+        f"<figcaption>Modified ({_format_mtime(lo, utc=utc)}) "
+        f"\N{RIGHTWARDS ARROW} ({_format_mtime(hi, utc=utc)})</figcaption>"
         "</figure>"
     )
 
@@ -654,7 +661,7 @@ def _pager(page: int, total_pages: int, total: int, per_page: int, base: dict[st
     )
 
 
-def _row(entry: EntryInfo, max_size: int, now: float) -> str:
+def _row(entry: EntryInfo, max_size: int, now: float, *, utc: bool = False) -> str:
     suffix = "/" if entry.is_dir else ""
     # Escape the name ONCE and reuse it everywhere (link text, checkbox value, aria
     # label). html.escape("/") == "/", so the escaped display is just esc_name +
@@ -685,7 +692,8 @@ def _row(entry: EntryInfo, max_size: int, now: float) -> str:
         mtime_cell = ""
     else:
         mtime_cell = (
-            f'<span title="{_format_mtime(entry.mtime)}">{_relative_time(entry.mtime, now)}</span>'
+            f'<span title="{_format_mtime(entry.mtime, utc=utc)}">'
+            f"{_relative_time(entry.mtime, now)}</span>"
         )
 
     # A checkbox (associated with the footer #zipform via the HTML5 form= attribute,
@@ -722,6 +730,7 @@ def render(
     upload: bool = False,
     max_entries: int = _MAX_SCAN_ENTRIES,
     details_threshold: int = _MAX_SCAN_ENTRIES,
+    utc_timestamps: bool = False,
 ) -> bytes:
     """Render a directory listing page as UTF-8 bytes.
 
@@ -730,7 +739,9 @@ def render(
     ``asc``/``desc``, ``query`` is a case-insensitive name filter, and ``ext``
     restricts to a single file extension. ``page``/``per_page`` paginate the
     rows (``per_page=0`` shows everything). ``theme`` is ``auto``/``light``/
-    ``dark``. Raises ``OSError`` if the directory cannot be scanned.
+    ``dark``. ``utc_timestamps`` is intended for reproducible generated fixtures;
+    normal served listings retain local-time display. Raises ``OSError`` if the
+    directory cannot be scanned.
     """
     now = time.time()
     scanned, truncated = _scan_with_status(
@@ -773,7 +784,7 @@ def render(
             '\N{UPWARDS ARROW}</span><a href="../">../</a></td>'
             '<td class="size">\N{EM DASH}</td><td></td></tr>'
         )
-    rows.extend(_row(e, max_size, now) for e in visible)
+    rows.extend(_row(e, max_size, now, utc=utc_timestamps) for e in visible)
 
     if not visible:
         if query or ext:
@@ -796,8 +807,8 @@ def render(
         search_value=html.escape(query, quote=True),
         notice=(f'<p class="notice">{" ".join(notices)}</p>' if notices else ""),
         facets="" if details_limited else _facets(filtered, ext, base),
-        metrics="" if details_limited else _metrics(filtered, now),
-        timeline="" if details_limited else _timeline_svg(filtered),
+        metrics="" if details_limited else _metrics(filtered, now, utc=utc_timestamps),
+        timeline="" if details_limited else _timeline_svg(filtered, utc=utc_timestamps),
         name_header=_sort_link("Name", "N", sort, order, base),
         size_header=_sort_link("Size", "S", sort, order, base),
         mtime_header=_sort_link("Modified", "M", sort, order, base),

@@ -1121,7 +1121,8 @@ class ListenerAdoptionTest(unittest.TestCase):
             self.assertEqual(httpd.server_address, listener.getsockname())
             httpd.server_close()
             self.assertGreaterEqual(listener.fileno(), 0)
-            self.assertTrue(listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
+            probe = socket.create_connection(listener.getsockname(), timeout=1)
+            probe.close()
         finally:
             listener.close()
 
@@ -1148,6 +1149,10 @@ class ListenerAdoptionTest(unittest.TestCase):
         listener = socket.socket()
         try:
             listener.bind(("127.0.0.1", 0))
+            try:
+                listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+            except OSError:
+                self.skipTest("platform cannot query SO_ACCEPTCONN")
             with self.assertRaisesRegex(ValueError, "already be listening"):
                 make_server(self._config(), listener=listener)
             self.assertGreaterEqual(listener.fileno(), 0)
