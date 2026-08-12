@@ -6,6 +6,7 @@ ctypes binding actually computes correct, interoperable AEAD.
 
 import unittest
 import unittest.mock
+from pathlib import Path
 
 from servery import _oscrypto
 
@@ -82,7 +83,7 @@ class DarwinLibcryptoTest(unittest.TestCase):
         real = "/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib"
         with (
             unittest.mock.patch("sys.platform", "darwin"),
-            unittest.mock.patch("pathlib.Path.exists", lambda self: str(self) == real),
+            unittest.mock.patch("pathlib.Path.exists", lambda self: self == Path(real)),
         ):
             self.assertEqual(_oscrypto._resolve_library(), real)
 
