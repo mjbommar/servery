@@ -124,7 +124,7 @@ jobs:
         run: uv run --python 3.14 python scripts/check_zero_deps.py
       - name: Validate distribution metadata
         run: uvx twine check dist/*
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
           path: dist/
@@ -180,7 +180,7 @@ jobs:
             --artifact dist/servery.py --expected-version "$version"
           uv run --python 3.14 --no-default-groups python scripts/smoke_installed.py \
             --artifact dist/servery.pyz --expected-version "$version"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bundles
           path: |

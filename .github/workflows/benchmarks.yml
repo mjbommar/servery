@@ -31,7 +31,7 @@ jobs:
           enable-cache: true
           python-version: "3.13"
       - run: scripts/run_benchmarks.sh --http3
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: servery-performance-${{ github.run_id }}
           path: benchmarks/artifacts/
@@ -54,7 +54,7 @@ jobs:
           uv run python scripts/compare_servers.py
           --duration 5 --warmup 1 --trials 3
           --json benchmarks/artifacts/external-comparison.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: servery-external-comparison-${{ github.run_id }}
           path: benchmarks/artifacts/external-comparison.json
