@@ -17,8 +17,22 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import sys
 import threading
 from ctypes import c_char_p, c_int, c_void_p
+from pathlib import Path
+
+# macOS ships an OpenSSL *shim* at /usr/lib/libcrypto.dylib. Loading it through
+# ctypes makes the system print "is loading libcrypto in an unsafe way" and then
+# abort(3) the process — SIGABRT, which no ``except`` can catch, so probing it
+# and falling back is not an option: the check itself has to refuse the path.
+# A real OpenSSL installed alongside (Homebrew, MacPorts) loads fine.
+_DARWIN_SYSTEM_PREFIX = "/usr/lib/"
+_DARWIN_CANDIDATES = (
+    "/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib",  # Homebrew, Apple Silicon
+    "/usr/local/opt/openssl@3/lib/libcrypto.dylib",  # Homebrew, Intel
+    "/opt/local/lib/libcrypto.dylib",  # MacPorts
+)
 
 _GCM_SET_IVLEN = 0x9
 _GCM_GET_TAG = 0x10
@@ -40,6 +54,32 @@ _lib: ctypes.CDLL | None = None
 _lock = threading.Lock()
 
 
+def is_darwin_system_libcrypto(path: str | None) -> bool:
+    """True when ``path`` is macOS's system libcrypto, which aborts on load."""
+    return bool(path) and path.startswith(_DARWIN_SYSTEM_PREFIX)
+
+
+def _resolve_library() -> str:
+    """The libcrypto to load, or raise if only an unloadable one is present.
+
+    On macOS the system shim must never be handed to ``CDLL`` (see above), so a
+    real OpenSSL is looked for first and the shim is rejected outright rather
+    than tried. Everywhere else this is the usual ``find_library`` lookup.
+    """
+    if sys.platform == "darwin":
+        for candidate in _DARWIN_CANDIDATES:
+            if Path(candidate).exists():
+                return candidate
+        found = ctypes.util.find_library("crypto")
+        if is_darwin_system_libcrypto(found) or not found:
+            raise CryptoUnavailableError(
+                "macOS's system libcrypto aborts the process when loaded via "
+                "ctypes; install a real OpenSSL (e.g. `brew install openssl@3`)"
+            )
+        return found
+    return ctypes.util.find_library("crypto") or "libcrypto.so"
+
+
 def _libcrypto() -> ctypes.CDLL:
     global _lib
     if _lib is not None:
@@ -47,7 +87,7 @@ def _libcrypto() -> ctypes.CDLL:
     with _lock:  # configure once even under free-threading
         if _lib is not None:  # pragma: no cover - lost the init race
             return _lib
-        name = ctypes.util.find_library("crypto") or "libcrypto.so"
+        name = _resolve_library()
         try:
             lib = ctypes.CDLL(name)
         except OSError as exc:  # pragma: no cover - platform without OpenSSL
