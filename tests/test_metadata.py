@@ -87,6 +87,19 @@ class MarkdownTest(ExtractorTestCase):
     def test_setext_heading_fallback(self):
         self.assertEqual(self.meta("p.md", "Setext\n======\n").title, "Setext")
 
+    def test_crlf_line_endings(self):
+        # A document authored on Windows must not lose its title: the extractors
+        # match line structure with re.MULTILINE, where "$" leaves the \r behind.
+        self.assertEqual(self.meta("crlf.md", b"Setext\r\n======\r\n").title, "Setext")
+        self.assertEqual(self.meta("atx.md", b"# Heading\r\n\r\nBody.\r\n").title, "Heading")
+        self.assertEqual(
+            self.meta("fm.md", b"---\r\ntitle: From CRLF\r\n---\r\n\r\nBody.\r\n").title,
+            "From CRLF",
+        )
+
+    def test_cr_only_line_endings(self):
+        self.assertEqual(self.meta("cr.md", b"Setext\r======\r").title, "Setext")
+
     def test_description_skips_badges_and_markup(self):
         meta = self.meta("p.md", "# T\n\nSome **bold** and a [link](https://x.example/).\n")
         self.assertEqual(meta.description, "Some bold and a link.")

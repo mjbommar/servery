@@ -114,10 +114,14 @@ def modes_for(kind: str) -> tuple[str, ...]:
 
 
 def _decode(data: bytes) -> str | None:
-    """Decode file bytes as text, or ``None`` when they are clearly binary."""
+    """Decode file bytes as text, or ``None`` when they are clearly binary.
+
+    Newlines are normalized to ``\\n`` so a CRLF file does not render with a
+    stray carriage return at the end of every highlighted line.
+    """
     if b"\x00" in data[:8192]:
         return None
-    return data.decode("utf-8", "replace")
+    return data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _source_view(text: str, name: str) -> str:

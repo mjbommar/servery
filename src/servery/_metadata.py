@@ -200,7 +200,14 @@ def _merge(primary: Meta, fallback: Meta) -> Meta:
 
 
 def _text(data: bytes) -> str:
-    return data.decode("utf-8", "replace")
+    """Decode file bytes as text with newlines normalized to ``\\n``.
+
+    Every extractor below matches line structure with ``re.MULTILINE``, where
+    ``$`` sits *before* the ``\\n`` and so leaves a CRLF file's ``\\r`` inside the
+    match. Normalizing once here keeps a document authored on Windows (or with
+    old-Mac ``\\r`` endings) from silently losing its title.
+    """
+    return data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _counts(text: str, truncated: bool) -> tuple[tuple[str, str], ...]:

@@ -6,6 +6,7 @@ Both features are opt-in, so the gating tests (nothing happens without
 
 import http.client
 import json
+import os
 import struct
 import tempfile
 import threading
@@ -219,6 +220,12 @@ class PreviewRenderTest(RenderTestCase):
         self.assertNotIn("<img src=x", page)  # inert, escaped text — never a tag
         self.assertIn("&lt;img src=x onerror=y&gt;", page)
 
+    def test_crlf_source_renders_without_stray_carriage_returns(self):
+        page = self.render("crlf.py", b"x = 1\r\ny = 2\r\n")
+        self.assertNotIn("\r", page)
+        self.assertIn('<span class="n">1</span>', page)
+
+    @unittest.skipIf(os.name == "nt", "< and > are illegal in Windows filenames")
     def test_hostile_filename_is_escaped_in_the_page(self):
         page = self.render("a<b>&.md", "# hi\n")
         self.assertNotIn("<b>&", page)
