@@ -29,6 +29,8 @@ Several views are driven by query parameters (so they're shareable links):
 | `?q=report` | filter the listing to names containing `report` |
 | `?ext=pdf` | filter to a file-type facet |
 | `?page=2` | paginate large directories |
+| `?meta=author:ada` | filter by extracted metadata (needs `--metadata`) |
+| `?metadata=1` | the directory as a JSON metadata index (needs `--metadata`) |
 
 If a folder contains an `index.html` (or `index.htm`), servery serves that instead
 of the listing — the same as a normal web server.
@@ -38,6 +40,9 @@ of the listing — the same as a normal web server.
 - Click any file to view it inline (correct `Content-Type`).
 - The **↓** affordance on each row, or appending **`?download=1`**, forces a
   *Save as…* dialog (`Content-Disposition: attachment`).
+- With `--preview`, **`?preview=1`** renders the file instead — Markdown as HTML,
+  source syntax-highlighted, CSV as a table. See
+  [Preview & metadata](preview.md).
 - Downloads support **HTTP `Range`** — large files resume, and media seeks work —
   with strong `ETag`s and the full conditional-request ladder
   (`If-None-Match` / `If-Modified-Since` → `304`). Transfers use zero-copy

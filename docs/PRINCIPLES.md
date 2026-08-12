@@ -53,10 +53,17 @@ once" exception for the default install.
 The zero-dep mandate has real, sharp consequences. We name them up front so
 nobody re-litigates them later:
 
-- **No Markdown rendering.** The stdlib has no Markdown parser. So
-  README-as-rendered-HTML (a thing miniserve does) is out of scope. The most we
-  will do is serve/show README files as **escaped plaintext**. We will not
-  vendor or reimplement a Markdown parser to close this gap.
+- **No *full-fidelity* Markdown or syntax highlighting.** The stdlib has no
+  Markdown parser and no lexer library, so servery will never match CommonMark
+  or Pygments — and it will not vendor either to try. What it *does* ship (since
+  v1.7, behind `--preview`) is a small in-house **subset**: `servery._markdown`
+  covers the common block and inline constructs and escapes all raw HTML;
+  `servery._highlight` tokenizes Python with the stdlib's own `tokenize` and
+  everything else with a bounded per-language scanner. This is option 2 of the
+  rule above — *scope the feature down to the part that is reachable with the
+  stdlib, and document the boundary* — the same call already made for the QR
+  encoder (`_qr.py`), HPACK (`http2/hpack.py`), and RSA/DER (`_certgen.py`).
+  A GFM-exact renderer is still **out**.
 - **No `cgi` / `cgi.FieldStorage` for uploads.** The `cgi` module was **removed
   in Python 3.13**. Since we target 3.13+ (see §3), `cgi` is simply not
   available to us, and we would not use it even on older interpreters. Therefore
@@ -323,8 +330,10 @@ Worked examples:
 - *HTTPS* → stdlib (`ssl`, `ThreadingHTTPSServer`) ✅ → **in**.
 - *Range requests* → stdlib ✅, file-server-lane ✅ (stdlib lacks it; we add it)
   → **in**.
-- *Markdown README rendering* → needs a non-stdlib parser ✗ → **out** (escaped
-  plaintext at most).
+- *Markdown rendering / syntax highlighting* → a **conformant** one needs a
+  non-stdlib parser ✗ → **out**; a bounded in-house **subset** is stdlib-only ✅,
+  file-server-lane ✅ (looking inside a file you are about to download), safe *if*
+  opt-in + escaped + URL-allowlisted ✅ → **in, opt-in** (`--preview`, v1.7).
 - *User-defined routes / app endpoints* → framework-lane ✗ → **out**.
 - *Built-in TLS via a vendored crypto lib* → dependency ✗ → **out** (use stdlib
   `ssl`; that's the only TLS we ship).

@@ -10,13 +10,13 @@ from servery import listing
 
 class HumanSizeTest(unittest.TestCase):
     def test_bytes(self):
-        self.assertEqual(listing._human_size(0), "0 B")
-        self.assertEqual(listing._human_size(512), "512 B")
+        self.assertEqual(listing.human_size(0), "0 B")
+        self.assertEqual(listing.human_size(512), "512 B")
 
     def test_scaled(self):
-        self.assertEqual(listing._human_size(1024), "1.0 KiB")
-        self.assertEqual(listing._human_size(1536), "1.5 KiB")
-        self.assertEqual(listing._human_size(1048576), "1.0 MiB")
+        self.assertEqual(listing.human_size(1024), "1.0 KiB")
+        self.assertEqual(listing.human_size(1536), "1.5 KiB")
+        self.assertEqual(listing.human_size(1048576), "1.0 MiB")
 
 
 class HelperTest(unittest.TestCase):

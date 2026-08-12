@@ -6,6 +6,55 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-12
+
+### Added
+
+- **File preview (`--preview`), opt-in.** `GET /notes.md?preview=1` renders a
+  self-contained HTML page *around* a file instead of sending its bytes: Markdown
+  rendered to HTML, source code syntax-highlighted with line numbers, Jupyter
+  notebooks (markdown cells rendered, code cells highlighted, text outputs shown),
+  JSON re-indented, CSV/TSV as a real table, and images/audio/video inline with
+  native controls. `?preview=source` forces the highlighted-source view, so a
+  Markdown file can be read either way; the page carries a Rendered/Source toggle,
+  Raw and Download buttons, and a breadcrumb. Anything else gets an honest "binary
+  file" card, as does a file over `--preview-max-bytes` (default 2 MiB). Still no
+  JavaScript, and still zero dependencies.
+  - The **Markdown renderer** (`servery._markdown`) is an in-house CommonMark
+    *subset*: headings, fenced/indented code, lists (incl. task lists),
+    blockquotes, GFM tables, thematic breaks, reference links, front matter, and
+    the usual inline set. **Raw HTML is escaped, never passed through**, and
+    link/image URLs must pass a scheme allowlist, so `javascript:`/`data:` cannot
+    survive; the preview page's CSP is a second wall behind that. This reverses a
+    long-standing "maybe-never" in `docs/ROADMAP.md` — the same call already made
+    for the pure-stdlib QR encoder and HPACK: write a bounded implementation
+    in-house rather than take a dependency, and document the boundary.
+  - The **highlighter** (`servery._highlight`) tokenizes Python with the stdlib's
+    own `tokenize` (so f-strings and soft keywords are exactly right) and covers
+    ~35 other languages — C/C++/C#/Java/Go/Rust/Swift/Kotlin/JS/TS, shell, SQL,
+    Ruby/Perl/Lua/R/Julia, HTML/XML, CSS, LaTeX/BibTeX, YAML, TOML/INI, JSON,
+    Markdown, reStructuredText, diff, Makefile, Dockerfile, Lisp, Haskell — with a
+    single-pass scanner whose quantifiers are all possessive, so a pathological
+    file cannot trigger catastrophic backtracking.
+- **Document metadata (`--metadata`), opt-in.** servery reads *inside* files
+  (bounded, never executing anything) and normalizes what it finds — Markdown
+  YAML/TOML front matter, Python module docstrings and `__author__`/`__version__`
+  (via `ast`), LaTeX `\title{}`/`\author{}`, HTML `<title>`/`<meta>`, PEP 621 and
+  Cargo project fields, `package.json`, notebook kernels, CSV headers,
+  reStructuredText docinfo, image dimensions (PNG/JPEG/GIF/WebP/BMP/SVG), MP3
+  ID3v2 tags, and PDF Info entries. That powers:
+  - a **Title/Author column** in the directory listing, with `?C=T` / `?C=A` sorts;
+  - **filtering** by `?meta=author:lovelace` (or `?meta=tag:draft`, or a bare
+    `?meta=word` that searches every field), plus clickable tag chips;
+  - **extraction** as JSON — `?metadata=1` on a file returns that file's record,
+    and on a directory returns an index of every entry, so the share is scriptable
+    with `curl … | jq`.
+  - Reads are capped at `--metadata-max-bytes` (default 64 KiB) per file and cached
+    on `(path, mtime, size)`, so re-sorting a large directory costs no I/O. A
+    corrupt or hostile file yields an empty record rather than an error.
+- Both features are **off unless asked for**, cost nothing when off, and — like
+  sorting, filtering, and archive download — are HTTP/1.1 features; the buffered
+  HTTP/2 and HTTP/3 backends still serve plain files and listings.
 ## [1.6.0] - 2026-07-11
 
 ### Changed
@@ -770,7 +819,8 @@ First stable release. A zero-dependency, pure-Python HTTP file server.
 - **Free-threading** support (3.13t/3.14t), full type hints (`ty`-checked), and a
   CI gate that enforces zero runtime dependencies in the core wheel.
 
-[Unreleased]: https://github.com/mjbommar/servery/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/mjbommar/servery/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/mjbommar/servery/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/mjbommar/servery/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/mjbommar/servery/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/mjbommar/servery/compare/v1.3.2...v1.4.0

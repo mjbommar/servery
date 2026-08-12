@@ -96,6 +96,10 @@ class Config:
     tftp_port: int = 69
     tftp_write: bool = False  # allow anonymous TFTP writes (WRQ); requires tftp
     max_tftp_transfers: int = 32
+    preview: bool = False  # serve ?preview= render pages (markdown/code/table/media)
+    preview_max_bytes: int = 2 * 1024 * 1024  # largest file the preview will read
+    metadata: bool = False  # extract document metadata; enables ?metadata= and meta columns
+    metadata_max_bytes: int = 64 * 1024  # per-file read budget for extraction
 
     @property
     def cache_control(self) -> str:
@@ -245,6 +249,10 @@ class Config:
         tftp_port: int = 69,
         tftp_write: bool = False,
         max_tftp_transfers: int = 32,
+        preview: bool = False,
+        preview_max_bytes: int = 2 * 1024 * 1024,
+        metadata: bool = False,
+        metadata_max_bytes: int = 64 * 1024,
     ) -> Config:
         """Build a Config, resolving ``directory`` to an absolute path."""
         proxy_routes = _parse_proxy_routes(proxy or [])
@@ -270,6 +278,10 @@ class Config:
             raise ValueError("--partial-upload-ttl must be >= 0 seconds")
         if max_partial_uploads < 0:
             raise ValueError("--max-partial-uploads must be >= 0")
+        if preview_max_bytes <= 0:
+            raise ValueError("--preview-max-bytes must be a positive number of bytes")
+        if metadata_max_bytes <= 0:
+            raise ValueError("--metadata-max-bytes must be a positive number of bytes")
         if timeout <= 0:
             raise ValueError("--timeout must be a positive number of seconds")
         if keepalive_timeout is not None and keepalive_timeout <= 0:
@@ -489,6 +501,10 @@ class Config:
             tftp_port=tftp_port,
             tftp_write=tftp_write,
             max_tftp_transfers=max_tftp_transfers,
+            preview=preview,
+            preview_max_bytes=preview_max_bytes,
+            metadata=metadata,
+            metadata_max_bytes=metadata_max_bytes,
         )
 
 

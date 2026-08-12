@@ -126,6 +126,14 @@ def _copy_n(
 
 _content_disposition = _static.content_disposition
 
+# Query-flag values that mean "off", so ?preview=0 does not enable the preview.
+_FALSEY = frozenset(("0", "false", "no", "off", ""))
+
+
+def _enabled(values: list[str] | None) -> bool:
+    """True when a query flag is present with a value that isn't explicitly off."""
+    return bool(values) and values[0].lower() not in _FALSEY
+
 
 class _ChunkedWriter:
     """Wrap ``wfile`` to emit HTTP/1.1 chunked transfer-encoding."""
@@ -165,6 +173,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     _body_remaining: int | None = None
     _body_offset: int = 0
     _generated_page: bool = False
+    _csp: str | None = None  # per-response CSP override (the preview page widens it)
     _vary_accept_encoding: bool = False  # emit Vary: Accept-Encoding (compressible resource)
     _access_status: int | str = "-"  # captured per response for the access log
     _access_size: int | str = "-"
@@ -424,15 +433,25 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         self._body_remaining = None
         self._body_offset = 0
         self._generated_page = False
+        self._csp = None
         self._vary_accept_encoding = False
         if not self._authorized():
             return None
         path = self.translate_path(self.path)
         if os.path.isdir(path):
             return self._serve_directory(path)
+        # Opt-in ?preview= / ?metadata= views. Both flags are off by default, so
+        # the common path pays two attribute reads and no parsing at all. Only an
+        # existing regular file is claimed here, so the view can never shadow the
+        # --spa fallback or turn a plain 404 into a different one.
+        config = self._server.config
+        if (config.preview or config.metadata) and "?" in self.path and os.path.isfile(path):
+            handled, body = self._serve_view(path)
+            if handled:
+                return body
         # Check the (rare) SPA flag first so the os.path.exists() stat is skipped
         # entirely on the common, non-SPA path.
-        if self._server.config.spa and not os.path.exists(path):
+        if config.spa and not os.path.exists(path):
             index = _static.find_contained_index(
                 self._server.root_real,
                 self._server.root_real,
@@ -459,6 +478,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         selected = query.get("sel")  # checkboxes from the listing -> zip of those entries
         if selected:
             return self._serve_selection(path, selected)
+        # ?metadata=1 on a directory: the whole index as JSON (opt-in --metadata).
+        if self._server.config.metadata and _enabled(query.get("metadata")):
+            return self._serve_directory_metadata(path, parts.path)
         # Index lookup goes through the SAME containment check as everything else:
         # an index.html symlinked outside the root must not be served.
         index = _static.find_contained_index(self._server.root_real, path, self.index_pages)
@@ -1161,27 +1183,52 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
     def list_directory(self, path: str | os.PathLike[str]) -> io.BytesIO | None:
         self._generated_page = True
+        config = self._server.config
         options = listing.request_options(self.path, self.headers.get("Cookie"))
+        meta_query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get(
+            "meta", [""]
+        )[0]
         try:
             body = listing.render(
                 os.fspath(path),
                 options.display,
-                show_hidden=self._server.config.show_hidden,
+                show_hidden=config.show_hidden,
                 sort=options.sort,
                 order=options.order,
                 query=options.query,
                 ext=options.ext,
                 page=options.page,
-                per_page=self._server.config.listing_page_size,
+                per_page=config.listing_page_size,
                 theme=options.theme,
-                upload=self._server.config.upload,
-                max_entries=self._server.config.max_listing_entries,
-                details_threshold=self._server.config.listing_details_threshold,
+                upload=config.upload,
+                max_entries=config.max_listing_entries,
+                details_threshold=config.listing_details_threshold,
+                metadata=config.metadata,
+                meta_query=meta_query,
+                meta_max_bytes=config.metadata_max_bytes,
+                preview=config.preview,
             )
         except OSError:
             self.send_error(HTTPStatus.NOT_FOUND, "No permission to list directory")
             return None
-        # The listing is generated HTML — always compressible (and Vary-keyed).
+        return self._send_generated(
+            body,
+            "text/html; charset=utf-8",
+            theme=options.theme if options.set_theme_cookie else None,
+        )
+
+    def _send_generated(
+        self,
+        body: bytes,
+        content_type: str,
+        *,
+        csp: str | None = None,
+        theme: str | None = None,
+    ) -> io.BytesIO:
+        """Send a servery-generated page: negotiated coding, CSP, optional theme cookie."""
+        self._generated_page = True
+        self._csp = csp
+        # Generated pages are text — always compressible (and Vary-keyed).
         self._vary_accept_encoding = True
         encoding = _compress.negotiate(
             self.headers.get("Accept-Encoding", ""), enabled=self._server.config.compress
@@ -1189,18 +1236,80 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if encoding is not None:
             body = _compress.encode(body, encoding)
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         if encoding is not None:
             self.send_header("Content-Encoding", encoding)
         self.send_header("Content-Length", str(len(body)))
-        if options.set_theme_cookie:
+        if theme is not None:
             # Lax + one-year; the value is one of three literals so it is safe.
             self.send_header(
                 "Set-Cookie",
-                f"servery_theme={options.theme}; Path=/; Max-Age=31536000; SameSite=Lax",
+                f"servery_theme={theme}; Path=/; Max-Age=31536000; SameSite=Lax",
             )
         self.end_headers()
         return io.BytesIO(body)
+
+    # --- preview / metadata views (opt-in) -------------------------------
+
+    def _serve_view(self, path: str) -> tuple[bool, io.BytesIO | None]:
+        """Dispatch a file's ``?preview=`` / ``?metadata=`` view; (handled, body)."""
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        config = self._server.config
+        if config.metadata and _enabled(params.get("metadata")):
+            return True, self._serve_file_metadata(path)
+        if config.preview and _enabled(params.get("preview")):
+            return True, self._serve_preview(path, params.get("preview", [""])[0])
+        return False, None
+
+    def _serve_preview(self, path: str, mode: str) -> io.BytesIO | None:
+        from servery import _preview
+
+        config = self._server.config
+        display = urllib.parse.unquote(
+            urllib.parse.urlsplit(self.path).path, errors="surrogatepass"
+        )
+        try:
+            body = _preview.render(
+                path,
+                display,
+                mode=mode if mode in ("render", "source") else "",
+                max_bytes=config.preview_max_bytes,
+                theme=listing.request_options(self.path, self.headers.get("Cookie")).theme,
+                metadata=config.metadata,
+                metadata_max_bytes=config.metadata_max_bytes,
+            )
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+            return None
+        return self._send_generated(body, "text/html; charset=utf-8", csp=_preview.CSP)
+
+    def _serve_file_metadata(self, path: str) -> io.BytesIO | None:
+        from servery import _metadata
+
+        display = urllib.parse.unquote(
+            urllib.parse.urlsplit(self.path).path, errors="surrogatepass"
+        )
+        document = _metadata.describe(
+            path, display, max_bytes=self._server.config.metadata_max_bytes
+        )
+        return self._send_generated(_metadata.to_json(document), "application/json; charset=utf-8")
+
+    def _serve_directory_metadata(self, path: str, url_path: str) -> io.BytesIO | None:
+        from servery import _metadata
+
+        config = self._server.config
+        display = urllib.parse.unquote(url_path, errors="surrogatepass")
+        try:
+            document = _metadata.describe_directory(
+                path,
+                display,
+                show_hidden=config.show_hidden,
+                max_bytes=config.metadata_max_bytes,
+            )
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND, "No permission to list directory")
+            return None
+        return self._send_generated(_metadata.to_json(document), "application/json; charset=utf-8")
 
     # --- universal response shaping -------------------------------------
 
@@ -1226,7 +1335,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             # only on servery-generated HTML; HSTS only over TLS.
             self.send_header("X-Content-Type-Options", "nosniff")
             if self._generated_page:
-                self.send_header("Content-Security-Policy", _static.GENERATED_CSP)
+                self.send_header("Content-Security-Policy", self._csp or _static.GENERATED_CSP)
                 self.send_header("Referrer-Policy", "no-referrer")
             if isinstance(self.connection, ssl.SSLSocket):
                 self.send_header("Strict-Transport-Security", "max-age=63072000")
@@ -1263,6 +1372,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
 
     def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
         self._generated_page = True  # the error body is generated HTML
+        self._csp = None  # never inherit a widened policy from an earlier response
         super().send_error(code, message, explain)
 
     def do_OPTIONS(self) -> None:

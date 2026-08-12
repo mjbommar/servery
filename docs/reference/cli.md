@@ -86,6 +86,17 @@ Run `servery --help` for the same list inline, or `servery --version`.
 
 → [Sharing on a LAN](../guide/lan.md)
 
+## Preview & metadata (opt-in)
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--preview` | off | render files at `?preview=1`: Markdown as HTML, source syntax-highlighted, CSV as a table, media inline |
+| `--preview-max-bytes BYTES` | 2 MiB | largest file `--preview` will read |
+| `--metadata` | off | extract document metadata: adds a listing column, `?meta=` filters, title/author sorts, and `?metadata=1` JSON |
+| `--metadata-max-bytes BYTES` | 64 KiB | per-file read budget for extraction |
+
+→ [Preview & metadata](../guide/preview.md)
+
 ## Web behaviors
 
 | Flag | Default | Description |

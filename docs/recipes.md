@@ -70,6 +70,32 @@ Append to any directory URL:
 Or tick a few files and hit **zip selected**.
 → [Serving files](guide/serving.md#download-a-whole-folder-as-an-archive)
 
+## Read the docs folder in the browser instead of downloading it
+
+```bash
+servery ./docs --preview
+```
+
+Every file gets a **🔍** link: Markdown renders as HTML, source is
+syntax-highlighted, CSV becomes a table. `?preview=source` reads any of them raw.
+→ [Preview & metadata](guide/preview.md)
+
+## Find the note I wrote — I only remember the author
+
+```bash
+servery ./notes --metadata
+```
+
+Then browse to `?meta=author:lovelace`, or sort the new Title/Author column. To
+script it instead of clicking:
+
+```bash
+curl -s 'http://localhost:8000/?metadata=1' |
+  jq -r '.entries[] | select(.metadata.author? // "" | test("lovelace"; "i")) | .path'
+```
+
+→ [Preview & metadata](guide/preview.md#filter)
+
 ## Run a local API behind the same origin as my files
 
 ```bash

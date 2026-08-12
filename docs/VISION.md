@@ -150,9 +150,11 @@ servery will **not**:
 - Add **third-party dependencies to the default/core install**. A narrowly
   scoped opt-in transport extra must justify its dependency and native-code
   surface under `PRINCIPLES.md`.
-- Render **arbitrary Markdown**. The stdlib has no Markdown parser, so README
-  rendering is out of scope beyond, at most, escaped plaintext. We will not
-  vendor a parser to get there.
+- Render Markdown **to GFM fidelity**, or highlight code to Pygments' breadth.
+  The stdlib gives us neither a Markdown parser nor a lexer library, and we will
+  not vendor one. The opt-in `--preview` renderer is a deliberate *subset* —
+  enough to read a README or a source file in the browser, honestly documented
+  as such in `PRINCIPLES.md`, and never on by default.
 - Be a **WebDAV server, an S3 gateway, a media transcoder, a sync engine, or a
   general reverse proxy.** Those are different products.
 - Pursue **multi-user accounts, roles, sessions, or a database.** Auth is a

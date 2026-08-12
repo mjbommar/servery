@@ -133,7 +133,8 @@ known-first-party = ["servery"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PERF"]
 # The listing module embeds an HTML/CSS template; its lines are data, not code.
-"src/servery/listing.py" = ["E501"]
+# It also joins metadata paths at the os level, matching the handler's model.
+"src/servery/listing.py" = ["E501", "PTH118"]
 # The handler deliberately works at the os.path level: its security model uses an
 # empty-string sentinel for escaped paths, and Path("") resolves to the cwd. It
 # also mirrors the stdlib send_head "close-on-error then re-raise" idiom.
@@ -154,6 +155,10 @@ known-first-party = ["servery"]
 "src/servery/cgi.py" = ["N802", "PTH"]
 # The extractor works at the os path level (realpath containment by design).
 "src/servery/_extract.py" = ["PTH"]
+# Metadata extraction and the preview renderer read files by the same os-level
+# path the handler already resolved and containment-checked; pathlib adds nothing.
+"src/servery/_metadata.py" = ["PTH"]
+"src/servery/_preview.py" = ["PTH"]
 # Resumable PUT manipulates string paths + atomic os.replace (shared model with
 # upload.py); pathlib does not improve safety here.
 "src/servery/_resumable.py" = ["PTH"]

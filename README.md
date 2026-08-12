@@ -36,6 +36,7 @@ $ servery                                  # serve the current directory on http
 $ python -m servery ./public --port 9000
 $ servery --upload --auth me:secret        # password-protected drop box
 $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
+$ servery ./docs --preview --metadata       # render Markdown/code; index by title
 ```
 
 ## Features
@@ -45,6 +46,16 @@ $ servery --tls-cert cert.pem --tls-key key.pem --http2   # HTTPS + HTTP/2
   breadcrumb trail, per-type icons, relative timestamps, inline size bars, an aggregate metrics
   strip, a pure-SVG modification timeline, per-file download (`?download=1`), pagination, and a
   cookie-backed light/dark/auto theme — all server-side with **no JavaScript**.
+- **File preview, opt-in** — `--preview` adds `?preview=1`: **Markdown rendered to HTML**,
+  source code **syntax-highlighted** (Python via the stdlib's own `tokenize`, plus ~35 more —
+  C/Rust/Go/JS/TS, LaTeX, SQL, YAML, HTML…), notebooks, JSON re-indented, CSV as a table,
+  and images/audio/video inline. `?preview=source` reads any of them as highlighted source
+  instead. Zero dependencies, no JavaScript, raw HTML always escaped.
+- **Document metadata, opt-in** — `--metadata` reads *inside* files (bounded, nothing
+  executed): front matter, Python docstrings + `__version__`, LaTeX `\title{}`, HTML
+  `<title>`, PEP 621 fields, image dimensions, ID3, PDF Info. Adds a Title/Author column,
+  `?meta=author:ada` / `?meta=tag:draft` filters, title/author sorting, and **`?metadata=1`
+  JSON** for a file or a whole directory (`curl … | jq`).
 - **Correct downloads** — RFC 9110 `Range`/`206` (resumable), strong `ETag`s, the full
   conditional-request ladder (`If-None-Match`/`If-Modified-Since`/`If-Range` → `304`/`412`),
   and zero-copy `sendfile`. Opt-in **RFC 9530 integrity digests** — send

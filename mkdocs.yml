@@ -75,6 +75,7 @@ nav:
   - Getting started: getting-started.md
   - Guide:
       - Serving files: guide/serving.md
+      - Preview & metadata: guide/preview.md
       - Uploads & authentication: guide/uploads.md
       - HTTPS & certificates: guide/https.md
       - Sharing on a LAN: guide/lan.md

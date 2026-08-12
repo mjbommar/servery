@@ -271,6 +271,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum children returned by WebDAV PROPFIND Depth:1 (default: 10000)",
     )
     parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="enable ?preview=1 render pages: Markdown as HTML, source syntax-highlighted, "
+        "CSV as a table, notebooks, and inline images/audio/video (off by default)",
+    )
+    parser.add_argument(
+        "--preview-max-bytes",
+        type=int,
+        default=2 * 1024 * 1024,
+        metavar="BYTES",
+        help="largest file --preview will read and render (default: 2 MiB)",
+    )
+    parser.add_argument(
+        "--metadata",
+        action="store_true",
+        help="extract document metadata (front matter, docstrings, LaTeX/HTML titles, "
+        "image size, ID3, PDF info): adds a listing column, ?meta= filters, title/author "
+        "sorting, and a ?metadata=1 JSON view (off by default)",
+    )
+    parser.add_argument(
+        "--metadata-max-bytes",
+        type=int,
+        default=64 * 1024,
+        metavar="BYTES",
+        help="per-file read budget for --metadata extraction (default: 64 KiB)",
+    )
+    parser.add_argument(
         "--qr",
         action="store_true",
         help="print a scannable QR code of the LAN URL on startup",
@@ -659,6 +686,10 @@ def config_from_args(args: argparse.Namespace) -> Config:
         tftp_port=args.tftp_port,
         tftp_write=args.tftp_write,
         max_tftp_transfers=args.max_tftp_transfers,
+        preview=args.preview,
+        preview_max_bytes=args.preview_max_bytes,
+        metadata=args.metadata,
+        metadata_max_bytes=args.metadata_max_bytes,
     )
 
 

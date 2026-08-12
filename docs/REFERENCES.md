@@ -114,7 +114,7 @@ Legend: ● yes · ◐ partial/limited · ○ no · — n/a.
 | Gzip response compression | ● | ○ | ○ | ○ | ○ | ○ | ● | ◐ | ◐ |
 | QR code | ✗ not zero-dep | ○ | ○ | ○ | ○ | ○ | ● | ○ | ○ |
 | Themes (light/dark) | ● | ◐ (color-scheme) | ○ | ○ | ○ | ○ | ● | ○ | ○ |
-| README markdown render | ✗/◐ subset | ○ | ○ | ○ | ○ | ○ | ● | ○ | ○ |
+| README markdown render | ◐ subset (`--preview`) | ○ | ○ | ○ | ○ | ○ | ● | ○ | ○ |
 | WebDAV | ◐ defer | ○ | ○ | ○ | ○ | ○ | ● (read-only) | ○ | ○ |
 | **Language** | Python | Python | Python | Python | Python | Python | Rust | Node | Node |
 | **Zero third-party deps** | **● (goal)** | ● | ● (vendors `cgi`) | ● | ● | ● | n/a | ○ | ○ |
@@ -196,8 +196,9 @@ Full feature list with zero-dep feasibility tags:
 - **SPA** (`--spa`), `--index`, `--pretty-urls` (`/about`→`about.html`). **[zero-dep feasible]** —
   fallback in the handler.
 - **README render** (`--readme`, GitHub-style markdown; plaintext for `README`/`README.txt`).
-  **[NOT zero-dep for full markdown]** — stdlib has no markdown parser. Plaintext `<pre>` path is
-  trivial; a reduced in-house subset renderer is possible but not GFM-fidelity.
+  **[NOT zero-dep for full markdown]** — stdlib has no markdown parser. **Shipped as the reduced
+  in-house subset** this line predicted: `servery/_markdown.py` behind `--preview`, plus a
+  stdlib-only syntax highlighter. Not GFM-fidelity, and documented as such.
 - **Auth:** Basic, **hashed SHA-256/SHA-512**, multiple users (`-a`/`--auth-file`), optional blank
   pw. **[zero-dep feasible]** — `base64` + `hashlib` + `hmac.compare_digest`. This is exact parity
   (miniserve uses raw SHA-256/512, not bcrypt/argon2).

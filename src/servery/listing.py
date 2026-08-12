@@ -38,9 +38,21 @@ _UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
 # the server (the full list is sorted, faceted, and metric'd before pagination).
 _MAX_SCAN_ENTRIES: int = 100_000
 
-# Canonical sort name -> Apache column code, and the reverse.
-_SORT_TO_CODE = {"name": "N", "size": "S", "date": "M"}
+# Canonical sort name -> Apache column code, and the reverse. T/A are servery's
+# own additions for the opt-in metadata column (Apache has no equivalent).
+_SORT_TO_CODE = {"name": "N", "size": "S", "date": "M", "title": "T", "author": "A"}
 _CODE_TO_SORT = {code: name for name, code in _SORT_TO_CODE.items()}
+
+# Sorts that need extracted metadata; they fall back to name when it is off.
+_META_SORTS = frozenset(("title", "author"))
+
+# Ceiling on how many files one listing will extract metadata from. Only reached
+# when a metadata sort or filter forces a whole-directory pass — the default view
+# extracts for the visible page only, so it is bounded by ``per_page``.
+_MAX_META_ENTRIES: int = 5_000
+
+# How many metadata tag chips to offer, most common first.
+_MAX_TAG_FACETS = 10
 
 # Rows per page before pagination kicks in. 0 disables it (used by callers that
 # want the whole listing at once, e.g. the tests).
@@ -137,7 +149,7 @@ def _quote_name(name: str) -> str:
     return urllib.parse.quote(name, errors="surrogatepass")
 
 
-def _human_size(num: int) -> str:
+def human_size(num: int) -> str:
     value = float(num)
     for unit in _UNITS:
         if value < 1024.0 or unit == _UNITS[-1]:
@@ -436,22 +448,46 @@ def _scan_with_status(
     return entries, truncated
 
 
-def _key_func(sort: str) -> Callable[[EntryInfo], Any]:
+def _key_func(sort: str, metas: dict[str, Any]) -> Callable[[EntryInfo], Any]:
     if sort == "size":
         return lambda e: e.size or 0
     if sort == "date":
         return lambda e: e.mtime or 0.0
+    if sort in _META_SORTS:
+        # "￿" sorts last: files with no extracted value sink to the bottom
+        # of an ascending sort instead of crowding the top as empty strings.
+        def key(entry: EntryInfo) -> Any:
+            meta = metas.get(entry.name)
+            value = meta.field(sort).lower() if meta is not None else ""
+            return value or "￿"
+
+        return key
     return lambda e: e.name.lower()
 
 
-def _sorted(entries: list[EntryInfo], sort: str, order: str) -> list[EntryInfo]:
-    result = sorted(entries, key=_key_func(sort), reverse=(order == "desc"))
+def _sorted(
+    entries: list[EntryInfo], sort: str, order: str, metas: dict[str, Any]
+) -> list[EntryInfo]:
+    result = sorted(entries, key=_key_func(sort, metas), reverse=(order == "desc"))
     # Stable second pass keeps directories first regardless of the column/order.
     result.sort(key=lambda e: not e.is_dir)
     return result
 
 
-def _filter(entries: list[EntryInfo], query: str, ext: str) -> list[EntryInfo]:
+def parse_meta_query(query: str) -> tuple[str, str]:
+    """Split ``?meta=`` into ``(field, needle)``; an unknown field searches all."""
+    from servery import _metadata
+
+    field, separator, value = query.partition(":")
+    name = field.strip().lower()
+    if separator and name in _metadata.FIELDS:
+        return name, value.strip().lower()
+    return "", query.strip().lower()
+
+
+def _filter(
+    entries: list[EntryInfo], query: str, ext: str, meta_query: str, metas: dict[str, Any]
+) -> list[EntryInfo]:
     if query:
         needle = query.lower()
         entries = [e for e in entries if needle in e.name.lower()]
@@ -459,13 +495,47 @@ def _filter(entries: list[EntryInfo], query: str, ext: str) -> list[EntryInfo]:
         # Directories are kept so navigation still works while a type filter is on.
         wanted = ext.lower()
         entries = [e for e in entries if e.is_dir or _extension(e.name) == wanted]
+    if meta_query:
+        field, needle = parse_meta_query(meta_query)
+        if needle:
+            entries = [
+                e for e in entries if e.is_dir or _meta_matches(metas, e.name, field, needle)
+            ]
     return entries
+
+
+def _extract_metadata(
+    metas: dict[str, Any], fs_dir: str, entries: list[EntryInfo], max_bytes: int
+) -> None:
+    """Fill ``metas`` for the file entries of ``entries`` (cached; bounded)."""
+    from servery import _metadata
+
+    for entry in entries:
+        if entry.is_dir or entry.name in metas:
+            continue
+        if len(metas) >= _MAX_META_ENTRIES:
+            _log.logger.warning(
+                "metadata extraction capped at %d entries: %s", _MAX_META_ENTRIES, fs_dir
+            )
+            return
+        metas[entry.name] = _metadata.for_file(
+            os.path.join(fs_dir, entry.name), max_bytes=max_bytes
+        )
+
+
+def _meta_matches(metas: dict[str, Any], name: str, field: str, needle: str) -> bool:
+    meta = metas.get(name)
+    if meta is None:
+        return False
+    return needle in (meta.field(field).lower() if field else meta.haystack())
 
 
 # --- small HTML fragment helpers -----------------------------------------
 
 
-def _state_params(sort: str, order: str, query: str, ext: str, page: int) -> dict[str, str]:
+def _state_params(
+    sort: str, order: str, query: str, ext: str, page: int, meta_query: str = ""
+) -> dict[str, str]:
     """The current non-default listing state, as URL params to preserve in links."""
     params: dict[str, str] = {}
     code = _SORT_TO_CODE.get(sort, "N")
@@ -477,6 +547,8 @@ def _state_params(sort: str, order: str, query: str, ext: str, page: int) -> dic
         params["q"] = query
     if ext:
         params["ext"] = ext
+    if meta_query:
+        params["meta"] = meta_query
     if page > 1:
         params["page"] = str(page)
     return params
@@ -521,7 +593,7 @@ def _aria_sort(code: str, sort: str, order: str) -> str:
     return ' aria-sort="ascending"' if order == "asc" else ' aria-sort="descending"'
 
 
-def _breadcrumb(display_path: str) -> str:
+def breadcrumb(display_path: str) -> str:
     """A clickable trail of absolute directory links ending in the current dir."""
     segments = [s for s in display_path.split("/") if s]
     crumbs = [f'<a href="/" title="Root">{html.escape("\N{HOUSE BUILDING}")}</a>']
@@ -570,6 +642,40 @@ def _facets(entries: list[EntryInfo], ext: str, base: dict[str, str]) -> str:
     return '<nav class="facets" aria-label="Filter by type">' + "".join(chips) + "</nav>"
 
 
+def _tag_facets(
+    entries: list[EntryInfo], metas: dict[str, Any], meta_query: str, base: dict[str, str]
+) -> str:
+    """Clickable chips for the tags/keywords found in this directory's metadata."""
+    counts: dict[str, int] = {}
+    for entry in entries:
+        meta = metas.get(entry.name)
+        if meta is None:
+            continue
+        for tag in meta.tags:
+            counts[tag] = counts.get(tag, 0) + 1
+    if not counts:
+        return ""
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:_MAX_TAG_FACETS]
+    active_tag = ""
+    if meta_query:
+        field, needle = parse_meta_query(meta_query)
+        if field == "tag":
+            active_tag = needle
+    chips = []
+    for name, count in ranked:
+        selected = name.lower() == active_tag
+        target = None if selected else f"tag:{name}"
+        cls = ' class="active"' if selected else ""
+        href = _href(base, meta=target, page=None)
+        chips.append(f'<a{cls} href="{href}">#{html.escape(name)} <b>{count}</b></a>')
+    return (
+        '<nav class="facets tags" aria-label="Filter by tag">'
+        + '<span class="label">tags</span>'
+        + "".join(chips)
+        + "</nav>"
+    )
+
+
 def _metrics(entries: list[EntryInfo], now: float, *, utc: bool = False) -> str:
     files = [e for e in entries if not e.is_dir]
     dirs = sum(1 for e in entries if e.is_dir)
@@ -580,12 +686,12 @@ def _metrics(entries: list[EntryInfo], now: float, *, utc: bool = False) -> str:
     items = [
         f"<span><b>{len(files)}</b> file(s)</span>",
         f"<span><b>{dirs}</b> dir(s)</span>",
-        f"<span><b>{_human_size(total_size)}</b> total</span>",
+        f"<span><b>{human_size(total_size)}</b> total</span>",
     ]
     if largest:
         # Aggregates only — never a filename, so the strip can't reorder relative
         # to the table rows (the listing's directories-first contract).
-        items.append(f"<span>largest <b>{_human_size(largest)}</b></span>")
+        items.append(f"<span>largest <b>{human_size(largest)}</b></span>")
     if mtimes:
         newest = max(mtimes)
         items.append(
@@ -661,7 +767,56 @@ def _pager(page: int, total_pages: int, total: int, per_page: int, base: dict[st
     )
 
 
-def _row(entry: EntryInfo, max_size: int, now: float, *, utc: bool = False) -> str:
+def _head_row(sort: str, order: str, base: dict[str, str], *, metadata: bool) -> str:
+    """The sortable table header, with the metadata column only when enabled."""
+    cells = [
+        '<th class="pick"></th>',
+        f'<th class="name"{_aria_sort("N", sort, order)}>'
+        f"{_sort_link('Name', 'N', sort, order, base)}</th>",
+    ]
+    if metadata:
+        cells.append(
+            f'<th class="meta"{_aria_sort("T", sort, order)}>'
+            f"{_sort_link('Title', 'T', sort, order, base)}"
+            f' <span class="alt">/ {_sort_link("Author", "A", sort, order, base)}</span></th>'
+        )
+    cells.append(
+        f'<th class="size"{_aria_sort("S", sort, order)}>'
+        f"{_sort_link('Size', 'S', sort, order, base)}</th>"
+    )
+    cells.append(
+        f'<th class="mtime"{_aria_sort("M", sort, order)}>'
+        f"{_sort_link('Modified', 'M', sort, order, base)}</th>"
+    )
+    return "<thead><tr>" + "".join(cells) + "</tr></thead>"
+
+
+def _meta_cell(meta: Any) -> str:
+    """The metadata column for one row: title, with author/description beneath."""
+    if meta is None or not meta:
+        return '<td class="meta"></td>'
+    title = html.escape(meta.title) if meta.title else ""
+    secondary = meta.author or meta.description
+    parts = []
+    if title:
+        parts.append(f'<span class="mt">{title}</span>')
+    if secondary:
+        parts.append(f'<span class="ms">{html.escape(secondary)}</span>')
+    if not parts and meta.tags:
+        parts.append(f'<span class="ms">{html.escape(", ".join(meta.tags))}</span>')
+    return f'<td class="meta">{"".join(parts)}</td>'
+
+
+def _row(
+    entry: EntryInfo,
+    max_size: int,
+    now: float,
+    *,
+    utc: bool = False,
+    meta: Any = None,
+    show_meta: bool = False,
+    previewable: Callable[[str], bool] | None = None,
+) -> str:
     suffix = "/" if entry.is_dir else ""
     # Escape the name ONCE and reuse it everywhere (link text, checkbox value, aria
     # label). html.escape("/") == "/", so the escaped display is just esc_name +
@@ -678,6 +833,9 @@ def _row(entry: EntryInfo, max_size: int, now: float, *, utc: bool = False) -> s
     if entry.is_symlink:
         name_cell += ' <span class="sym">\N{RIGHTWARDS ARROW}</span>'
     if not entry.is_dir:
+        if previewable is not None and previewable(entry.name):
+            view = quoted + "?preview=1"
+            name_cell += f'<a class="dl" href="{view}" title="Preview">\N{LEFT-POINTING MAGNIFYING GLASS}</a>'
         dl = quoted + "?download=1"
         name_cell += f'<a class="dl" href="{dl}" download title="Download">\N{DOWNWARDS ARROW}</a>'
 
@@ -686,7 +844,7 @@ def _row(entry: EntryInfo, max_size: int, now: float, *, utc: bool = False) -> s
     else:
         pct = max(2, round(entry.size / max_size * 100)) if (max_size and entry.size) else 0
         bar = f'<span class="bar" style="width:{pct}%" aria-hidden="true"></span>' if pct else ""
-        size_cell = f'<span class="num">{_human_size(entry.size)}</span>{bar}'
+        size_cell = f'<span class="num">{human_size(entry.size)}</span>{bar}'
 
     if entry.mtime is None:
         mtime_cell = ""
@@ -702,8 +860,9 @@ def _row(entry: EntryInfo, max_size: int, now: float, *, utc: bool = False) -> s
         f'<td class="pick"><input type="checkbox" name="sel" form="zipform" '
         f'value="{esc_name}" aria-label="Select {esc_display}"></td>'
     )
+    meta_cell = _meta_cell(meta) if show_meta else ""
     return (
-        f'<tr>{pick}<td class="name">{name_cell}</td>'
+        f'<tr>{pick}<td class="name">{name_cell}</td>{meta_cell}'
         f'<td class="size">{size_cell}</td><td class="mtime">{mtime_cell}</td></tr>'
     )
 
@@ -731,17 +890,27 @@ def render(
     max_entries: int = _MAX_SCAN_ENTRIES,
     details_threshold: int = _MAX_SCAN_ENTRIES,
     utc_timestamps: bool = False,
+    metadata: bool = False,
+    meta_query: str = "",
+    meta_max_bytes: int = 65536,
+    preview: bool = False,
 ) -> bytes:
     """Render a directory listing page as UTF-8 bytes.
 
     ``fs_dir`` is the filesystem directory; ``display_path`` is the decoded URL
-    path. ``sort`` is one of ``name``/``size``/``date``, ``order`` is
-    ``asc``/``desc``, ``query`` is a case-insensitive name filter, and ``ext``
-    restricts to a single file extension. ``page``/``per_page`` paginate the
-    rows (``per_page=0`` shows everything). ``theme`` is ``auto``/``light``/
-    ``dark``. ``utc_timestamps`` is intended for reproducible generated fixtures;
-    normal served listings retain local-time display. Raises ``OSError`` if the
-    directory cannot be scanned.
+    path. ``sort`` is one of ``name``/``size``/``date`` (plus ``title``/``author``
+    when ``metadata`` is on), ``order`` is ``asc``/``desc``, ``query`` is a
+    case-insensitive name filter, and ``ext`` restricts to a single file
+    extension. ``page``/``per_page`` paginate the rows (``per_page=0`` shows
+    everything). ``theme`` is ``auto``/``light``/``dark``. ``utc_timestamps`` is
+    intended for reproducible generated fixtures; normal served listings retain
+    local-time display.
+
+    With ``metadata`` on, each file's extracted document metadata adds a column,
+    the ``?meta=field:value`` filter, tag chips, and the title/author sorts;
+    with ``preview`` on, each previewable file gets a per-row preview link. Both
+    are opt-in (``--metadata`` / ``--preview``) and cost nothing when off.
+    Raises ``OSError`` if the directory cannot be scanned.
     """
     now = time.time()
     scanned, truncated = _scan_with_status(
@@ -751,10 +920,32 @@ def render(
         details_threshold=details_threshold,
     )
     details_limited = len(scanned) > details_threshold
-    filtered = _filter(scanned, query, ext)
+    if details_limited:
+        # Past the details threshold the listing already drops size/date sorting,
+        # facets, metrics, and the timeline. Reading inside every file is far more
+        # expensive than any of those, so metadata switches off with them.
+        metadata = False
+    if not metadata and sort in _META_SORTS:
+        sort = "name"  # the metadata columns do not exist without --metadata
+
+    metas: dict[str, Any] = {}
+    # Sorting or filtering by metadata has to look at the whole directory;
+    # otherwise only the rows actually shown are extracted (see below), so the
+    # default view's cost is bounded by the page size, not the directory size.
+    whole_directory = metadata and (bool(meta_query) or sort in _META_SORTS)
+    if whole_directory:
+        _extract_metadata(metas, fs_dir, scanned, meta_max_bytes)
+
+    previewable: Callable[[str], bool] | None = None
+    if preview:
+        from servery import _preview
+
+        previewable = _preview.previewable
+
+    filtered = _filter(scanned, query, ext, meta_query if metadata else "", metas)
     if details_limited and sort in {"size", "date"}:
         sort = "name"
-    entries = _sorted(filtered, sort, order)
+    entries = _sorted(filtered, sort, order, metas)
     total = len(entries)
     max_size = max((e.size or 0 for e in entries if not e.is_dir), default=0)
 
@@ -767,7 +958,12 @@ def render(
         page = 1
         visible = entries
 
-    base = _state_params(sort, order, query, ext, page)
+    if metadata and not whole_directory:
+        _extract_metadata(metas, fs_dir, visible, meta_max_bytes)
+
+    base = _state_params(sort, order, query, ext, page, meta_query if metadata else "")
+    columns = 5 if metadata else 4
+    blank_meta = '<td class="meta"></td>' if metadata else ""
     notices: list[str] = []
     if truncated:
         notices.append(f"Listing limited to the first {max_entries:,} entries.")
@@ -781,40 +977,51 @@ def render(
     if display_path != "/" and page == 1:
         rows.append(
             '<tr><td class="pick"></td><td class="name"><span class="icon" aria-hidden="true">'
-            '\N{UPWARDS ARROW}</span><a href="../">../</a></td>'
+            f'\N{UPWARDS ARROW}</span><a href="../">../</a></td>{blank_meta}'
             '<td class="size">\N{EM DASH}</td><td></td></tr>'
         )
-    rows.extend(_row(e, max_size, now, utc=utc_timestamps) for e in visible)
+    rows.extend(
+        _row(
+            e,
+            max_size,
+            now,
+            utc=utc_timestamps,
+            meta=metas.get(e.name),
+            show_meta=metadata,
+            previewable=previewable,
+        )
+        for e in visible
+    )
 
     if not visible:
-        if query or ext:
-            clear = _href(base, q=None, ext=None, page=None)
+        if query or ext or (metadata and meta_query):
+            clear = _href(base, q=None, ext=None, meta=None, page=None)
             empty = (
-                '<tr><td class="empty" colspan="4">No items match the current filter. '
+                f'<tr><td class="empty" colspan="{columns}">No items match the current filter. '
                 f'<a href="{clear}">Clear filters</a></td></tr>'
             )
         else:
-            empty = '<tr><td class="empty" colspan="4">This directory is empty.</td></tr>'
+            empty = f'<tr><td class="empty" colspan="{columns}">This directory is empty.</td></tr>'
         rows.append(empty)
 
     document = _TEMPLATE.format(
         style=_CSS,
         data_theme=html.escape(theme, quote=True),
-        breadcrumb=_breadcrumb(display_path),
+        breadcrumb=breadcrumb(display_path),
         theme_links=_theme_links(theme, base),
         heading=html.escape(display_path),
         upload_form=_UPLOAD_FORM if upload else "",
         search_value=html.escape(query, quote=True),
         notice=(f'<p class="notice">{" ".join(notices)}</p>' if notices else ""),
-        facets="" if details_limited else _facets(filtered, ext, base),
+        facets=""
+        if details_limited
+        else (
+            _facets(filtered, ext, base)
+            + (_tag_facets(filtered, metas, meta_query, base) if metadata else "")
+        ),
         metrics="" if details_limited else _metrics(filtered, now, utc=utc_timestamps),
         timeline="" if details_limited else _timeline_svg(filtered, utc=utc_timestamps),
-        name_header=_sort_link("Name", "N", sort, order, base),
-        size_header=_sort_link("Size", "S", sort, order, base),
-        mtime_header=_sort_link("Modified", "M", sort, order, base),
-        name_aria=_aria_sort("N", sort, order),
-        size_aria=_aria_sort("S", sort, order),
-        mtime_aria=_aria_sort("M", sort, order),
+        head_row=_head_row(sort, order, base, metadata=metadata),
         rows="\n".join(rows),
         pager=_pager(page, total_pages, total, per_page, base),
         count=total,
@@ -850,6 +1057,13 @@ nav.facets a.active { background: var(--accent); border-color: var(--accent); co
   opacity: 1; }
 nav.facets a b { font-weight: 600; opacity: 0.7; }
 nav.facets a.active b { opacity: 0.85; }
+nav.facets.tags .label { align-self: center; opacity: 0.5; text-transform: uppercase;
+  letter-spacing: 0.05em; font-size: 0.7rem; }
+td.meta { max-width: 22rem; font-size: 0.85rem; }
+td.meta .mt { display: block; overflow-wrap: anywhere; }
+td.meta .ms { display: block; opacity: 0.6; font-size: 0.92em; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+th.meta .alt { font-weight: inherit; opacity: 0.55; }
 .metrics { display: flex; flex-wrap: wrap; gap: 0.4rem 1.1rem; margin: 0.6rem 0;
   font-size: 0.82rem; opacity: 0.85; }
 .metrics b { font-weight: 600; }
@@ -920,9 +1134,7 @@ aria-label="Filter">
 {metrics}
 {timeline}
 <table>
-<thead><tr><th class="pick"></th><th class="name"{name_aria}>{name_header}</th>\
-<th class="size"{size_aria}>{size_header}</th>\
-<th class="mtime"{mtime_aria}>{mtime_header}</th></tr></thead>
+{head_row}
 <tbody>
 {rows}
 </tbody>

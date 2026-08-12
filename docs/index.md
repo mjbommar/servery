@@ -31,6 +31,7 @@ $ servery ./public --port 9000
 $ servery --upload --auth me:secret        # password-protected drop box
 $ servery --acme example.com               # automatic, browser-trusted HTTPS
 $ servery --dav --dav-write --auth me:s3cret  # mount it as a network drive
+$ servery ./docs --preview --metadata      # render Markdown/code; index by title
 ```
 
 ## Why servery?
@@ -51,7 +52,8 @@ $ servery --dav --dav-write --auth me:s3cret  # mount it as a network drive
     ---
 
     Listings, uploads, auth, HTTPS, ACME, WebDAV, gzip, ranges, archives, CORS, SPA,
-    HTTP/2 — the things `python -m http.server` makes you go without.
+    HTTP/2 — plus opt-in Markdown/code preview and metadata search — the things
+    `python -m http.server` makes you go without.
 
     [:octicons-arrow-right-24: Getting started](getting-started.md)
 

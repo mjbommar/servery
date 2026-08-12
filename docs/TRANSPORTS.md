@@ -347,9 +347,10 @@ boundaries are explicit:
   (path safety, listing, range, auth, upload) stays in the single handler
   pipeline. Adding a transport must never become adding a route table, middleware
   chain, or plugin API (`PRINCIPLES.md` §2).
-- **Still genuinely out (unchanged):** Markdown rendering, app routes, vendored
-  parsers — these fail the scope rubric for reasons that have nothing to do with
-  transports (`PRINCIPLES.md` §7).
+- **Still genuinely out (unchanged):** app routes and vendored parsers — these
+  fail the scope rubric for reasons that have nothing to do with transports
+  (`PRINCIPLES.md` §7). (Markdown rendering landed in v1.7 as a bounded in-house
+  *subset* behind `--preview`; GFM fidelity remains out.)
 
 ---
 

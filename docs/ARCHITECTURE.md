@@ -128,6 +128,10 @@ servery/
 │       ├── upload.py         # do_POST body: multipart streaming parser → temp → os.replace
 │       ├── archive.py        # on-the-fly zip / tar.gz of a directory streamed to wfile
 │       ├── listing.py        # directory → sorted entries → HTML (inline templates + ?C=&O= sort scheme)
+│       ├── _preview.py       # opt-in ?preview= page: dispatch by kind, chrome + CSS (--preview)
+│       ├── _markdown.py      # in-house CommonMark SUBSET → HTML; raw HTML escaped, URL schemes allowlisted
+│       ├── _highlight.py     # syntax highlighting: stdlib tokenize for Python, a bounded scanner for ~35 more
+│       ├── _metadata.py      # bounded document-metadata extraction + ?metadata=1 JSON views (--metadata)
 │       ├── _oscrypto.py      # ctypes bindings to OS crypto (libssl/libcrypto / CNG) — opt-in transport use only
 │       ├── http3.py          # optional HTTP/3 backend (aioquic, the servery[http3] extra); Http3UnavailableError
 │       └── http2/            # pure-stdlib HTTP/2 transport tier (subpackage)
@@ -757,8 +761,11 @@ maintainers*, not for end-user app-building:
 It must pass the `PRINCIPLES.md` §7 scope rubric *before* any of that:
 zero-dependency gate (absolute) → file-server-lane gate → safe-default gate →
 smallness gate. Concretely: WebDAV would be a `do_PROPFIND` built with
-`xml.etree.ElementTree` (zero-dep, but deferred for smallness); QR codes and full
-Markdown **fail the zero-dependency gate** and are out — not faked, not vendored.
+`xml.etree.ElementTree` (zero-dep, but deferred for smallness); **GFM-fidelity**
+Markdown and Pygments-breadth highlighting fail the zero-dependency gate and are
+out — not faked, not vendored. What passed instead is the scoped-down version:
+`_markdown.py` / `_highlight.py`, opt-in behind `--preview`, with the boundary
+documented (`PRINCIPLES.md` §0) rather than papered over.
 
 For *embedders*, the seam is the library surface itself: build a `Config`,
 optionally subclass `ServeryHandler` to override one method, and hand the class
