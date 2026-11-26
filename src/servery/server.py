@@ -539,6 +539,7 @@ def _start_tftp(
         root_real,
         config.host,
         config.tftp_port,
+        config=config,
         allow_write=config.tftp_write,
         max_write_size=config.max_upload_size,
         max_transfers=config.max_tftp_transfers,

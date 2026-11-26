@@ -39,7 +39,8 @@ import urllib.parse
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from servery import _markdown
+from servery import _markdown, security
+from servery.config import Config
 
 # Default per-file read budget. Front matter, docstrings, and HTML <head>s live
 # in the first few KiB; this is generous for all of them.
@@ -1023,6 +1024,7 @@ def describe_directory(
     *,
     show_hidden: bool = False,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    config: Config | None = None,
     limit: int = MAX_ENTRIES,
 ) -> dict[str, Any]:
     """A JSON-ready metadata index of ``fs_dir``: one record per entry.
@@ -1034,6 +1036,10 @@ def describe_directory(
     names: list[tuple[bool, str]] = []
     with os.scandir(fs_dir) as scan:
         for entry in scan:
+            if config is not None and not security.is_contained(
+                os.path.realpath(config.directory), entry.path, config
+            ):
+                continue
             if not show_hidden and entry.name.startswith("."):
                 continue
             try:

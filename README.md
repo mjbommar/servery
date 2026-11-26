@@ -112,6 +112,16 @@ $ servery ./docs --preview --metadata       # render Markdown/code; index by tit
 - **Free-threading ready** — runs under the no-GIL builds (3.13t/3.14t); immutable config,
   no module-level mutable state.
 
+To opt into serving symlinks or paths on other filesystem devices:
+
+```sh
+servery ./public --follow-symlinks --cross-filesystems
+```
+
+Both flags default to off. Following symlinks permits targets outside the served
+root; links to a different device require both flags. See the
+[serving guide](docs/guide/serving.md) for details and migration from earlier versions.
+
 ## Install
 
 With [uv](https://docs.astral.sh/uv/) (recommended — manages Python for you):

@@ -268,6 +268,10 @@ def propfind(handler: ServeryHandler) -> None:
         names: list[str] = []
         with os.scandir(fs_path) as iterator:
             for entry in iterator:
+                if not security.is_contained(
+                    handler._server.root_real, entry.path, handler._server.config
+                ):
+                    continue
                 names.append(entry.name)
                 if len(names) > handler._server.config.max_propfind_entries:
                     handler.send_error(507, "Collection exceeds the PROPFIND entry limit")
@@ -396,7 +400,7 @@ def _destination(handler: ServeryHandler) -> str | None:
         return None
     parts = urllib.parse.urlsplit(dest)
     path = urllib.parse.unquote(parts.path)
-    return security.safe_join(handler._server.root_real, path)  # same containment as GET
+    return security.safe_join(handler._server.root_real, path, handler._server.config)
 
 
 def _transfer(handler: ServeryHandler, *, move: bool) -> None:
@@ -437,7 +441,26 @@ def _transfer(handler: ServeryHandler, *, move: bool) -> None:
             if move:
                 shutil.move(src, dst)
             elif os.path.isdir(src):
-                shutil.copytree(src, dst)
+                seen: set[tuple[int, int]] = set()
+
+                def ignore(directory: str, names: list[str]) -> list[str]:
+                    stat = os.stat(directory)
+                    seen.add((stat.st_dev, stat.st_ino))
+                    skipped = []
+                    for name in names:
+                        child = os.path.join(directory, name)
+                        if not security.is_contained(
+                            handler._server.root_real, child, handler._server.config
+                        ):
+                            skipped.append(name)
+                        elif os.path.isdir(child):
+                            child_stat = os.stat(child)
+                            identity = (child_stat.st_dev, child_stat.st_ino)
+                            if identity in seen:
+                                skipped.append(name)
+                    return skipped
+
+                shutil.copytree(src, dst, ignore=ignore)
             else:
                 shutil.copy2(src, dst)
         except OSError:  # pragma: no cover - filesystem failure mid-copy/move

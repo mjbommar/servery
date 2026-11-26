@@ -6,6 +6,31 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-11-26
+
+### Added
+
+- Opt-in `--follow-symlinks` and `--cross-filesystems` CLI flags, also available
+  as `Config.create(follow_symlinks=True, cross_filesystems=True)`. Following
+  links can expose targets outside the served root; links to another device
+  require both flags. The policy applies to HTTP file access, directory listings,
+  metadata, archives, WebDAV listings/copies/destinations, CGI script resolution,
+  and TFTP.
+- Archive traversal detects directory cycles when following symlinks, and tar
+  downloads include linked file contents instead of link entries.
+
+### Changed
+
+- Symlink traversal and filesystem device crossings are disabled by default.
+  Previously, links resolving inside the served root and filesystem crossings
+  were allowed. Existing shares using these need the corresponding opt-in flags.
+  Same-device bind mounts cannot be distinguished by device ID.
+
+### Fixed
+
+- Updated handler type annotations for the current type checker's override rules;
+  the custom HTTP request parser's runtime behavior is unchanged.
+
 ## [1.7.0] - 2026-08-12
 
 ### Added
@@ -819,7 +844,8 @@ First stable release. A zero-dependency, pure-Python HTTP file server.
 - **Free-threading** support (3.13t/3.14t), full type hints (`ty`-checked), and a
   CI gate that enforces zero runtime dependencies in the core wheel.
 
-[Unreleased]: https://github.com/mjbommar/servery/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/mjbommar/servery/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/mjbommar/servery/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/mjbommar/servery/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/mjbommar/servery/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/mjbommar/servery/compare/v1.4.0...v1.5.0

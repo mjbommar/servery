@@ -68,3 +68,25 @@ keep the safe-by-default posture described in
 
 Small, focused commits. Reference the milestone from
 [`docs/ROADMAP.md`](docs/ROADMAP.md) where relevant.
+
+## Releasing
+
+Releases are published by `.github/workflows/release.yml` when a `v*` tag is
+pushed. Update `src/servery/_version.py` (the package metadata source of truth),
+add a dated entry and comparison links to `CHANGELOG.md`, and document new CLI
+and library settings before committing. Call out changes to defaults explicitly.
+
+Run `make check`, `make build`, `uvx twine check dist/*`, and
+`uv run --group docs mkdocs build --strict`. The release workflow additionally
+checks the supported platform/interpreter matrix, installs the built wheel
+outside the checkout, and smoke-tests the single-file bundles.
+
+Push the release commit to `main`, then create and push an annotated tag matching
+the package version exactly, such as `v1.8.0`. Monitor the **Publish to PyPI**
+workflow. It publishes the wheel and sdist through PyPI trusted publishing using
+the GitHub `pypi` environment, then creates the GitHub release with `servery.py`
+and `servery.pyz`. Environment approval rules, if configured, still apply.
+
+Verify the PyPI version and GitHub release assets after the workflow succeeds.
+Never move an already published version tag or reuse a PyPI version; fix a
+published release with a new version.

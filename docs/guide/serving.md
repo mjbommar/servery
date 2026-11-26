@@ -12,8 +12,27 @@ servery ./public --port 8000
 | `directory` | current dir | what to serve |
 | `-p, --port` | `8000` | port to listen on |
 | `-b, --bind` | `127.0.0.1` | bind address (`0.0.0.0` to expose on the LAN) |
+| `--follow-symlinks` | off | follow symlinks, including targets outside the served root |
+| `--cross-filesystems` | off | allow paths on a different filesystem device |
 | `--show-hidden` | off | include dotfiles in listings |
 | `-q, --quiet` | off | suppress the request log and startup banner |
+
+## Symlinks and filesystem boundaries
+
+Symlinks and filesystem crossings are disabled by default for file access,
+listings, metadata, and archives. To serve a directory with links to other disks:
+
+```sh
+servery /srv/share --follow-symlinks --cross-filesystems
+```
+
+`--follow-symlinks` permits linked targets outside the served root, including
+writes when uploads or WebDAV writes are enabled. `--cross-filesystems` permits
+paths whose device ID differs from the root; links to another device need both
+flags. Same-device bind mounts are not distinguished by this check. Archive
+walks detect directory cycles. Library users can pass `follow_symlinks=True`
+and `cross_filesystems=True` to `Config.create()`.
+
 
 ## The directory listing
 
@@ -58,9 +77,9 @@ http://localhost:8000/photos/?archive=tar.gz
 http://localhost:8000/photos/?archive=zip
 ```
 
-Only regular files are included — symlinks are skipped, so an archive can never leak
-content outside the served tree. Archive bodies stream rather than accumulating
-in memory. For a public service, `--max-archive-streams N` can reserve only N
+Only regular files allowed by the traversal settings are included. By default,
+symlinks are skipped, preventing disclosure of content outside the served tree.
+Archive bodies stream rather than accumulating in memory. For a public service, `--max-archive-streams N` can reserve only N
 concurrent archive/selection producers per worker; excess requests receive `503`
 with `Retry-After: 1` before response headers. Keep N below `--max-workers` so
 cheap static requests retain at least one handler.

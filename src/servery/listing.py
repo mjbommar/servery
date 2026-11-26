@@ -30,7 +30,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from servery import _log
+from servery import _log, security
+from servery.config import Config
 
 _UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
 
@@ -402,6 +403,7 @@ def _scan_with_status(
     show_hidden: bool,
     max_entries: int | None = None,
     details_threshold: int | None = None,
+    config: Config | None = None,
 ) -> tuple[list[EntryInfo], bool]:
     max_entries = _MAX_SCAN_ENTRIES if max_entries is None else max_entries
     details_threshold = max_entries if details_threshold is None else details_threshold
@@ -409,6 +411,10 @@ def _scan_with_status(
     truncated = False
     with os.scandir(fs_dir) as it:
         for entry in it:
+            if config is not None and not security.is_contained(
+                os.path.realpath(config.directory), entry.path, config
+            ):
+                continue
             if not show_hidden and entry.name.startswith("."):
                 continue
             if len(entries) >= max_entries:
@@ -894,6 +900,7 @@ def render(
     meta_query: str = "",
     meta_max_bytes: int = 65536,
     preview: bool = False,
+    config: Config | None = None,
 ) -> bytes:
     """Render a directory listing page as UTF-8 bytes.
 
@@ -918,6 +925,7 @@ def render(
         show_hidden=show_hidden,
         max_entries=max_entries,
         details_threshold=details_threshold,
+        config=config,
     )
     details_limited = len(scanned) > details_threshold
     if details_limited:

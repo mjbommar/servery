@@ -77,5 +77,93 @@ class ContainmentTest(unittest.TestCase):
         )
 
 
+class TraversalPolicyTest(unittest.TestCase):
+    def test_symlinks_require_opt_in(self):
+        from servery.config import Config
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            root = str(Path(root).resolve())
+            outside = str(Path(outside).resolve())
+            target = Path(outside, "file.txt")
+            target.write_text("linked content")
+            link = Path(root, "link")
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation not permitted")
+            path = str(link / "file.txt")
+            self.assertFalse(security.is_contained(root, path, Config.create(root)))
+            self.assertTrue(
+                security.is_contained(root, path, Config.create(root, follow_symlinks=True))
+            )
+            self.assertFalse(
+                security.is_contained(root, str(target), Config.create(root, follow_symlinks=True))
+            )
+
+    def test_filesystem_crossing_requires_opt_in(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from servery.config import Config
+
+        with tempfile.TemporaryDirectory() as root:
+            root = str(Path(root).resolve())
+            child = str(Path(root, "mount", "file"))
+
+            def stat(path, **kwargs):
+                return SimpleNamespace(st_dev=1 if str(path) == root else 2, st_mode=0o100644)
+
+            default = Config.create(root)
+            enabled = Config.create(root, cross_filesystems=True)
+            with patch("servery.security.Path.stat", side_effect=stat, autospec=True):
+                self.assertFalse(security.is_contained(root, child, default))
+                self.assertTrue(security.is_contained(root, child, enabled))
+
+    def test_http_and_archives_follow_policy(self):
+        import io
+        import tarfile
+        import zipfile
+
+        from servery import archive
+        from servery.config import Config
+        from tests._harness import get_raw, serving
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            root = str(Path(root).resolve())
+            outside = str(Path(outside).resolve())
+            Path(outside, "file.txt").write_text("linked content")
+            try:
+                Path(root, "link").symlink_to(outside, target_is_directory=True)
+                Path(outside, "cycle").symlink_to(root, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation not permitted")
+            for enabled in (False, True):
+                config = Config.create(root, port=0, quiet=True, follow_symlinks=enabled)
+                with serving(config) as (host, port):
+                    response = get_raw(host, port, "/link/file.txt")
+                    self.assertIn(b"200 OK" if enabled else b"404", response)
+                    listing = get_raw(host, port, "/")
+                    self.assertEqual(b"link/" in listing, enabled)
+                output = io.BytesIO()
+                archive.stream_zip(root, "share", output, config)
+                with zipfile.ZipFile(output) as zipped:
+                    self.assertEqual("share/link/file.txt" in zipped.namelist(), enabled)
+                output = io.BytesIO()
+                archive.stream_zip_selection(root, ["link"], "share", output, config)
+                with zipfile.ZipFile(output) as zipped:
+                    self.assertEqual("share/link/file.txt" in zipped.namelist(), enabled)
+                output = io.BytesIO()
+                archive.stream_targz(root, "share", output, config)
+                output.seek(0)
+                with tarfile.open(fileobj=output, mode="r:gz") as tar:
+                    self.assertEqual("share/link/file.txt" in tar.getnames(), enabled)
+                    if enabled:
+                        member = tar.getmember("share/link/file.txt")
+                        self.assertTrue(member.isfile())
+                        extracted = tar.extractfile(member)
+                        assert extracted is not None
+                        self.assertEqual(extracted.read(), b"linked content")
+
+
 if __name__ == "__main__":
     unittest.main()

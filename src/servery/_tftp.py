@@ -31,6 +31,7 @@ import threading
 from typing import BinaryIO
 
 from servery import _log, _writecoord, security
+from servery.config import Config
 
 # Opcodes (RFC 1350 §5) and the OACK extension (RFC 2347).
 _RRQ, _WRQ, _DATA, _ACK, _ERROR, _OACK = 1, 2, 3, 4, 5, 6
@@ -283,12 +284,14 @@ class TftpServer:
         host: str,
         port: int,
         *,
+        config: Config | None = None,
         allow_write: bool = False,
         max_write_size: int = 100 * 1024 * 1024,
         max_transfers: int = 32,
         target_locks: _writecoord.TargetLocks | None = None,
         write_lock_timeout: float = 0.0,
     ) -> None:
+        self.config = config or Config.create(root_real)
         self.root_real = root_real
         self.allow_write = allow_write
         self.max_write_size = max_write_size
@@ -366,7 +369,7 @@ class TftpServer:
     # --- read (RRQ) ------------------------------------------------------
 
     def _handle_read(self, addr: tuple, filename: str, mode: str, options: dict) -> None:
-        fs_path = security.safe_join(self.root_real, filename)
+        fs_path = security.safe_join(self.root_real, filename, self.config)
         if fs_path is None:
             self._send_to(addr, _pack_error(_ERR_ACCESS, "access violation"))
             return
@@ -442,7 +445,7 @@ class TftpServer:
         if not self.allow_write:
             self._send_to(addr, _pack_error(_ERR_ACCESS, "writes are disabled"))
             return
-        fs_path = security.safe_join(self.root_real, filename)
+        fs_path = security.safe_join(self.root_real, filename, self.config)
         if fs_path is None or os.path.basename(fs_path) == "":
             self._send_to(addr, _pack_error(_ERR_ACCESS, "access violation"))
             return

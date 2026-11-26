@@ -30,6 +30,7 @@ import sys
 from pathlib import Path
 
 from servery import _body, _http1, _log, security
+from servery.config import Config
 from servery.handler import ServeryHandler
 
 # RFC 3875 §9.2 + httpoxy: request headers that must never become CGI meta-vars.
@@ -37,7 +38,9 @@ _BLOCKED_HEADERS = frozenset({"authorization", "proxy-authorization", "proxy"})
 _TIMEOUT: float = 30.0
 
 
-def resolve_script(cgi_root: str, url_path: str) -> tuple[str, str] | None:
+def resolve_script(
+    cgi_root: str, url_path: str, config: Config | None = None
+) -> tuple[str, str] | None:
     """Split ``url_path`` into (script_path, PATH_INFO) within ``cgi_root``.
 
     Returns the longest leading path that is a contained, regular file, with the
@@ -46,7 +49,7 @@ def resolve_script(cgi_root: str, url_path: str) -> tuple[str, str] | None:
     parts = security.safe_segments(url_path)
     for i in range(len(parts), 0, -1):
         candidate = os.path.join(cgi_root, *parts[:i])
-        if os.path.isfile(candidate) and security.is_contained(cgi_root, candidate):
+        if os.path.isfile(candidate) and security.is_contained(cgi_root, candidate, config):
             rest = parts[i:]
             return candidate, ("/" + "/".join(rest) if rest else "")
     return None
@@ -96,7 +99,7 @@ def run(handler: ServeryHandler) -> None:
     """Resolve + execute the CGI script for this request and relay the response."""
     handler._require_body_disposition()
     cgi_root = handler._server.cgi_root
-    resolved = resolve_script(cgi_root, handler.path)
+    resolved = resolve_script(cgi_root, handler.path, handler._server.config)
     if resolved is None:
         handler.send_error(404, "No CGI script found")
         return

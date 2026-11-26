@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import BinaryIO
 
 from servery import _compress, _conditional, _http1, ranges, security
+from servery.config import Config
 
 # CSP for servery-generated pages (listing / error): no scripts, inline styles
 # only, self forms. Served files are not given a CSP because it would break sites.
@@ -74,12 +75,13 @@ def find_contained_index(
     root_real: str,
     directory: str,
     names: tuple[str, ...],
+    config: Config | None = None,
 ) -> str | None:
     """Return the first regular index that still resolves inside ``root_real``."""
     for name in names:
         candidate = os.path.join(directory, name)  # noqa: PTH118 - OS-level path contract
         if os.path.isfile(candidate) and security.is_contained(  # noqa: PTH113
-            root_real, candidate
+            root_real, candidate, config
         ):
             return candidate
     return None

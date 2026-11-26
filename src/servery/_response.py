@@ -122,6 +122,7 @@ def build_static(
             body = listing.render(
                 fs_path,
                 display,
+                config=config,
                 show_hidden=config.show_hidden,
                 per_page=config.listing_page_size,
                 max_entries=config.max_listing_entries,

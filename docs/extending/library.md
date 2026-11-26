@@ -57,6 +57,8 @@ Config.create(
     "./public",
     host="0.0.0.0",          # --bind
     port=8000,               # --port
+    follow_symlinks=False,   # --follow-symlinks (may expose targets outside root)
+    cross_filesystems=False, # --cross-filesystems
     auth="me:secret",        # --auth
     upload=True,             # --upload
     allow_overwrite=False,   # --allow-overwrite

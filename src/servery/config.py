@@ -23,6 +23,8 @@ class Config:
     directory: Path
     host: str = "127.0.0.1"
     port: int = 8000
+    follow_symlinks: bool = False
+    cross_filesystems: bool = False
     show_hidden: bool = False
     quiet: bool = False
     tls_cert: str | None = None
@@ -176,6 +178,8 @@ class Config:
         *,
         host: str = "127.0.0.1",
         port: int = 8000,
+        follow_symlinks: bool = False,
+        cross_filesystems: bool = False,
         show_hidden: bool = False,
         quiet: bool = False,
         tls_cert: str | None = None,
@@ -428,6 +432,8 @@ class Config:
             directory=Path(directory).resolve(),
             host=host,
             port=port,
+            follow_symlinks=follow_symlinks,
+            cross_filesystems=cross_filesystems,
             show_hidden=show_hidden,
             quiet=quiet,
             tls_cert=tls_cert,

@@ -68,6 +68,27 @@ class DavMethodTest(_DavCase):
         self.assertIn(b"getlastmodified", body)
         self.assertIn(b"text/plain", body)  # real MIME type, not a hardcoded octet-stream
 
+    def test_symlink_policy_for_propfind_and_recursive_copy(self):
+        import dataclasses
+
+        with tempfile.TemporaryDirectory() as outside:
+            Path(outside, "secret.txt").write_text("linked content")
+            try:
+                (self.root / "sub" / "link").symlink_to(outside, target_is_directory=True)
+                Path(outside, "cycle").symlink_to(self.root / "sub", target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation not permitted")
+            for enabled in (False, True):
+                self.cfg = dataclasses.replace(self.cfg, follow_symlinks=enabled)
+                status, _, body = self._req("PROPFIND", "/sub/", headers={"Depth": "1"})
+                self.assertEqual(status, 207)
+                self.assertEqual(b"/sub/link" in body, enabled)
+                destination = f"/copy-{enabled}"
+                status, _, _ = self._req("COPY", "/sub/", headers={"Destination": destination})
+                self.assertEqual(status, 201)
+                copied = self.root / destination.lstrip("/") / "link" / "secret.txt"
+                self.assertEqual(copied.exists(), enabled)
+
     def test_propfind_infinity_is_bounded(self):
         status, _, body = self._req("PROPFIND", "/", headers={"Depth": "infinity"})
         self.assertEqual(status, 403)

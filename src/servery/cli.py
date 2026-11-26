@@ -93,6 +93,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="address to bind (default: 127.0.0.1; use 0.0.0.0 to expose)",
     )
     parser.add_argument(
+        "--follow-symlinks",
+        action="store_true",
+        help="follow symlinks, including targets outside the served root",
+    )
+    parser.add_argument(
+        "--cross-filesystems",
+        action="store_true",
+        help="allow access across filesystem device boundaries",
+    )
+    parser.add_argument(
         "--show-hidden",
         action="store_true",
         help="include dotfiles in listings",
@@ -613,6 +623,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         args.directory,
         host=args.host,
         port=args.port,
+        follow_symlinks=args.follow_symlinks,
+        cross_filesystems=args.cross_filesystems,
         show_hidden=args.show_hidden,
         quiet=args.quiet,
         tls_cert=args.tls_cert,

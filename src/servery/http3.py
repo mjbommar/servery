@@ -64,7 +64,7 @@ def build_response(
     """
     if method not in {"GET", "HEAD"}:
         return 405, [(b"allow", b"GET, HEAD")], b"405"
-    fs_path = security.safe_join(root_real, url_path)
+    fs_path = security.safe_join(root_real, url_path, config)
     display = url_path.split("?", 1)[0].split("#", 1)[0]
     # safe_join returns None for an escaping path; build_static maps "" to a 404.
     # HTTP/3 is always TLS, so HSTS always applies.

@@ -184,9 +184,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
     _requests_served: int = 0
     _request_limit_close: bool = False
     _version_string_cache: ClassVar[str | None] = None  # the Server header is constant
-    # Our parse_request() populates these (replacing the email-based parser).
-    headers: _RequestHeaders
-    command: str | None  # may be None on a malformed first line
+    # Our parser replaces the stdlib email parser and allows an unset method.
+    headers: _RequestHeaders  # ty: ignore[incompatible-attribute-override]
+    command: str | None  # ty: ignore[incompatible-attribute-override]
     raw_requestline: bytes
     _headers_buffer: list[bytes]
 
@@ -423,7 +423,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         fs_path = super().translate_path(path)
         # Fail closed: a path escaping the root (e.g. via a symlink) becomes the
         # empty string, which open() turns into a 404.
-        if security.is_contained(self._server.root_real, fs_path):
+        if security.is_contained(self._server.root_real, fs_path, self._server.config):
             return fs_path
         return ""
 
@@ -456,6 +456,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 self._server.root_real,
                 self._server.root_real,
                 ("index.html",),
+                config,
             )
             if index is not None:
                 return self._serve_file(index)
@@ -482,8 +483,10 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
         if self._server.config.metadata and _enabled(query.get("metadata")):
             return self._serve_directory_metadata(path, parts.path)
         # Index lookup goes through the SAME containment check as everything else:
-        # an index.html symlinked outside the root must not be served.
-        index = _static.find_contained_index(self._server.root_real, path, self.index_pages)
+        # index symlinks and device crossings must honor the configured policy.
+        index = _static.find_contained_index(
+            self._server.root_real, path, self.index_pages, self._server.config
+        )
         if index is not None:
             return self._serve_file(index)
         return self.list_directory(path)
@@ -505,7 +508,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
                 return
             writer = _ChunkedWriter(self.wfile)
             try:
-                archive.stream_zip_selection(path, names, base_name, writer)
+                archive.stream_zip_selection(path, names, base_name, writer, self._server.config)
                 writer.close()
             except OSError as exc:  # pragma: no cover - client hung up, or a file changed
                 if isinstance(lease, _work.WorkLease):
@@ -532,9 +535,9 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             writer = _ChunkedWriter(self.wfile)
             try:
                 if archive_format == "tar.gz":
-                    archive.stream_targz(path, base_name, writer)
+                    archive.stream_targz(path, base_name, writer, self._server.config)
                 else:
-                    archive.stream_zip(path, base_name, writer)
+                    archive.stream_zip(path, base_name, writer, self._server.config)
                 writer.close()
             except OSError as exc:  # pragma: no cover - client hung up, or file changed mid-walk
                 if isinstance(lease, _work.WorkLease):
@@ -678,7 +681,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             return
         dest_dir = self.translate_path(self.path)
         if not os.path.isdir(dest_dir) or not security.is_contained(
-            self._server.root_real, dest_dir
+            self._server.root_real, dest_dir, self._server.config
         ):
             self._reject_unread_body(HTTPStatus.NOT_FOUND, "Upload directory not found")
             return
@@ -751,7 +754,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             self._put_reject(HTTPStatus.CONFLICT, "Target is a directory")
             return
         if not os.path.isdir(os.path.dirname(target)) or not security.is_contained(
-            self._server.root_real, target
+            self._server.root_real, target, self._server.config
         ):
             self._put_reject(HTTPStatus.NOT_FOUND, "Upload directory not found")
             return
@@ -1192,6 +1195,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             body = listing.render(
                 os.fspath(path),
                 options.display,
+                config=config,
                 show_hidden=config.show_hidden,
                 sort=options.sort,
                 order=options.order,
@@ -1303,6 +1307,7 @@ class ServeryHandler(http.server.SimpleHTTPRequestHandler):
             document = _metadata.describe_directory(
                 path,
                 display,
+                config=config,
                 show_hidden=config.show_hidden,
                 max_bytes=config.metadata_max_bytes,
             )
