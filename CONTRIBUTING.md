@@ -76,6 +76,7 @@ pushed. Update `src/servery/_version.py` (the package metadata source of truth),
 add a dated entry and comparison links to `CHANGELOG.md`, and document new CLI
 and library settings before committing. Call out changes to defaults explicitly.
 
+Run type checks with `CI=true make type` to match CI warning handling.
 Run `make check`, `make build`, `uvx twine check dist/*`, and
 `uv run --group docs mkdocs build --strict`. The release workflow additionally
 checks the supported platform/interpreter matrix, installs the built wheel

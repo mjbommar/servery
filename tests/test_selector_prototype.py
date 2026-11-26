@@ -8,7 +8,7 @@ import os
 import socket
 import tempfile
 import unittest
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -24,7 +24,7 @@ from servery import _digest, _static, listing
 async def _running(
     directory: Path,
     policy: Policy,
-) -> AsyncIterator[tuple[str, int, Stats, asyncio.Event]]:
+) -> AsyncGenerator[tuple[str, int, Stats, asyncio.Event]]:
     loop = asyncio.get_running_loop()
     ready: asyncio.Future[tuple[str, int]] = loop.create_future()
     stop = asyncio.Event()

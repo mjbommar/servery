@@ -8,7 +8,7 @@ import http.client
 import tempfile
 import threading
 import unittest
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 
 from servery import _response, _static
@@ -27,7 +27,7 @@ _SHARED_FILE_HEADERS = (
 
 
 @contextlib.contextmanager
-def _serving(config: Config) -> Iterator[tuple[str, int]]:
+def _serving(config: Config) -> Generator[tuple[str, int]]:
     server = make_server(config)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

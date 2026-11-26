@@ -87,7 +87,7 @@ class NegotiationTest(unittest.TestCase):
 
     @unittest.skipUnless(_compress.HAVE_ZSTD, "zstd needs Python 3.14+ (compression.zstd)")
     def test_zstd_roundtrips(self):
-        from compression import zstd  # ty: ignore[unresolved-import]
+        from compression import zstd  # ty: ignore[import-not-found]
 
         data = b"servery " * 500
         self.assertEqual(zstd.decompress(_compress.zstd_bytes(data)), data)
@@ -374,7 +374,7 @@ class ZstdServerTest(_ServerCase):
         return head.lower(), body
 
     def test_compresses_text_with_zstd_when_accepted(self):
-        from compression import zstd  # ty: ignore[unresolved-import]
+        from compression import zstd  # ty: ignore[import-not-found]
 
         head, body = self._split(self._get("/page.html", accept_encoding="zstd"))
         self.assertIn(b"content-encoding: zstd", head)

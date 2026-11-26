@@ -14,7 +14,7 @@ import os
 import shutil
 import ssl
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -70,7 +70,7 @@ def _load_self_signed(config: Config, context: ssl.SSLContext) -> None:
 
 
 @contextlib.contextmanager
-def self_signed_files(config: Config) -> Iterator[tuple[str, str]]:
+def self_signed_files(config: Config) -> Generator[tuple[str, str]]:
     """Materialize an ad-hoc cert/key for consumers that require filenames."""
     from servery import _certgen
 

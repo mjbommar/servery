@@ -6,6 +6,17 @@ All notable changes to servery are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-11-26
+
+First published release of the 1.8 traversal settings below; 1.8.0 was tagged
+but its release workflow stopped before publication.
+
+### Fixed
+
+- Resolved current type-checker warnings that fail CI: generator annotations for
+  context managers, renamed import diagnostic codes, and explicit test writer
+  bases. No runtime dependency or traversal behavior changes.
+
 ## [1.8.0] - 2026-11-26
 
 ### Added
@@ -844,7 +855,8 @@ First stable release. A zero-dependency, pure-Python HTTP file server.
 - **Free-threading** support (3.13t/3.14t), full type hints (`ty`-checked), and a
   CI gate that enforces zero runtime dependencies in the core wheel.
 
-[Unreleased]: https://github.com/mjbommar/servery/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/mjbommar/servery/compare/v1.8.1...HEAD
+[1.8.1]: https://github.com/mjbommar/servery/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/mjbommar/servery/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/mjbommar/servery/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/mjbommar/servery/compare/v1.5.0...v1.6.0

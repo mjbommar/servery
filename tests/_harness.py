@@ -10,7 +10,7 @@ import logging
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 
 from servery import _log
 from servery.config import Config
@@ -32,7 +32,7 @@ class LogCapture(logging.Handler):
 
 
 @contextlib.contextmanager
-def capturing_logs(level: int = logging.DEBUG) -> Iterator[LogCapture]:
+def capturing_logs(level: int = logging.DEBUG) -> Generator[LogCapture]:
     """Attach a capturing handler to servery's logger for the duration."""
     cap = LogCapture()
     previous = _log.logger.level
@@ -56,7 +56,7 @@ def wait_for(predicate: Callable[[], object], timeout: float = 2.0) -> bool:
 
 
 @contextlib.contextmanager
-def serving(config: Config) -> Iterator[tuple[str, int]]:
+def serving(config: Config) -> Generator[tuple[str, int]]:
     """Run a server for ``config`` in a background thread; yield (host, port)."""
     httpd = make_server(config)
     host = str(httpd.server_address[0])

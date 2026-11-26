@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 
 
@@ -42,7 +42,7 @@ class TargetLocks:
                 self._entries.pop(key, None)
 
     @contextlib.contextmanager
-    def hold(self, path: str, timeout: float = 0.0) -> Iterator[bool]:
+    def hold(self, path: str, timeout: float = 0.0) -> Generator[bool]:
         """Yield whether the target lock was acquired within ``timeout``."""
         key = self._key(path)
         entry = self._borrow(key)
@@ -55,7 +55,7 @@ class TargetLocks:
             self._return(key, entry)
 
     @contextlib.contextmanager
-    def hold_many(self, paths: list[str], timeout: float = 0.0) -> Iterator[bool]:
+    def hold_many(self, paths: list[str], timeout: float = 0.0) -> Generator[bool]:
         """Acquire several targets in stable order, avoiding lock-order deadlocks."""
         unique = sorted({self._key(path) for path in paths})
         borrowed: list[tuple[str, _Entry]] = []

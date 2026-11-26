@@ -6,7 +6,7 @@ import contextlib
 import tempfile
 import threading
 import unittest
-from collections.abc import Iterator
+from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -52,7 +52,7 @@ class _Upstream(BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def upstream() -> Iterator[int]:
+def upstream() -> Generator[int]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

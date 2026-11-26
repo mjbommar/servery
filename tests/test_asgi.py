@@ -10,7 +10,7 @@ import ssl
 import threading
 import time
 import unittest
-from collections.abc import Iterator
+from collections.abc import Generator
 from typing import Any, cast
 from unittest import mock
 
@@ -44,7 +44,7 @@ def serving_asgi(
     lifespan: str = "auto",
     lifespan_timeout: float = 5.0,
     listener: socket.socket | None = None,
-) -> Iterator[tuple[str, int]]:
+) -> Generator[tuple[str, int]]:
     """Run the ASGI server for ``spec`` in a background event loop; yield (host, port)."""
     config = Config.create(
         ".",
@@ -809,7 +809,7 @@ class ResponseStateUnitTest(unittest.TestCase):
 
     def test_send_to_closing_or_failed_peer_raises_client_disconnected(self):
         async def exercise() -> None:
-            class ClosingWriter(self.Writer):
+            class ClosingWriter(ResponseStateUnitTest.Writer):
                 def is_closing(self) -> bool:
                     return True
 
@@ -821,7 +821,7 @@ class ResponseStateUnitTest(unittest.TestCase):
             with self.assertRaises(asgi.ClientDisconnectError):
                 await closing.send({"type": "http.response.start", "status": 200})
 
-            class FailedWriter(self.Writer):
+            class FailedWriter(ResponseStateUnitTest.Writer):
                 def write(self, data: bytes) -> None:
                     del data
                     raise BrokenPipeError
@@ -1100,7 +1100,7 @@ class ResponseStateUnitTest(unittest.TestCase):
         async def exercise() -> None:
             entered = asyncio.Event()
 
-            class BlockingWriter(self.Writer):
+            class BlockingWriter(ResponseStateUnitTest.Writer):
                 async def drain(self) -> None:
                     self.drains += 1
                     entered.set()
@@ -1122,7 +1122,7 @@ class ResponseStateUnitTest(unittest.TestCase):
 
     def test_blocked_streaming_drain_honors_write_timeout(self):
         async def exercise() -> None:
-            class BlockingWriter(self.Writer):
+            class BlockingWriter(ResponseStateUnitTest.Writer):
                 async def drain(self) -> None:
                     self.drains += 1
                     await asyncio.Future()

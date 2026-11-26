@@ -10,7 +10,7 @@ import struct
 import tempfile
 import threading
 import unittest
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 from unittest import mock
 
@@ -258,7 +258,7 @@ def _raw_reply(host, port, packet: bytes, timeout: float = 2.0) -> bytes:
 @contextlib.contextmanager
 def _running(
     root: str | os.PathLike[str], *, allow_write=False, max_write_size=100 * 1024 * 1024
-) -> Iterator[_tftp.TftpServer]:
+) -> Generator[_tftp.TftpServer]:
     server = _tftp.TftpServer(
         os.path.realpath(root),
         "127.0.0.1",

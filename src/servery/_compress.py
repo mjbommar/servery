@@ -20,7 +20,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 
 try:  # zstd landed in the stdlib in 3.14 (PEP 784); absent on 3.13.
-    from compression import zstd as _zstd  # ty: ignore[unresolved-import]
+    from compression import zstd as _zstd  # ty: ignore[import-not-found]
 except ImportError:  # pragma: no cover - exercised on 3.13, not the 3.14 CI default
     _zstd = None
 
